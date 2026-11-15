@@ -1,0 +1,50 @@
+schemaVersion: "0.1"
+producer: sonos-display
+
+# Sonos Display — ESP32-S3 touch-screen controller (Waveshare ESP32-S3-Touch-LCD-4.3) for the
+# Sonos speaker in the workshop: it browses the Plex library, plays music and shows the queue,
+# through the SonosController backend over HTTP and server-sent events.
+#
+# This repo introduces the FIRMWARE, not the physical device (registered in IoT Support,
+# generated as a device: instance there). Universal esp-mdm platform edges only, as PaperClock's:
+# NVS-provisioned addresses → no boundBy.
+#
+# The edge to SonosController's API is added once SonosController publishes its svc: element.
+# Its address is the device configuration key backendUrl in IoT Support, not a build setting, and
+# boundBy has no recipe for a device configuration key → it will carry no boundBy.
+
+systemSoftware:
+  - id: ss:sonos-display,d8c38ffc-5303-4be2-b0e1-4f96f88647bb
+    label: Sonos Display firmware
+    summary: >-
+      ESP-IDF firmware for a touch-screen Sonos controller (ESP32-S3, 800x480 RGB panel) that
+      plays music from the Plex library on a Sonos speaker through the SonosController backend;
+      managed over the air by IoT Support.
+    introduced: 2026-11-15
+    lifecycle: active
+    stereotype: SoftwareProduct
+    sourceRepository: git:pvginkel/SonosDisplay
+    stats:
+      mcu: esp32-s3
+      display: 800x480 RGB touch LCD
+
+relations:
+  - id: rel:sonos-display-consumes-iotsupport
+    source: ss:sonos-display,d8c38ffc-5303-4be2-b0e1-4f96f88647bb
+    target: svc:iotsupport-api,b7c5b5ba-36eb-47b8-bf7e-5c50fa1a3656
+    type: Association
+  - id: rel:sonos-display-consumes-pub-sub
+    source: ss:sonos-display,d8c38ffc-5303-4be2-b0e1-4f96f88647bb
+    target: cap:pub-sub-broker
+    type: Association
+  - id: rel:sonos-display-consumes-iam
+    source: ss:sonos-display,d8c38ffc-5303-4be2-b0e1-4f96f88647bb
+    target: cap:iam
+    type: Association
+
+  # Realizes the IoT-device capability — the selection axis for the IoT view
+  # (in-house ESP32 firmware, managed by IoTSupport).
+  - id: rel:sonos-display-realizes-iot-device
+    source: ss:sonos-display,d8c38ffc-5303-4be2-b0e1-4f96f88647bb
+    target: cap:iot-device
+    type: Realization

@@ -26,6 +26,11 @@ projects:
     test: cexec native sh -c 'cmake -S sim -B build-sim -G Ninja && cmake --build build-sim && build-sim/render --all --out build-sim/screens'
 
     lint:
+      # The architecture-as-code artifact validator, exactly as Jenkinsfile.architecture runs
+      # it, from the aac-tools toolchain. It POSTs to the architecture service, so this gate
+      # needs outbound HTTPS: it exits 2, not 1, when the service is unreachable, which is a
+      # transport failure rather than an invalid artifact.
+      - cexec aac-tools arch-validate docs/architecture/*.yaml
       # clang-format over main/ and sim/ with main/.clang-format. main/ui/fonts/ is left out:
       # tools/fonts/generate.sh writes it, so it stays as the generator emits it.
       - cexec native sh -c 'find main sim \( -name "*.c" -o -name "*.cpp" -o -name "*.h" \) ! -path "main/ui/fonts/*" -print0 | xargs -0 clang-format --style=file:main/.clang-format --dry-run --Werror'
