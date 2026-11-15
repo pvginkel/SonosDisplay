@@ -1,6 +1,7 @@
 #include "SpeakerPickerView.h"
 
 #include "Messages.h"
+#include "Shell.h"
 #include "Theme.h"
 #include "lv_support.h"
 
@@ -211,8 +212,9 @@ void SpeakerPickerView::row_clicked(lv_event_t* event) {
     const auto index = lv_obj_get_index(lv_event_get_current_target_obj(event));
 
     // The host changes the model, and the next do_update() builds the list again: not here, inside
-    // the row's own event.
+    // the row's own event. A pick of the chosen speaker changes nothing, and goes back as well.
     self->_host->choose_speaker(self->_shown.speakers[size_t(index)].id);
+    self->_shell->back();
 }
 
 void SpeakerPickerView::retry_clicked(lv_event_t* event) {

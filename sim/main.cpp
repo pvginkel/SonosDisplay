@@ -37,6 +37,9 @@ static constexpr uint32_t STEP_MS = 10;
 // long press.
 static constexpr uint32_t TAP_MS = 100;
 
+// From one of a scene's touches to the next: what the first one changed is on screen by then.
+static constexpr uint32_t TAP_INTERVAL_MS = 200;
+
 static uint32_t tick_ms;
 static const SimHost* scene_host;
 static uint32_t scene_elapsed_ms;
@@ -59,10 +62,11 @@ static void print_log(lv_log_level_t level, const char* message) {
 static void flush(lv_display_t* display, const lv_area_t*, uint8_t*) { lv_display_flush_ready(display); }
 
 static void read_touch(lv_indev_t*, lv_indev_data_t* data) {
-    const auto& tap = scene_host->get_tap();
+    const auto& taps = scene_host->get_taps();
+    const auto index = scene_elapsed_ms / TAP_INTERVAL_MS;
 
-    if (tap && scene_elapsed_ms < TAP_MS) {
-        data->point = *tap;
+    if (index < taps.size() && scene_elapsed_ms % TAP_INTERVAL_MS < TAP_MS) {
+        data->point = taps[index];
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
@@ -123,7 +127,7 @@ static bool render(const Scene& scene, lv_display_t* display, const std::filesys
     scene_host = nullptr;
 
     if (scene.check) {
-        if (const auto problem = scene.check(host)) {
+        if (const auto problem = scene.check(host, *shell)) {
             fprintf(stderr, "render: %s: %s\n", scene.name, problem);
             return false;
         }

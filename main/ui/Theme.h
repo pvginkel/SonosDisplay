@@ -15,7 +15,9 @@ public:
     static constexpr uint32_t SURFACE_PRESSED = 0x2B3038;
     static constexpr uint32_t TEXT = 0xF2F2F2;
     static constexpr uint32_t TEXT_SECONDARY = 0xA0A6AD;
+    static constexpr uint32_t TEXT_UNAVAILABLE = 0x4E545C;
     static constexpr uint32_t ACCENT = 0xE8A33D;
+    static constexpr uint32_t ACCENT_PRESSED = 0xC4862B;
 
     static constexpr int32_t PADDING = 32;
     static constexpr int32_t GAP = 16;

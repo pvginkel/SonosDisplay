@@ -3,8 +3,12 @@
 // The one LVGL screen: a content area holding a stack of views, and the "Reconnecting" marker.
 // From milestone 1 the now-playing bar sits under the content area, which is how it stays at the
 // bottom of every screen.
+//
+// It also decides which view the app opens on: now playing, or the speaker picker while the
+// display is held on it (Model::needs_speaker()).
 
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "UiHost.h"
@@ -17,6 +21,9 @@ class Shell {
     lv_obj_t* _content{};
     lv_obj_t* _marker{};
     std::vector<std::unique_ptr<View>> _views;
+    // Whether the app's first view is the speaker picker; empty until open().
+    std::optional<bool> _held;
+    bool _back_requested{};
 
 public:
     // The marker shows once the event stream has been down for this long.
@@ -39,12 +46,24 @@ public:
     // Destroys every view and shows this one.
     void replace(std::unique_ptr<View> view);
 
+    // Shows the app's first view, and from here on update() keeps it the right one: when the
+    // display becomes held on the speaker picker, or stops being, every view gives way to it.
+    void open();
+
+    // Shows the speaker picker on top of the stack.
+    void open_speaker_picker();
+
+    // Goes back to the view under the top one at the next update(), so a view may ask from inside
+    // one of its own events. Nothing happens when the top view is the only one.
+    void back() { _back_requested = true; }
+
     View* get_current() const { return _views.empty() ? nullptr : _views.back().get(); }
 
     // Called from the UI loop.
     void update();
 
 private:
+    void show_first_view();
     void create_marker();
     void update_marker();
 };

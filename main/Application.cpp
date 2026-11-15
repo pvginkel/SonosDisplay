@@ -1,6 +1,7 @@
 #include "Application.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 
 #include "api/Answers.h"
@@ -9,7 +10,6 @@
 #include "support.h"
 #include "ui/LoadingView.h"
 #include "ui/Messages.h"
-#include "ui/SpeakerPickerView.h"
 #include "ui/Theme.h"
 
 LOG_TAG(Application);
@@ -50,6 +50,40 @@ static bool is_valid_backend_url(const char* url) {
     }
 
     return *host && !strchr(host, '/');
+}
+
+// The path of a speaker's resource. The id is the backend's own text, so what a path segment
+// cannot hold as it is goes in percent-encoded.
+static std::string speaker_path(const std::string& speaker_id, const char* resource) {
+    static constexpr char HEX[] = "0123456789ABCDEF";
+
+    std::string path = "/api/speakers/";
+    for (const auto c : speaker_id) {
+        if (isalnum(uint8_t(c)) || strchr("-._~", c)) {
+            path += c;
+        } else {
+            path += '%';
+            path += HEX[uint8_t(c) >> 4];
+            path += HEX[uint8_t(c) & 0xF];
+        }
+    }
+
+    return path + resource;
+}
+
+static const char* command_name(Command command) {
+    switch (command) {
+        case Command::Play:
+            return "play";
+        case Command::Pause:
+            return "pause";
+        case Command::Next:
+            return "next";
+        case Command::Previous:
+            return "previous";
+    }
+
+    return "";
 }
 
 static esp_err_t read_speaker_choice(std::string& id) {
@@ -175,7 +209,7 @@ void Application::do_ready() {
     begin_backend();
 
     _loading_view = nullptr;
-    _shell->replace(std::make_unique<SpeakerPickerView>(this));
+    _shell->open();
 }
 
 void Application::load_speaker_choice() {
@@ -208,7 +242,10 @@ void Application::choose_speaker(const std::string& id) {
     _board->resync_panel();
 
     _model.speaker_id = id;
+    _model.playback.speaker_changed();
     model_changed();
+
+    refresh_playback();
 }
 
 void Application::refresh_speakers() {
@@ -224,6 +261,7 @@ void Application::refresh_speakers() {
 
 void Application::speakers_answered(HttpResponse&& response) {
     auto& list = _model.speakers;
+    const auto was_held = _model.needs_speaker();
 
     if (response.err == ESP_ERR_INVALID_SIZE) {
         // An answer over the client's limit, which HttpClient logged.
@@ -241,6 +279,109 @@ void Application::speakers_answered(HttpResponse&& response) {
     }
 
     model_changed();
+
+    // The chosen speaker is back in the list: what was last answered about it is from before it
+    // went.
+    if (was_held && !_model.needs_speaker()) {
+        refresh_playback();
+    }
+}
+
+void Application::refresh_playback() {
+    if (_model.speaker_id.empty()) {
+        return;
+    }
+
+    // A playback that is on screen stays there while a newer one is on its way.
+    if (_model.playback.state != LoadState::Loaded) {
+        _model.playback.state = LoadState::Loading;
+        model_changed();
+    }
+
+    // An answer about a speaker that is no longer the chosen one is dropped.
+    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, "/playback")}, _scope,
+                      [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
+                          if (speaker_id == _model.speaker_id) {
+                              playback_answered(std::move(response));
+                          }
+                      });
+}
+
+void Application::playback_answered(HttpResponse&& response) {
+    auto& playback = _model.playback;
+
+    if (response.err == ESP_ERR_INVALID_SIZE) {
+        // An answer over the client's limit, which HttpClient logged.
+        playback.state = LoadState::Failed;
+        playback.error.clear();
+    } else if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        playback.state = LoadState::Unreachable;
+        playback.error.clear();
+    } else if (const auto problem =
+                   read_playback(response.status, (const char*)response.body.get(), response.length, playback)) {
+        ESP_LOGW(TAG, "GET playback answered %d, %s: %s", response.status, problem, playback.error.c_str());
+    }
+
+    model_changed();
+}
+
+void Application::send_command(Command command) {
+    ESP_LOGI(TAG, "Sending %s", command_name(command));
+
+    _model.playback.command_sent(command);
+    model_changed();
+
+    const auto path = speaker_path(_model.speaker_id, "/playback/") + command_name(command);
+
+    // An answer about a speaker that is no longer the chosen one is dropped.
+    _api_client->send(HttpRequest{.method = HTTP_METHOD_POST, .path = path}, _scope,
+                      [this, command, speaker_id = _model.speaker_id](HttpResponse&& response) {
+                          if (speaker_id == _model.speaker_id) {
+                              command_answered(command, std::move(response));
+                          }
+                      });
+}
+
+void Application::command_answered(Command command, HttpResponse&& response) {
+    auto& playback = _model.playback;
+    std::string error;
+
+    // The speaker reports what a command changed later, as playback_changed. A command that was
+    // not taken changed nothing, so the playback is fetched again: it puts the screen right, and
+    // says which commands the speaker allows now.
+    if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        playback.command_not_taken();
+        refresh_playback();
+    } else if (const auto problem =
+                   read_command(response.status, (const char*)response.body.get(), response.length, error)) {
+        ESP_LOGW(TAG, "POST %s answered %d, %s: %s", command_name(command), response.status, problem, error.c_str());
+
+        playback.command_not_taken();
+        refresh_playback();
+    } else {
+        playback.command_taken(command);
+    }
+
+    model_changed();
+}
+
+void Application::event_received(const std::string& type, const cJSON* payload) {
+    if (type == "speakers_changed") {
+        refresh_speakers();
+    } else if (type == "playback_changed") {
+        // Sent once for every speaker of a group, so the chosen speaker's own id is the whole
+        // filter. An event that does not say whose it is may be the chosen speaker's.
+        std::string speaker_id;
+        if (const auto problem = read_speaker_event(payload, speaker_id)) {
+            ESP_LOGW(TAG, "Event %s: %s", type.c_str(), problem);
+
+            refresh_playback();
+        } else if (speaker_id == _model.speaker_id) {
+            refresh_playback();
+        }
+    }
 }
 
 void Application::begin_backend() {
@@ -266,6 +407,7 @@ void Application::begin_backend() {
 
         // Events sent while the stream was away are gone, so what the views show is fetched again.
         refresh_speakers();
+        refresh_playback();
     });
 
     _event_stream->on_disconnected([this]() {
@@ -275,16 +417,14 @@ void Application::begin_backend() {
     });
 
     // Every connection receives every event, and its payload names what changed.
-    _event_stream->on_event([this](const std::string& type, EventStream::Payload) {
-        if (type == "speakers_changed") {
-            refresh_speakers();
-        }
-    });
+    _event_stream->on_event(
+        [this](const std::string& type, EventStream::Payload payload) { event_received(type, payload.get()); });
 
     ESP_ERROR_CHECK(_event_stream->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
                                          BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
 
     refresh_speakers();
+    refresh_playback();
 }
 
 void Application::do_process() {

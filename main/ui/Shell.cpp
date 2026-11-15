@@ -1,6 +1,8 @@
 #include "Shell.h"
 
 #include "Messages.h"
+#include "NowPlayingView.h"
+#include "SpeakerPickerView.h"
 #include "Theme.h"
 #include "log.h"
 #include "lv_support.h"
@@ -79,7 +81,35 @@ void Shell::replace(std::unique_ptr<View> view) {
     push(std::move(view));
 }
 
+void Shell::open() {
+    _held = _host->get_model().needs_speaker();
+    show_first_view();
+}
+
+void Shell::show_first_view() {
+    if (*_held) {
+        replace(std::make_unique<SpeakerPickerView>(_host, this));
+    } else {
+        replace(std::make_unique<NowPlayingView>(_host, this));
+    }
+}
+
+void Shell::open_speaker_picker() { push(std::make_unique<SpeakerPickerView>(_host, this)); }
+
 void Shell::update() {
+    if (_back_requested) {
+        _back_requested = false;
+
+        if (_views.size() > 1) {
+            pop();
+        }
+    }
+
+    if (_held && *_held != _host->get_model().needs_speaker()) {
+        _held = !*_held;
+        show_first_view();
+    }
+
     if (auto current = get_current()) {
         current->update();
     }

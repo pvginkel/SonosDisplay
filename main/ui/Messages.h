@@ -18,3 +18,7 @@
 #define MSG_SPEAKERS_PICK "Pick the speaker this display controls"
 #define MSG_SPEAKERS_LOADING "Looking for speakers"
 #define MSG_SPEAKERS_EMPTY "No speaker answers the backend"
+
+#define MSG_PLAYBACK_LOADING "Asking what plays"
+#define MSG_NOTHING_PLAYING "Nothing is playing"
+#define MSG_COMMAND_NOT_TAKEN "That did not go through"
