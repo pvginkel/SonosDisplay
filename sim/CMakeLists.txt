@@ -78,8 +78,8 @@ FetchContent_MakeAvailable(cjson)
 add_library(cjson STATIC ${cjson_SOURCE_DIR}/cJSON.c)
 target_include_directories(cjson PUBLIC ${cjson_SOURCE_DIR})
 
-# main/api/ includes cJSON, the C++ standard library and ui/Model.h only: anything else is not on
-# this build's include path.
+# main/api/ includes cJSON, LVGL, the C++ standard library and ui/'s two doors only: nothing of
+# ESP-IDF is on this build's include path.
 file(GLOB UI_SOURCES CONFIGURE_DEPENDS ${UI_DIR}/*.cpp ${UI_DIR}/fonts/*.c)
 file(GLOB API_SOURCES CONFIGURE_DEPENDS ${MAIN_DIR}/api/*.cpp)
 

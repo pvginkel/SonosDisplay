@@ -1,6 +1,7 @@
 #include "NowPlayingView.h"
 
 #include <algorithm>
+#include <utility>
 
 #include "Messages.h"
 #include "Shell.h"
@@ -25,6 +26,8 @@ static constexpr int32_t NOTICE_PADDING_VER = 12;
 static constexpr uint32_t NOTICE_MS = 5000;
 static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
+
+NowPlayingView::~NowPlayingView() { drop_cover(); }
 
 void NowPlayingView::do_render(lv_obj_t* parent) {
     create_cover(parent);
@@ -55,6 +58,7 @@ void NowPlayingView::create_cover(lv_obj_t* parent) {
     lv_obj_set_style_bg_color(cover, Theme::color(Theme::SURFACE), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(cover, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(cover, Theme::RADIUS, LV_PART_MAIN);
+    _cover_tile = cover;
 
     auto placeholder = lv_label_create(cover);
     lv_label_set_text(placeholder, ICON_MUSIC);
@@ -226,6 +230,7 @@ void NowPlayingView::apply() {
     const auto& playback = model.playback;
     _revision = model.revision;
 
+    apply_cover(playback);
     apply_texts(playback);
     apply_volume(model.volume);
 
@@ -249,6 +254,57 @@ void NowPlayingView::apply() {
         _notice_since = lv_tick_get();
         lv_obj_remove_flag(_notice, LV_OBJ_FLAG_HIDDEN);
     }
+}
+
+void NowPlayingView::apply_cover(const Playback& playback) {
+    // The cover is the track's that the texts name: where they name none, the placeholder shows.
+    const auto shows_track = playback.state == LoadState::Loaded && playback.track;
+    const auto wanted = shows_track ? playback.track->artwork_id : std::string();
+    if (wanted == _cover_id) {
+        return;
+    }
+
+    drop_cover();
+
+    _cover_id = wanted;
+    if (wanted.empty()) {
+        return;
+    }
+
+    // The placeholder shows until the cover is there.
+    _cover_request = std::make_shared<int>(0);
+    _host->request_artwork(wanted, COVER_SIZE, _cover_request,
+                           [this](Artwork artwork) { show_cover(std::move(artwork)); });
+}
+
+void NowPlayingView::show_cover(Artwork artwork) {
+    // The backend did not give the cover. The placeholder stays, and the cover is asked for again
+    // when the model next changes: the tracks of an album share one.
+    if (!artwork) {
+        _cover_id.clear();
+        return;
+    }
+
+    _cover = std::move(artwork);
+
+    _cover_image = lv_image_create(_cover_tile);
+    lv_image_set_src(_cover_image, _cover.get());
+
+    // Over the placeholder, and under the notice.
+    lv_obj_move_to_index(_cover_image, 1);
+}
+
+// The widget goes before the image it draws from, and a cover still on its way is no longer
+// waited for.
+void NowPlayingView::drop_cover() {
+    _cover_request.reset();
+
+    if (_cover_image) {
+        lv_obj_delete(_cover_image);
+        _cover_image = nullptr;
+    }
+
+    _cover.reset();
 }
 
 void NowPlayingView::apply_texts(const Playback& playback) {

@@ -2,6 +2,8 @@
 
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <utility>
 
 #include "api/Answers.h"
 
@@ -102,6 +104,102 @@ void SimHost::send_command(Command command) {
     }
 
     _model.revision++;
+}
+
+void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
+                              std::function<void(Artwork)> done) {
+    _artwork.request(ArtworkRequest{
+        .artwork_id = artwork_id,
+        .size = size,
+        .scope = std::move(scope),
+        .done = std::move(done),
+    });
+}
+
+void SimHost::fetch_artwork(ArtworkRequest&& request) {
+    _artwork_fetches.push_back(ArtworkFetch{request.artwork_id, request.size});
+
+    if (_artwork_held) {
+        _held_artwork.push_back(std::move(request));
+    } else {
+        answer_artwork(request);
+    }
+}
+
+void SimHost::answer_artwork() {
+    const auto held = std::move(_held_artwork);
+    _held_artwork.clear();
+
+    for (const auto& request : held) {
+        if (!request.scope.expired()) {
+            answer_artwork(request);
+        }
+    }
+}
+
+void SimHost::answer_artwork(const ArtworkRequest& request) {
+    if (!_artwork_reachable) {
+        _artwork.unanswered(request);
+        return;
+    }
+
+    const auto status = _artwork_answer ? _artwork_answer->status : 200;
+    const auto bytes = std::make_shared<std::vector<uint8_t>>(
+        _artwork_answer ? _artwork_answer->body : make_artwork(request.artwork_id, request.size));
+
+    const auto problem = _artwork.answered(request, status, ArtworkBody(bytes, bytes->data()), bytes->size());
+    if (problem) {
+        printf("W (SimHost) GET artwork at %d px answered %d, %s\n", int(request.size), status, problem);
+    }
+}
+
+std::vector<uint8_t> SimHost::make_artwork(const std::string& artwork_id, int32_t size) {
+    static constexpr int32_t STRIPES = 8;
+
+    // FNV-1a over the id: one id, one picture.
+    uint32_t hash = 2166136261u;
+    for (const auto c : artwork_id) {
+        hash = (hash ^ uint8_t(c)) * 16777619u;
+    }
+
+    // A colour of middling brightness, and a darker shade of it.
+    const auto rgb565 = [](uint32_t r, uint32_t g, uint32_t b) {
+        return uint16_t(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+    };
+    const auto r = 64 + (hash & 0x7F);
+    const auto g = 64 + ((hash >> 8) & 0x7F);
+    const auto b = 64 + ((hash >> 16) & 0x7F);
+    const uint16_t colors[] = {rgb565(r, g, b), rgb565(r / 3, g / 3, b / 3)};
+
+    const auto stride = size * 2;
+
+    std::vector<uint8_t> image = {
+        0x19,
+        0x12,
+        0,
+        0,
+        uint8_t(size),
+        uint8_t(size >> 8),
+        uint8_t(size),
+        uint8_t(size >> 8),
+        uint8_t(stride),
+        uint8_t(stride >> 8),
+        0,
+        0,
+    };
+    image.reserve(image.size() + size_t(size) * size_t(stride));
+
+    // Diagonal stripes.
+    for (int32_t y = 0; y < size; y++) {
+        for (int32_t x = 0; x < size; x++) {
+            const auto color = colors[(x + y) * STRIPES / size % 2];
+
+            image.push_back(uint8_t(color));
+            image.push_back(uint8_t(color >> 8));
+        }
+    }
+
+    return image;
 }
 
 void SimHost::answer_speakers(int status, const char* body) {

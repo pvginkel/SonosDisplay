@@ -4,6 +4,7 @@
 #include <string>
 
 #include "ApplicationBase.h"
+#include "api/Artwork.h"
 #include "backend/EventStream.h"
 #include "backend/HttpClient.h"
 #include "board/Board.h"
@@ -25,6 +26,7 @@ class Application : public ApplicationBase, public UiHost {
     std::unique_ptr<HttpClient> _api_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
+    ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
     // The scope of the app's own requests, which lives as long as the app.
     std::shared_ptr<void> _scope{std::make_shared<int>(0)};
     int64_t _last_memory_log_ms{};
@@ -39,6 +41,8 @@ public:
     void refresh_volume() override;
     void change_volume(int step) override;
     void send_command(Command command) override;
+    void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
+                         std::function<void(Artwork)> done) override;
 
 protected:
     void do_begin() override;
@@ -56,6 +60,8 @@ private:
     void send_volume_change();
     void volume_change_answered(HttpResponse&& response);
     void command_answered(Command command, HttpResponse&& response);
+    void fetch_artwork(ArtworkRequest&& request);
+    void artwork_answered(const ArtworkRequest& request, HttpResponse&& response);
     void event_received(const std::string& type, const cJSON* payload);
     void model_changed() { _model.revision++; }
     void log_memory();

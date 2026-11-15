@@ -3,9 +3,17 @@
 // What a view may ask of the firmware. Application implements it on the device; sim/ implements
 // it on fixtures.
 
+#include <cstdint>
+#include <functional>
+#include <memory>
 #include <string>
 
 #include "Model.h"
+#include "lvgl.h"
+
+// A piece of artwork as LVGL draws it. The host keeps the image in memory for as long as a view
+// holds this, so a view holds it for exactly as long as a widget draws from it.
+using Artwork = std::shared_ptr<const lv_image_dsc_t>;
 
 class UiHost {
 public:
@@ -36,4 +44,11 @@ public:
     // Sends a transport command to the chosen speaker. A view sends only a command the playback
     // allows.
     virtual void send_command(Command command) = 0;
+
+    // Asks for the picture with this id, `size` by `size` pixels. `done` runs with it once the
+    // host has it, which is before this returns for one it has already, and may be much later:
+    // nothing is fetched while the screen is dark. It runs with nullptr when the backend did not
+    // give the picture, and not at all once `scope`, which the asker owns, has expired.
+    virtual void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
+                                 std::function<void(Artwork)> done) = 0;
 };

@@ -27,6 +27,9 @@ static constexpr uint32_t MAX_LOOP_DELAY_MS = 10;
 
 static constexpr int64_t MEMORY_LOG_INTERVAL_MS = 60 * 1000;
 
+// A 400 px cover is 320,012 bytes, over the client's limit for an API answer.
+static constexpr size_t ARTWORK_MAX_RESPONSE = 512 * 1024;
+
 static constexpr int MIN_SCREEN_OFF_SECONDS = 10;
 static constexpr int MAX_SCREEN_OFF_SECONDS = 3600;
 
@@ -52,23 +55,28 @@ static bool is_valid_backend_url(const char* url) {
     return *host && !strchr(host, '/');
 }
 
-// The path of a speaker's resource. The id is the backend's own text, so what a path segment
-// cannot hold as it is goes in percent-encoded.
-static std::string speaker_path(const std::string& speaker_id, const char* resource) {
+// An id as a path segment. It is the backend's own text, so what a path segment cannot hold as it
+// is goes in percent-encoded.
+static std::string encode_segment(const std::string& id) {
     static constexpr char HEX[] = "0123456789ABCDEF";
 
-    std::string path = "/api/speakers/";
-    for (const auto c : speaker_id) {
+    std::string segment;
+    for (const auto c : id) {
         if (isalnum(uint8_t(c)) || strchr("-._~", c)) {
-            path += c;
+            segment += c;
         } else {
-            path += '%';
-            path += HEX[uint8_t(c) >> 4];
-            path += HEX[uint8_t(c) & 0xF];
+            segment += '%';
+            segment += HEX[uint8_t(c) >> 4];
+            segment += HEX[uint8_t(c) & 0xF];
         }
     }
 
-    return path + resource;
+    return segment;
+}
+
+// The path of a speaker's resource.
+static std::string speaker_path(const std::string& speaker_id, const char* resource) {
+    return "/api/speakers/" + encode_segment(speaker_id) + resource;
 }
 
 static const char* command_name(Command command) {
@@ -462,6 +470,46 @@ void Application::command_answered(Command command, HttpResponse&& response) {
     model_changed();
 }
 
+void Application::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
+                                  std::function<void(Artwork)> done) {
+    _artwork.request(ArtworkRequest{
+        .artwork_id = artwork_id,
+        .size = size,
+        .scope = std::move(scope),
+        .done = std::move(done),
+    });
+}
+
+// Over backend_art, so a command is never queued behind a cover. The client drops the request,
+// and its answer, once the view that asked is gone or wants another cover.
+void Application::fetch_artwork(ArtworkRequest&& request) {
+    auto path =
+        "/api/artwork/" + encode_segment(request.artwork_id) + "?size=" + std::to_string(request.size) + "&format=lvgl";
+    auto scope = request.scope;
+
+    _art_client->send(HttpRequest{.path = std::move(path), .max_response = ARTWORK_MAX_RESPONSE}, std::move(scope),
+                      [this, request = std::move(request)](HttpResponse&& response) {
+                          artwork_answered(request, std::move(response));
+                      });
+}
+
+void Application::artwork_answered(const ArtworkRequest& request, HttpResponse&& response) {
+    // HttpClient logged a transport error, and an answer over the limit.
+    if (response.err != ESP_OK) {
+        _artwork.unanswered(request);
+        return;
+    }
+
+    const auto problem =
+        _artwork.answered(request, response.status, ArtworkBody(std::move(response.body)), response.length);
+    if (problem) {
+        ESP_LOGW(TAG, "GET artwork at %d px answered %d, %s", int(request.size), response.status, problem);
+    } else {
+        ESP_LOGI(TAG, "Artwork at %d px is in: %zu bytes, %zu in the cache", int(request.size), response.length,
+                 _artwork.get_cache().get_bytes());
+    }
+}
+
 void Application::event_received(const std::string& type, const cJSON* payload) {
     const auto about_playback = type == "playback_changed";
 
@@ -536,6 +584,10 @@ void Application::begin_backend() {
 
 void Application::do_process() {
     _board->process();
+
+    // Nothing is fetched for a screen nobody sees: a cover asked for in the dark comes once the
+    // screen wakes.
+    _artwork.set_screen_lit(_board->get_screen_power().is_lit());
 
     if (_shell) {
         _shell->update();

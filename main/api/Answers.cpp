@@ -131,9 +131,8 @@ static bool read_play_state(const char* name, PlayState& state) {
     return false;
 }
 
-// `source`, `shuffle`, `queue_position`, `queue_length` and a track's `duration_ms`, `artwork_id`
-// and `track_id` are not shown, so they are not read: whatever they hold, `null` included, the
-// playback is taken.
+// `source`, `shuffle`, `queue_position`, `queue_length` and a track's `duration_ms` and `track_id`
+// are not shown, so they are not read: whatever they hold, `null` included, the playback is taken.
 static const char* read_playback_fields(const cJSON* root, Playback& playback) {
     if (!cJSON_IsObject(root)) {
         return "the body is not a JSON object";
@@ -191,10 +190,17 @@ static const char* read_playback_fields(const cJSON* root, Playback& playback) {
         return "the track's album is neither a string nor null";
     }
 
+    const auto artwork_id = cJSON_GetObjectItemCaseSensitive(track, "artwork_id");
+    if (!cJSON_IsString(artwork_id) && !cJSON_IsNull(artwork_id)) {
+        return "the track's artwork_id is neither a string nor null";
+    }
+
+    // The id is opaque, and goes back to the backend as it came: it is never cut.
     playback.track = Track{
         .title = read_text(title),
         .artist = read_text(artist),
         .album = cJSON_IsString(album) ? read_text(album->valuestring) : std::string(),
+        .artwork_id = cJSON_IsString(artwork_id) ? artwork_id->valuestring : std::string(),
     };
 
     return nullptr;

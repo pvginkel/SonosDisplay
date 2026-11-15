@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@
 #include "NowPlayingView.h"
 #include "SpeakerPickerView.h"
 #include "api/Answers.h"
+#include "api/Artwork.h"
 #include "cJSON.h"
 
 // The backend's answers, in the shape the deployed backend gives them. The ids are made up: a
@@ -131,7 +133,16 @@ static const char* const UNREADABLE_PLAYBACKS[] = {
     R"({"state":"playing","actions":["pause"],"track":{"title":"Svefn-g-englar","artist":null,"album":null}})",
     R"({"state":"playing","actions":["pause"],"track":{"title":"Svefn-g-englar","artist":"Sigur Rós"}})",
     R"({"state":"playing","actions":["pause"],"track":{"title":"Svefn-g-englar","artist":"Sigur Rós","album":7}})",
+    R"({"state":"playing","actions":["pause"],"track":{"title":"Svefn-g-englar","artist":"Sigur Rós","album":null}})",
+    R"({"state":"playing","actions":["pause"],"track":{"title":"Svefn-g-englar","artist":"Sigur Rós","album":null,)"
+    R"("artwork_id":7}})",
 };
+
+// The pictures of the playing and the paused fixtures' tracks, and the size the now-playing
+// screen shows a cover at.
+static const char ARTWORK_PLAYING[] = "YXJ0d29yay9zdmVmbg";
+static const char ARTWORK_PAUSED[] = "YXJ0d29yay9yYW1lYXU";
+static constexpr int32_t COVER_SIZE = 400;
 
 // One speaker, as GET /api/speakers/{speaker_id} answers it: the Garage of the list, alone in its
 // group.
@@ -433,8 +444,34 @@ static void open_now_playing(SimHost& host, Shell& shell, const char* playback, 
     shell.open();
 }
 
-static const char* check_now_playing(const SimHost&, const Shell& shell) {
-    return shows<NowPlayingView>(shell) ? nullptr : "the display is not on the now-playing screen";
+// The cover a view holds is the loaded track's, at the screen's size, and it holds no other.
+static const char* check_cover(const SimHost& host) {
+    const auto& playback = host.get_model().playback;
+    const auto shows_track = playback.state == LoadState::Loaded && playback.track;
+    const auto wanted = shows_track ? playback.track->artwork_id : std::string();
+
+    for (const auto& fetch : host.get_artwork_fetches()) {
+        if (fetch.size != COVER_SIZE) {
+            return "a cover was fetched at another size than the screen shows it at";
+        }
+        if (fetch.artwork_id != wanted && host.is_artwork_shown(fetch.artwork_id, fetch.size)) {
+            return "the cover of another track than the loaded one is held";
+        }
+    }
+
+    if (!wanted.empty() && !host.is_artwork_shown(wanted, COVER_SIZE)) {
+        return "the loaded track's cover is not shown";
+    }
+
+    return nullptr;
+}
+
+static const char* check_now_playing(const SimHost& host, const Shell& shell) {
+    if (!shows<NowPlayingView>(shell)) {
+        return "the display is not on the now-playing screen";
+    }
+
+    return check_cover(host);
 }
 
 static void now_playing(SimHost& host, Shell& shell) {
@@ -444,8 +481,13 @@ static void now_playing(SimHost& host, Shell& shell) {
     expect(playback.play_state == PlayState::Playing, "the playing fixture does not play");
     expect(playback.can_play && playback.can_pause && playback.can_next && playback.can_previous,
            "the playing fixture's actions were not read");
-    expect(playback.track == Track{.title = "Svefn-g-englar", .artist = "Sigur Rós", .album = "Ágætis byrjun"},
+    expect(playback.track == Track{.title = "Svefn-g-englar",
+                                   .artist = "Sigur Rós",
+                                   .album = "Ágætis byrjun",
+                                   .artwork_id = ARTWORK_PLAYING},
            "the playing fixture's track was not read as it is");
+    expect(host.get_artwork_fetches() == std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}},
+           "the playing track's cover was not fetched once, at the screen's size");
 
     const auto& volume = host.get_model().volume;
     expect(volume.level == 24 && !volume.muted && volume.shown() == 24, "the speaker fixture's volume was not read");
@@ -465,13 +507,18 @@ static void now_playing_radio(SimHost& host, Shell& shell) {
     const auto& playback = host.get_model().playback;
     expect(playback.can_pause && !playback.can_next && !playback.can_previous,
            "the radio fixture's actions were not read");
-    expect(playback.track && playback.track->artist == "Český rozhlas Vltava" && playback.track->album.empty(),
+    expect(playback.track && playback.track->artist == "Český rozhlas Vltava" && playback.track->album.empty() &&
+               playback.track->artwork_id.empty(),
            "the radio fixture's track was not read as it is");
 
     host.tap(NEXT.x, NEXT.y);
 }
 
 static const char* check_radio(const SimHost& host, const Shell&) {
+    if (!host.get_artwork_fetches().empty()) {
+        return "a cover was fetched for a track that has none";
+    }
+
     return host.get_commands().empty() ? nullptr : "a control that is not live sent a command";
 }
 
@@ -630,14 +677,15 @@ static void now_playing_unreadable(SimHost& host, Shell& shell) {
     // An action the display has no control for, and fields it does not show: missing, or not what
     // the document says.
     host.answer_playback(200, R"({"state":"buffering","actions":["seek","next"],"source":7,"track":)"
-                              R"({"title":"","artist":"","album":null,"duration_ms":"long","lyrics":[]}})");
+                              R"({"title":"","artist":"","album":null,"artwork_id":null,"duration_ms":"long",)"
+                              R"("lyrics":[]}})");
     expect(playback.state == LoadState::Loaded && playback.is_playing() && playback.can_next && !playback.can_pause,
            "a playback was refused for what the display does not show");
 
     // A text is kept up to 200 bytes, and never cut inside a character.
     const auto long_title = std::string(199, 'a');
-    const auto long_body =
-        R"({"state":"paused","actions":[],"track":{"title":")" + long_title + R"(éé","artist":"","album":null}})";
+    const auto long_body = R"({"state":"paused","actions":[],"track":{"title":")" + long_title +
+                           R"(éé","artist":"","album":null,"artwork_id":null}})";
     host.answer_playback(200, long_body.c_str());
     expect(playback.track && playback.track->title == long_title, "a long title was not cut at a character");
 
@@ -985,6 +1033,334 @@ static const char* check_volume_blind(const SimHost& host, const Shell&) {
     return host.get_volume_changes() == std::vector<int>{Volume::STEP} ? nullptr : "two touches did not send one step";
 }
 
+// A cover as the backend answers it, read as the device reads it.
+static Artwork read_cover(int status, const std::vector<uint8_t>& body, int32_t size = COVER_SIZE) {
+    const auto bytes = std::make_shared<std::vector<uint8_t>>(body);
+
+    Artwork artwork;
+    const auto problem = read_artwork(status, ArtworkBody(bytes, bytes->data()), bytes->size(), size, artwork);
+    expect(!problem == (artwork != nullptr), "an answer was refused and read, or neither");
+
+    return artwork;
+}
+
+// The cache keeps what fits 1.5 MiB, four covers: the least recently used goes first, and an image
+// a view holds never.
+static void expect_cache_rules() {
+    static constexpr size_t COVER_BYTES = 12 + COVER_SIZE * COVER_SIZE * 2;
+
+    ArtworkCache cache;
+    std::map<std::string, std::weak_ptr<const lv_image_dsc_t>> images;
+
+    const auto add = [&cache, &images](const char* id) {
+        const auto cover = read_cover(200, SimHost::make_artwork(id, COVER_SIZE));
+        images[id] = cover;
+
+        return cache.add(id, COVER_SIZE, cover, COVER_BYTES);
+    };
+    const auto freed = [&images](const char* id) { return images[id].expired(); };
+    const auto use = [&cache](const char* id) { return cache.find(id, COVER_SIZE); };
+
+    expect(add("a") && add("b") && add("c") && add("d"), "four covers do not fit the cache");
+    expect(cache.get_bytes() == 4 * COVER_BYTES && !freed("a"), "the cache does not keep four covers");
+    expect(!cache.find("a", 80) && !use("z"), "the cache found an image it does not have");
+    expect(use("a") && use("b") && use("c") && use("d"), "the cache lost a cover");
+
+    // The fifth takes the place of the one used longest ago.
+    expect(add("e") && freed("a") && !freed("b"), "the least recently used cover was not the one freed");
+    expect(cache.get_bytes() == 4 * COVER_BYTES, "the cache does not count what it freed");
+
+    // A cover that was used since is no longer that one.
+    expect(use("b") && add("f") && freed("c") && !freed("b"), "a cover that was used was freed before an older one");
+
+    // A cover a view holds stays, however long ago it was used.
+    {
+        const auto held = use("d");
+        expect(use("e") && use("b") && use("f"), "the cache lost a cover");
+        expect(cache.is_pinned("d", COVER_SIZE) && !cache.is_pinned("e", COVER_SIZE), "a held cover is not pinned");
+        expect(add("g") && freed("e") && !freed("d"), "a cover on screen was freed");
+
+        // With every cover held there is no room: the new one is not kept, and nothing is freed.
+        const std::vector<Artwork> held_too = {use("g"), use("f"), use("b")};
+        expect(!add("h") && freed("h"), "a cover was kept with the cache full of covers on screen");
+        expect(!freed("d") && !freed("g") && !freed("f") && !freed("b") && cache.get_bytes() == 4 * COVER_BYTES,
+               "a cover on screen was freed");
+    }
+
+    expect(add("h") && freed("d"), "a cover no view holds any more was not freed");
+    expect(!cache.add("i", COVER_SIZE, read_cover(200, SimHost::make_artwork("i", COVER_SIZE)),
+                      ArtworkCache::MAX_BYTES + 1),
+           "an image larger than the cache was kept");
+}
+
+// Two requests for one image that are both on their way get the same image, and a later one gets
+// it from the cache.
+static void expect_one_image_for_two_requests() {
+    SimHost host;
+    host.hold_artwork();
+
+    const auto scope = std::make_shared<int>(0);
+    Artwork images[3];
+    const auto request = [&](Artwork& image) {
+        host.request_artwork(ARTWORK_PLAYING, COVER_SIZE, scope, [&image](Artwork artwork) { image = artwork; });
+    };
+
+    request(images[0]);
+    request(images[1]);
+    expect(!images[0] && !images[1], "artwork was handed over before the backend answered");
+
+    host.answer_artwork();
+    expect(images[0] && images[0] == images[1], "two requests for one image did not get the same one");
+
+    request(images[2]);
+    expect(images[2] == images[0] && host.get_artwork_fetches().size() == 2, "a cached image was fetched again");
+}
+
+// With the cache full of covers that are on screen, one more is fetched and not kept: its asker is
+// told there is none.
+static void expect_no_cover_beside_a_full_screen() {
+    SimHost host;
+
+    const auto scope = std::make_shared<int>(0);
+    std::vector<Artwork> images;
+    bool answered = false;
+    const auto request = [&](const char* id) {
+        answered = false;
+        host.request_artwork(id, COVER_SIZE, scope, [&](Artwork artwork) {
+            answered = true;
+            images.push_back(std::move(artwork));
+        });
+    };
+
+    for (const auto id : {"a", "b", "c", "d"}) {
+        request(id);
+        expect(images.back() != nullptr, "a cover that fits the cache was not handed over");
+    }
+
+    request("e");
+    expect(answered && !images.back(), "a cover was kept with the cache full of covers on screen");
+    expect(host.get_artwork_fetches().size() == 5 && host.is_artwork_shown("a", COVER_SIZE),
+           "the covers on screen did not stay");
+
+    // One of them leaves the screen, and the next cover takes its place.
+    images[0].reset();
+    request("e");
+    expect(images.back() != nullptr && !host.is_artwork_shown("a", COVER_SIZE), "a cover off screen was not freed");
+}
+
+// A view that closes takes its request with it.
+static void expect_no_cover_for_a_closed_view() {
+    SimHost host;
+    host.hold_artwork();
+
+    Shell shell(&host);
+    shell.begin(lv_display_get_default());
+
+    host.model().speaker_id = "speaker-garage";
+    host.answer_playback(200, PLAYING);
+    shell.open();
+    expect(host.get_artwork_fetches().size() == 1, "the now-playing screen did not ask for its cover");
+
+    shell.replace(std::make_unique<LoadingView>(&host, MSG_STARTING));
+    host.answer_artwork();
+    expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "a view that closed was handed its cover");
+}
+
+// Another track, with another cover: the placeholder shows while the cover is on its way, a cover
+// that is no longer wanted is not waited for, and one the display has already is not fetched again.
+static void now_playing_cover_change(SimHost& host, Shell& shell) {
+    expect_cache_rules();
+    expect_one_image_for_two_requests();
+    expect_no_cover_beside_a_full_screen();
+    expect_no_cover_for_a_closed_view();
+
+    open_now_playing(host, shell, PLAYING);
+    expect(host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the playing track's cover is not shown");
+
+    const auto shown = [&host, &shell](const char* playback) {
+        host.answer_playback(200, playback);
+        shell.update();
+
+        return check_cover(host);
+    };
+
+    // The next track's cover is on its way: the one of the track before it does not stay.
+    host.hold_artwork();
+    expect(shown(PAUSED) != nullptr, "a cover was shown before the backend answered it");
+    expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the cover of the track before stayed on screen");
+
+    // A radio stream before it arrived: the answer that comes is nobody's.
+    expect(!shown(RADIO), "a radio stream shows a cover");
+    host.answer_artwork();
+    expect(!shown(RADIO), "a cover that was no longer wanted was shown");
+
+    // Back on the first track: its cover is in the cache.
+    expect(!shown(PLAYING), "a cover the display has was not shown at once");
+    expect(host.get_artwork_fetches().size() == 2, "a cover the display has was fetched again");
+
+    // A failure hides the cover with the track, and the next answer brings both back.
+    host.answer_playback(502, ERROR_SPEAKER);
+    shell.update();
+    expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "a cover stayed on screen beside an error");
+    expect(!shown(PLAYING), "the cover did not come back with the track");
+
+    expect(shown(PAUSED) != nullptr, "a cover was shown before the backend answered it");
+    host.answer_artwork();
+}
+
+static const char* check_cover_change(const SimHost& host, const Shell&) {
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PAUSED, COVER_SIZE},
+        {ARTWORK_PAUSED, COVER_SIZE},
+    };
+    if (host.get_artwork_fetches() != fetches) {
+        return "the covers were not fetched as the tracks changed";
+    }
+
+    return check_cover(host);
+}
+
+// An image that fails its checks, or an answer that is not an image, keeps the placeholder.
+static void now_playing_cover_refused(SimHost& host, Shell& shell) {
+    static constexpr uint8_t WITNESSED_HEADER[] = {0x19, 0x12, 0, 0, 0x90, 0x01, 0x90, 0x01, 0x20, 0x03, 0, 0};
+
+    const auto good = SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE);
+    expect(good.size() == 320012 && !memcmp(good.data(), WITNESSED_HEADER, sizeof(WITNESSED_HEADER)),
+           "the generated cover is not in the form the backend answers");
+
+    const auto cover = read_cover(200, good);
+    expect(cover && cover->header.w == 400 && cover->header.h == 400 && cover->header.stride == 800 &&
+               cover->header.cf == LV_COLOR_FORMAT_RGB565 && cover->data_size == 320000,
+           "a cover in the backend's form was not read as it is");
+
+    const auto with = [&good](size_t index, uint8_t value) {
+        auto damaged = good;
+        damaged[index] = value;
+
+        return damaged;
+    };
+    const auto text = [](const char* body) { return std::vector<uint8_t>(body, body + strlen(body)); };
+
+    // The magic byte, an RGB888 image, a compressed one and another flag, a width, a height and a
+    // stride that are not the size's.
+    const std::vector<uint8_t> damaged[] = {
+        with(0, 0x18),
+        with(1, 0x0F),
+        with(2, 0x08),
+        with(3, 0x01),
+        with(4, 0x8F),
+        with(6, 0x8F),
+        with(8, 0x90),
+        with(9, 0x01),
+        std::vector<uint8_t>(good.begin(), good.end() - 1),
+        std::vector<uint8_t>(good.begin(), good.begin() + 12),
+        std::vector<uint8_t>(good.begin(), good.begin() + 11),
+        {},
+        SimHost::make_artwork(ARTWORK_PLAYING, 80),
+        text(ERROR_SPEAKER),
+        text("<html><body>502 Bad Gateway</body></html>"),
+    };
+    for (const auto& body : damaged) {
+        expect(!read_cover(200, body), "an image that fails its checks was taken");
+    }
+
+    auto longer = good;
+    longer.push_back(0);
+    expect(!read_cover(200, longer), "an image longer than its pixels was taken");
+    expect(!read_cover(200, good, 80), "an image of another size than the one asked for was taken");
+
+    // No picture has the id, the size is refused, the speaker did not give the picture.
+    expect(!read_cover(404, text(ERROR_SPEAKER_NOT_FOUND)) && !read_cover(400, text(ERROR_VALIDATION)) &&
+               !read_cover(502, text(ERROR_SPEAKER)) && !read_cover(404, good),
+           "an error status was read as an image");
+
+    const auto plays = [&host, &shell](const char* playback) {
+        host.answer_playback(200, playback);
+        shell.update();
+    };
+    const auto fetched = [&host]() { return host.get_artwork_fetches().size(); };
+
+    // An image that fails its checks: the placeholder stays, and nothing asks again by itself.
+    host.answer_artwork_with(200, with(2, 0x08));
+    open_now_playing(host, shell, PLAYING);
+    shell.update();
+    expect(fetched() == 1 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
+           "an image that fails its checks is shown, or was asked for again with nothing changed");
+
+    // The backend out of reach: the next change of what plays asked again, to no avail.
+    host.set_artwork_reachable(false);
+    plays(PLAYING);
+    expect(fetched() == 2 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
+           "a cover the backend did not give was not asked for again when what plays changed");
+
+    // The album's next track has the same cover, and brings it.
+    host.set_artwork_reachable(true);
+    host.answer_artwork_as_made();
+    plays(PLAYING_LAST);
+    expect(fetched() == 3 && host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
+           "the cover did not come with the album's next track");
+
+    // No picture has the next track's id.
+    host.answer_artwork_with(404, text(ERROR_SPEAKER_NOT_FOUND));
+    plays(PAUSED);
+}
+
+static const char* check_cover_refused(const SimHost& host, const Shell& shell) {
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PAUSED, COVER_SIZE},
+    };
+    if (host.get_artwork_fetches() != fetches) {
+        return "the covers were not asked for as the tracks changed";
+    }
+    if (host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE) || host.is_artwork_shown(ARTWORK_PAUSED, COVER_SIZE)) {
+        return "a cover is shown for a track whose picture the backend did not give";
+    }
+
+    return shows<NowPlayingView>(shell) ? nullptr : "the display is not on the now-playing screen";
+}
+
+// Nothing is fetched while the screen is dark, and the cover of what plays comes once it wakes.
+static void now_playing_cover_wake(SimHost& host, Shell& shell) {
+    host.set_screen_lit(false);
+
+    open_now_playing(host, shell, PLAYING);
+
+    const auto plays = [&host, &shell](const char* playback) {
+        host.answer_playback(200, playback);
+        shell.update();
+    };
+
+    // The screen wakes on a radio stream: the cover asked for in the dark is nobody's by then.
+    plays(RADIO);
+    expect(host.get_artwork_fetches().empty(), "artwork was fetched while the screen was dark");
+    host.set_screen_lit(true);
+    expect(host.get_artwork_fetches().empty(), "a cover that was no longer wanted was fetched when the screen woke");
+
+    // The tracks go on through the next dark: only the cover of the last one waits for the screen.
+    host.set_screen_lit(false);
+    plays(PLAYING);
+    plays(RADIO);
+    plays(PAUSED);
+    plays(PLAYING_LAST);
+    expect(host.get_artwork_fetches().empty(), "artwork was fetched while the screen was dark");
+    expect(host.count_artwork_waiting() == 1, "covers that are no longer wanted wait for the screen");
+    expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "a cover is shown that was never fetched");
+
+    host.set_screen_lit(true);
+}
+
+static const char* check_cover_wake(const SimHost& host, const Shell&) {
+    if (host.get_artwork_fetches() != std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}}) {
+        return "the cover of what plays was not fetched once when the screen woke";
+    }
+
+    return check_cover(host);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading},
@@ -1026,6 +1402,9 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-volume-refused", now_playing_volume_refused, check_volume_refused},
         {"now-playing-volume-unknown", now_playing_volume_unknown, check_volume_unknown},
         {"now-playing-volume-blind", now_playing_volume_blind, check_volume_blind},
+        {"now-playing-cover-change", now_playing_cover_change, check_cover_change},
+        {"now-playing-cover-refused", now_playing_cover_refused, check_cover_refused},
+        {"now-playing-cover-wake", now_playing_cover_wake, check_cover_wake},
     };
 
     return scenes;

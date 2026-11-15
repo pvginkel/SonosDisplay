@@ -1,10 +1,14 @@
 #pragma once
 
-// What the chosen speaker plays: the cover's place, the title, artist and album, and previous,
-// play or pause, and next, each live only while the speaker allows its command. Under them the
+// What the chosen speaker plays: the track's cover, or a drawn placeholder while there is none to
+// show, the title, artist and album, and previous, play or pause, and next, each live only while
+// the speaker allows its command. Under them the
 // volume of the speaker's group: down, the level, and up. The speaker button at the top opens the
 // speaker picker. While the playback is on its way, nothing is loaded or the backend gave none,
 // it says so instead.
+
+#include <memory>
+#include <string>
 
 #include "View.h"
 
@@ -19,6 +23,15 @@ class NowPlayingView : public View {
     uint32_t _notice_since{};
     // Whether the middle control is pause; it is play otherwise.
     bool _pause_shown{};
+    // The id of the cover that is shown or asked for; empty while the track has none, or the
+    // backend did not give it.
+    std::string _cover_id;
+    // The scope of the request for it, which ends when another cover is wanted.
+    std::shared_ptr<void> _cover_request;
+    // The cover, held while _cover_image draws from it.
+    Artwork _cover;
+    lv_obj_t* _cover_tile{};
+    lv_obj_t* _cover_image{};
     lv_obj_t* _title{};
     lv_obj_t* _artist{};
     lv_obj_t* _detail{};
@@ -35,6 +48,7 @@ class NowPlayingView : public View {
 
 public:
     NowPlayingView(UiHost* host, Shell* shell) : View(host), _shell(shell) {}
+    ~NowPlayingView() override;
 
 protected:
     void do_render(lv_obj_t* parent) override;
@@ -49,6 +63,9 @@ private:
     void create_retry(lv_obj_t* parent);
     void create_volume(lv_obj_t* parent);
     void apply();
+    void apply_cover(const Playback& playback);
+    void show_cover(Artwork artwork);
+    void drop_cover();
     void apply_texts(const Playback& playback);
     void apply_volume(const Volume& volume);
     void apply_control(lv_obj_t* control, const char* icon, bool live, bool primary, bool sending);

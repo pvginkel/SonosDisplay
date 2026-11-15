@@ -78,6 +78,10 @@ struct Track {
     // Empty where the source gives none, as a radio stream does.
     std::string album;
 
+    // The id of the track's picture, as the API gives it. Tracks with the same picture share it.
+    // Empty when there is none to show, as for a radio stream.
+    std::string artwork_id;
+
     bool operator==(const Track&) const = default;
 };
 
