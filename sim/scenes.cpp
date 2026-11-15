@@ -200,13 +200,20 @@ static void speakers_none(SimHost& host, Shell& shell) {
     shell.open();
 }
 
-// The stored speaker is not in the list: the display is held on the picker, nothing is marked,
-// and the choice stays stored.
-static void speakers_missing(SimHost& host, Shell& shell) {
-    host.model().speaker_id = "speaker-shed";
-    answer_speakers(host);
+// The Shell as the app opens it: with the stored choice, and no list answered yet.
+static void open_before_list(SimHost& host, Shell& shell, const char* speaker_id) {
+    host.model().speaker_id = speaker_id;
 
     shell.open();
+    expect(shows<NowPlayingView>(shell), "a stored choice did not open on the now-playing screen");
+}
+
+// The list that arrives lacks the stored speaker: the display leaves the now-playing screen and
+// is held on the picker, nothing is marked, and the choice stays stored.
+static void speakers_missing(SimHost& host, Shell& shell) {
+    open_before_list(host, shell, "speaker-shed");
+
+    answer_speakers(host);
 }
 
 static const char* check_missing(const SimHost& host, const Shell& shell) {
@@ -220,11 +227,10 @@ static const char* check_missing(const SimHost& host, const Shell& shell) {
 // The list lacked the stored speaker, and the backend cannot be reached since: the display stays
 // held on the picker.
 static void speakers_missing_unreachable(SimHost& host, Shell& shell) {
-    host.model().speaker_id = "speaker-shed";
+    open_before_list(host, shell, "speaker-shed");
+
     answer_speakers(host);
     host.model().speakers.state = LoadState::Unreachable;
-
-    shell.open();
 }
 
 // A touch on the third row picks its speaker.
@@ -256,13 +262,12 @@ static void speakers_loading(SimHost& host, Shell& shell) {
 // An empty list lacks the stored speaker: the display is held on the picker, and the choice
 // stays stored.
 static void speakers_empty(SimHost& host, Shell& shell) {
-    host.model().speaker_id = "speaker-library";
+    open_before_list(host, shell, "speaker-library");
+
     host.answer_speakers(200, SPEAKERS_EMPTY);
 
     const auto& list = host.get_model().speakers;
     expect(list.state == LoadState::Loaded && list.speakers.empty(), "an empty list was not read as a list");
-
-    shell.open();
 }
 
 static const char* check_empty(const SimHost& host, const Shell& shell) {
