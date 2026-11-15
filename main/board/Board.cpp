@@ -34,9 +34,9 @@ esp_err_t Board::begin() {
         _expander.begin(_i2c_bus, EXPANDER_TOUCH_RESET | EXPANDER_LCD_RESET | (lit ? EXPANDER_BACKLIGHT : 0)));
 
     // Without touch the display still shows what it should, so this is not fatal.
-    const auto touch_err = _touch.begin(_i2c_bus);
-    if (touch_err != ESP_OK) {
-        ESP_LOGE(TAG, "Touch is not available: %s", esp_err_to_name(touch_err));
+    _touch_err = _touch.begin(_i2c_bus);
+    if (_touch_err != ESP_OK) {
+        ESP_LOGE(TAG, "Touch is not available: %s", esp_err_to_name(_touch_err));
     }
 
     ESP_ERROR_RETURN(_motion_sensor.begin());
@@ -52,6 +52,14 @@ esp_err_t Board::begin() {
     _screen_power.begin(lit);
 
     return ESP_OK;
+}
+
+void Board::log_state() {
+    if (_touch_err == ESP_OK) {
+        ESP_LOGI(TAG, "Touch: GT911 at 0x%02X", _touch.get_address());
+    } else {
+        ESP_LOGE(TAG, "Touch is not available: %s", esp_err_to_name(_touch_err));
+    }
 }
 
 void Board::process() {

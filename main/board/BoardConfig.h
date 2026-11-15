@@ -75,6 +75,11 @@ constexpr uint8_t EXPANDER_LCD_RESET = 1 << 3;
 constexpr uint16_t TOUCH_ADDRESS = 0x5D;
 constexpr uint16_t TOUCH_ADDRESS_BACKUP = 0x14;
 
+// After a power-on the GT911 is held in reset until the expander's first write, and answers some
+// tens of milliseconds after it.
+constexpr int64_t TOUCH_STARTUP_TIMEOUT_MS = 500;
+constexpr uint32_t TOUCH_PROBE_INTERVAL_MS = 10;
+
 // Motion sensor on the board's "Sensor" header, active high.
 
 constexpr gpio_num_t MOTION_SENSOR_GPIO = GPIO_NUM_6;

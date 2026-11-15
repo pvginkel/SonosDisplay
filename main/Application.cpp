@@ -117,6 +117,13 @@ void Application::do_configuration_loaded(cJSON* data) {
 void Application::do_ready() {
     ApplicationBase::do_ready();
 
+    _board->log_state();
+
+    // Startup reads and writes flash (WiFi's and the PHY's data in NVS, the update and core dump
+    // checks), and each access can shift the picture until the panel is restarted. Startup is
+    // over here, so the picture is put right once now rather than at the next wake.
+    _board->resync_panel();
+
     if (_model.backend_url.empty()) {
         // No crash and no restart: the display says what is missing.
         if (_loading_view) {

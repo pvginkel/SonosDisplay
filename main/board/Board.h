@@ -17,6 +17,7 @@ class Board {
     ScreenPower _screen_power{&_expander, &_panel};
     Touch _touch{&_screen_power};
     MotionSensor _motion_sensor;
+    esp_err_t _touch_err{ESP_OK};
 
 public:
     Board() = default;
@@ -28,6 +29,12 @@ public:
 
     // Called from the UI loop.
     void process();
+
+    // Logs what begin() found, again: begin() runs before esp-mdm ships the log.
+    void log_state();
+
+    // Puts right a picture that drifted, as switching the screen on does. Up to two frames.
+    void resync_panel() { _panel.restart(); }
 
     lv_display_t* get_display() const { return _panel.get_display(); }
     ScreenPower& get_screen_power() { return _screen_power; }

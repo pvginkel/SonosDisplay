@@ -296,8 +296,15 @@ swap, no mirror, and reset and interrupt pins unset. The controller's reset line
 expander's bit 1, set high by the first expander write and never pulsed.
 
 - **Address.** The GT911 answers on `0x5D` or `0x14` depending on its interrupt line at power-on.
-  ThermostatDisplay assumed `0x5D`. `Touch` probes `0x5D` with `i2c_master_probe` and uses `0x14`
-  if nothing answers.
+  ThermostatDisplay assumed `0x5D`. `Touch` probes both with `i2c_master_probe`, every 10 ms for
+  up to 500 ms. After a real power-on the expander's outputs start low, so the GT911 leaves reset
+  only with the first expander write, just before the probe, and answers some tens of
+  milliseconds later. A probe made once, at once, found nothing after a power-on, and the first
+  display had no touch (section 3). After any other reset the expander keeps its outputs and the
+  first probe answers.
+- **Logged twice.** `Board::begin` runs before esp-mdm ships the log, so `Board::log_state`
+  repeats the touch result from `do_ready`, where it reaches IoT Support: `Touch: GT911 at 0x5D`,
+  or `Touch is not available: ...`.
 - **Reading.** The LVGL read callback calls `esp_lcd_touch_read_data` and takes one point. A
   failed read reports "released" rather than the last coordinates.
 - **Waking.** The callback asks `ScreenPower` first (section 3): a touch on a dark screen wakes
@@ -429,12 +436,28 @@ So the option is off, and the restart on wake remains. `RgbPanel::restart` waits
 from fb0 before it returns, so the backlight comes on over the current picture. The swap itself
 is made safe in section 2.
 
+**Then the drift showed.** With that update installed, the operator switched the display on and
+saw the picture shifted, until the screen went dark and woke: "It's very familiar." This is the
+drift the restart in every vblank had hidden, and startup is where it comes from. Startup reads
+and writes flash: WiFi's and the PHY's data in NVS, the update check, the core dump check. Flash
+and PSRAM share the bus, so each access holds up the panel's DMA, and the FIFO between DMA and
+panel holds 16 pixels, about a microsecond at 14 MHz. So `do_ready`, once startup is over, calls
+`Board::resync_panel` and restarts the panel once. If the frame from fb0 is one update old, it
+shows for 30 ms while the loading view gives way to the next view.
+
 What would come next if the picture drifts in use (shifted sideways until the next wake): bounce
-buffers (`bounce_buffer_size_px = 10 * 800`, 32 KB of internal RAM, a copy from PSRAM in an
-interrupt on every ten lines), which the driver restarts by itself when a frame comes up short;
-then moving WiFi's and lwIP's buffers out of PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`).
-At 14 MHz the panel uses about a fifth of what ESP-IDF's FAQ gives octal PSRAM at 80 MHz, so
-neither is expected to be needed.
+buffers. The setting is `bounce_buffer_size_px = 10 * 800`, with `CONFIG_LCD_RGB_ISR_IRAM_SAFE`,
+so the refill also runs while flash is accessed, and `CONFIG_ESP32S3_DATA_CACHE_LINE_64B`, which
+ESP-IDF's FAQ asks for in this mode. The panel's DMA then reads ten lines of internal RAM, 600 µs
+of slack instead of a microsecond, and the driver restarts by itself when a frame
+comes up short. The costs:
+
+- 32 KB of internal RAM;
+- an interrupt that copies 25 MB a second out of PSRAM, a third or more of core 0;
+- the frame-complete callback in place of the vblank as the sign that a swap took effect.
+
+The firmware itself writes flash only when the speaker choice is saved, so drift in use is not
+expected.
 
 ### Switching the backlight too fast browns the board out
 
@@ -965,14 +988,14 @@ provisioned on 2026-11-15; the results are from its log in IoT Support (Elastics
 
 | Check | Result on the first display | Fallback |
 |---|---|---|
-| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). Whether they are gone is the operator's to see | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here |
+| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). With that fixed, the picture drifted at power-on, until the next wake; startup now ends with a restart (section 3). Whether the picture stays right is the operator's to see | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here. For drift in use: bounce buffers (section 3) |
 | `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | Failed: on the S3 it pins the picture to fb0. Taken out | done: the restart on every wake remains |
-| The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | Holds. The probe's lines come before log shipping starts, 3.9 s after boot, so they are not in the log; but touch answers and the backlight is switched on and off through the expander | none needed |
+| The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | The expander holds: the backlight is switched through it. The touch controller answered at bring-up, when the board had only been reset by esptool, but not after the operator's power-ons: it was probed before it left reset. It is now probed until it answers, and the result is logged where IoT Support gets it (section 2) | none needed |
 | Touch coordinates match what is drawn, corner to corner: `PlaceholderView` draws a dot where each touch lands | Holds: the operator's "Works" at bring-up | `swap_xy` or the mirror flags of the touch configuration |
 | No brown-out reset in IoT Support's device log after a day of waking and sleeping at 240 MHz | One boot so far, `ESP_RST_POWERON`, then 7 minutes without a reset. The day is still to come | `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y` |
-| Free internal RAM at the placeholder view is above 100 KB | Holds: 152,983 bytes free, at least 141,103 since boot, flat over 7 minutes, with the event stream failing its handshake every 15 seconds | lower the UI task's stack to 12 KB; read the per-task high-water marks |
-| An OTA update from IoT Support installs and the display comes back by itself | To be read from the log of the update that carries these fixes | this is esp-mdm's path, unchanged from PaperClock |
-| The event stream reaches the deployed backend (added at bring-up) | Failed: "Connecting" on screen. The backend answered, but its certificate is the homelab CA's, and every handshake failed. The firmware now trusts that root (section 4) | `backendUrl` on plain HTTP needs the backend's ingress to stop redirecting to HTTPS |
+| Free internal RAM at the placeholder view is above 100 KB | Holds: 144,735 bytes free with the event stream connected, at least 140,011 since boot | lower the UI task's stack to 12 KB; read the per-task high-water marks |
+| An OTA update from IoT Support installs and the display comes back by itself | Holds: the display was off when `55f0ff2` was uploaded, and installed it when switched on. The install boot's own lines were not shipped before its restart, but the next boot runs `55f0ff2` with reset reason `ESP_RST_SW` and connects by itself | this is esp-mdm's path, unchanged from PaperClock |
+| The event stream reaches the deployed backend (added at bring-up) | Failed at first: "Connecting" on screen. The backend answered, but its certificate is the homelab CA's, and every handshake failed. With that root trusted (section 4), `Event stream ready` 1.5 seconds after startup, on every boot since | `backendUrl` on plain HTTP needs the backend's ingress to stop redirecting to HTTPS |
 
 Two more things from the first boot's log:
 
