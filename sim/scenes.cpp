@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "Controls.h"
 #include "LoadingView.h"
 #include "Messages.h"
 #include "NowPlayingView.h"
@@ -659,6 +660,29 @@ static const char* check_refused(const SimHost& host, const Shell&) {
     }
 
     return playback.state == LoadState::Loaded && !playback.can_next ? nullptr : "the playback was not fetched again";
+}
+
+static const char* check_refused_said(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) ? nullptr : "the now-playing screen does not say that the command was not taken";
+}
+
+// A scene that runs this long is drawn after a view has stopped saying that a command was not
+// taken.
+static constexpr uint32_t AFTER_NOTICE_MS = NOT_TAKEN_NOTICE_MS + 1000;
+
+static const char* check_refused_later(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+    if (says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the now-playing screen still says that the command was not taken";
+    }
+
+    return check_now_playing(host, shell);
 }
 
 // The first pick: from the picker the display is held on to the now-playing screen, where the
@@ -1590,6 +1614,21 @@ static const char* check_bar_refused(const SimHost& host, const Shell& shell) {
     return check_bar(host, shell);
 }
 
+// Once it has said so for a while, the bar says what plays again.
+static const char* check_bar_refused_later(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+    if (says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar still says that the command was not taken";
+    }
+    if (!says("Svefn-g-englar")) {
+        return "the bar does not say what plays again";
+    }
+
+    return check_bar(host, shell);
+}
+
 // What the bar said is said once: back on the now-playing screen it is not said again.
 static void bar_refused_back(SimHost& host, Shell& shell) {
     open_bar(host, shell, PLAYING);
@@ -1733,7 +1772,8 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-nothing", now_playing_nothing},
         {"now-playing-press", now_playing_press, check_press},
         {"now-playing-next", now_playing_next, check_next},
-        {"now-playing-refused", now_playing_refused, check_refused},
+        {"now-playing-refused", now_playing_refused, check_refused_said},
+        {"now-playing-refused-later", now_playing_refused, check_refused_later, AFTER_NOTICE_MS},
         {"now-playing-loading", now_playing_loading, check_loading},
         {"now-playing-unreachable", now_playing_unreachable, check_now_playing},
         {"now-playing-error", now_playing_error},
@@ -1763,6 +1803,7 @@ const std::vector<Scene>& get_scenes() {
         {"bar-press", bar_press, check_press},
         {"bar-next", bar_next, check_next},
         {"bar-refused", bar_refused, check_bar_refused},
+        {"bar-refused-later", bar_refused, check_bar_refused_later, AFTER_NOTICE_MS},
         {"bar-refused-back", bar_refused_back, check_bar_refused_back},
         {"bar-after-refused", bar_after_refused, check_bar_after_refused},
         {"bar-volume-up", bar_volume_up, check_volume_up},

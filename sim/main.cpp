@@ -29,7 +29,7 @@
 static constexpr int32_t WIDTH = 800;
 static constexpr int32_t HEIGHT = 480;
 
-// How long a scene runs before it is drawn, in steps of LVGL's clock.
+// How long a scene runs before it is drawn unless it says otherwise, in steps of LVGL's clock.
 static constexpr uint32_t SCENE_TIME_MS = 500;
 static constexpr uint32_t STEP_MS = 10;
 
@@ -118,8 +118,10 @@ static bool render(const Scene& scene, lv_display_t* display, const std::filesys
 
     scene.build(host, *shell);
 
+    const auto run_ms = scene.run_ms ? scene.run_ms : SCENE_TIME_MS;
+
     scene_host = &host;
-    for (scene_elapsed_ms = 0; scene_elapsed_ms < SCENE_TIME_MS; scene_elapsed_ms += STEP_MS) {
+    for (scene_elapsed_ms = 0; scene_elapsed_ms < run_ms; scene_elapsed_ms += STEP_MS) {
         tick_ms += STEP_MS;
         shell->update();
         lv_timer_handler();

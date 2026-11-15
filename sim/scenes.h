@@ -16,6 +16,10 @@ struct Scene {
 
     // Returns what is wrong once the scene has run, or nullptr. Optional.
     const char* (*check)(const SimHost& host, const Shell& shell);
+
+    // How long the scene runs before it is drawn, in milliseconds of LVGL's clock, where it needs
+    // longer than the render gives every scene. Optional.
+    uint32_t run_ms;
 };
 
 const std::vector<Scene>& get_scenes();
