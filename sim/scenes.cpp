@@ -133,11 +133,81 @@ static const char* const UNREADABLE_PLAYBACKS[] = {
     R"({"state":"playing","actions":["pause"],"track":{"title":"Svefn-g-englar","artist":"Sigur Rós","album":7}})",
 };
 
+// One speaker, as GET /api/speakers/{speaker_id} answers it: the Garage of the list, alone in its
+// group.
+static const char SPEAKER[] =
+    R"({"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"muted":false,"volume":24},)"
+    R"("id":"speaker-garage","model":"Play:3","muted":false,"name":"Garage","volume":24})";
+
+// A speaker of a group of two: the group's volume and mute are not its own.
+static const char SPEAKER_GROUPED[] =
+    R"({"group":{"coordinator_id":"speaker-library","member_ids":["speaker-library","speaker-bathroom"],)"
+    R"("muted":false,"volume":31},"id":"speaker-library","model":"Playbase","muted":true,"name":"Bibliothèque",)"
+    R"("volume":35})";
+
+static const char SPEAKER_MUTED[] =
+    R"({"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"muted":true,"volume":24},)"
+    R"("id":"speaker-garage","model":"Play:3","muted":true,"name":"Garage","volume":24})";
+
+static const char SPEAKER_LOUDEST[] =
+    R"({"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"muted":false,"volume":100},)"
+    R"("id":"speaker-garage","model":"Play:3","muted":false,"name":"Garage","volume":100})";
+
+static const char ERROR_SPEAKER_NOT_FOUND[] =
+    R"({"code":"SPEAKER_NOT_FOUND","correlationId":"8a41d0c7-5e2b-4f39-b6a8-1c9e7d3f2a50",)"
+    R"("details":{"message":"The requested resource could not be found"},)"
+    R"("error":"No speaker has the id speaker-garage"})";
+
+// Speakers the API's document does not allow.
+static const char* const UNREADABLE_SPEAKERS[] = {
+    "",
+    "<html><body>502 Bad Gateway</body></html>",
+    R"({"group":{"volume":24,)",
+    "null",
+    "[]",
+    R"({"id":"speaker-garage","name":"Garage","volume":24,"muted":false})",
+    R"({"group":null})",
+    R"({"group":[24,false]})",
+    R"({"group":{"muted":false}})",
+    R"({"group":{"volume":null,"muted":false}})",
+    R"({"group":{"volume":"24","muted":false}})",
+    R"({"group":{"volume":24.5,"muted":false}})",
+    R"({"group":{"volume":-1,"muted":false}})",
+    R"({"group":{"volume":101,"muted":false}})",
+    R"({"group":{"volume":1e30,"muted":false}})",
+    R"({"group":{"volume":24}})",
+    R"({"group":{"volume":24,"muted":null}})",
+    R"({"group":{"volume":24,"muted":0}})",
+};
+
+// What a change of the group's volume is answered with: the volume and the mute after it.
+static const char VOLUME_26[] = R"({"muted":false,"volume":26})";
+static const char VOLUME_34[] = R"({"muted":false,"volume":34})";
+
+// Answers to a change that the API's document does not allow.
+static const char* const UNREADABLE_VOLUMES[] = {
+    "",
+    "<html><body>502 Bad Gateway</body></html>",
+    R"({"volume":26,)",
+    "null",
+    "[26,false]",
+    R"({"muted":false})",
+    R"({"volume":null,"muted":false})",
+    R"({"volume":"26","muted":false})",
+    R"({"volume":26.5,"muted":false})",
+    R"({"volume":-1,"muted":false})",
+    R"({"volume":101,"muted":false})",
+    R"({"volume":26})",
+    R"({"volume":26,"muted":"no"})",
+};
+
 // Where the now-playing screen's controls are.
 static constexpr lv_point_t SPEAKER_BUTTON = {488, 56};
-static constexpr lv_point_t PLAY_PAUSE = {612, 412};
-static constexpr lv_point_t NEXT = {724, 412};
-static constexpr lv_point_t TRY_AGAIN = {612, 420};
+static constexpr lv_point_t PLAY_PAUSE = {612, 324};
+static constexpr lv_point_t NEXT = {724, 324};
+static constexpr lv_point_t TRY_AGAIN = {612, 332};
+static constexpr lv_point_t VOLUME_DOWN = {492, 420};
+static constexpr lv_point_t VOLUME_UP = {732, 420};
 
 // Where the speaker picker's first two rows are.
 static constexpr lv_point_t FIRST_SPEAKER = {400, 163};
@@ -351,12 +421,14 @@ static void speakers_reconnecting(SimHost& host, Shell& shell) {
 }
 
 // The now-playing screen as the app opens it: a speaker chosen that the list has, and a playback
-// answered.
-static void open_now_playing(SimHost& host, Shell& shell, const char* playback) {
+// and the speaker answered.
+static void open_now_playing(SimHost& host, Shell& shell, const char* playback, const char* speaker = SPEAKER) {
     host.model().speaker_id = "speaker-garage";
     answer_speakers(host);
     host.answer_playback(200, playback);
     expect(host.get_model().playback.state == LoadState::Loaded, "the playback fixture was not read as a playback");
+    host.answer_volume(200, speaker);
+    expect(host.get_model().volume.is_known(), "the speaker fixture was not read as a speaker");
 
     shell.open();
 }
@@ -374,6 +446,9 @@ static void now_playing(SimHost& host, Shell& shell) {
            "the playing fixture's actions were not read");
     expect(playback.track == Track{.title = "Svefn-g-englar", .artist = "Sigur Rós", .album = "Ágætis byrjun"},
            "the playing fixture's track was not read as it is");
+
+    const auto& volume = host.get_model().volume;
+    expect(volume.level == 24 && !volume.muted && volume.shown() == 24, "the speaker fixture's volume was not read");
 }
 
 static void now_playing_paused(SimHost& host, Shell& shell) {
@@ -504,6 +579,9 @@ static const char* check_loading(const SimHost& host, const Shell& shell) {
     if (host.get_model().playback.state != LoadState::Loading) {
         return "the pick did not ask for the playback";
     }
+    if (host.get_model().volume.state != LoadState::Loading) {
+        return "the pick did not ask for the volume";
+    }
 
     return check_now_playing(host, shell);
 }
@@ -513,6 +591,7 @@ static void now_playing_unreachable(SimHost& host, Shell& shell) {
     host.model().speaker_id = "speaker-garage";
     host.model().speakers.state = LoadState::Unreachable;
     host.model().playback.state = LoadState::Unreachable;
+    host.model().volume.state = LoadState::Unreachable;
 
     shell.open();
 }
@@ -582,11 +661,12 @@ static void now_playing_unreadable(SimHost& host, Shell& shell) {
     shell.open();
 }
 
-// A touch on "Try again" asks for the playback again.
+// A touch on "Try again" asks for the playback and the volume again.
 static void now_playing_retry(SimHost& host, Shell& shell) {
     host.model().speaker_id = "speaker-garage";
     answer_speakers(host);
     host.model().playback.state = LoadState::Unreachable;
+    host.model().volume.state = LoadState::Unreachable;
 
     shell.open();
 
@@ -594,6 +674,10 @@ static void now_playing_retry(SimHost& host, Shell& shell) {
 }
 
 static const char* check_playback_retry(const SimHost& host, const Shell&) {
+    if (host.get_model().volume.state != LoadState::Loading) {
+        return "the touch did not ask for the volume again";
+    }
+
     return host.get_model().playback.state == LoadState::Loading ? nullptr : "the touch did not ask again";
 }
 
@@ -637,6 +721,7 @@ static const char* check_same_speaker(const SimHost& host, const Shell& shell) {
 static void now_playing_other_speaker(SimHost& host, Shell& shell) {
     open_now_playing(host, shell, PLAYING);
     host.answer_next_playback(200, RADIO);
+    host.answer_next_volume(200, SPEAKER_GROUPED);
 
     host.tap(SPEAKER_BUTTON.x, SPEAKER_BUTTON.y);
     host.tap(SECOND_SPEAKER.x, SECOND_SPEAKER.y);
@@ -651,8 +736,253 @@ static const char* check_other_speaker(const SimHost& host, const Shell& shell) 
     if (!model.playback.track || model.playback.track->artist != "Český rozhlas Vltava") {
         return "the pick did not fetch what the speaker plays";
     }
+    if (!model.volume.is_known() || model.volume.level != 31 || model.volume.muted) {
+        return "the pick did not fetch the volume of the speaker's group";
+    }
 
     return check_now_playing(host, shell);
+}
+
+// A touch on up shows in the level at once, and the backend's answer leaves it showing.
+static void now_playing_volume_up(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+    host.answer_volume_changes(200, VOLUME_26);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_up(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_changes() != std::vector<int>{Volume::STEP}) {
+        return "the touch did not send one step up";
+    }
+
+    return volume.level == 26 && volume.shown() == 26 && !volume.is_changing() ? nullptr
+                                                                               : "the level is not the one answered";
+}
+
+// A burst of presses: one change is on its way, and the presses since wait to go as one. The
+// level shows where they lead.
+static void now_playing_volume_burst(SimHost& host, Shell& shell) {
+    // Five presses on up and one on down while the first is on its way are one change after it,
+    // and the level ends where they led.
+    {
+        SimHost burst;
+        burst.answer_volume(200, SPEAKER);
+
+        for (auto i = 0; i < 5; i++) {
+            burst.change_volume(Volume::STEP);
+        }
+        burst.change_volume(-Volume::STEP);
+
+        const auto& volume = burst.get_model().volume;
+        expect(burst.get_volume_changes() == std::vector<int>{2}, "a burst sent more than its first press");
+        expect(volume.shown() == 32, "a burst does not show the level pressed to");
+
+        // An answer from before the change, which a volume_changed fetched, leaves the presses
+        // showing.
+        burst.answer_volume(200, SPEAKER);
+        expect(volume.shown() == 32, "a level answered during a burst dropped the presses");
+
+        burst.answer_volume_change(200, VOLUME_26);
+        expect(burst.get_volume_changes() == std::vector<int>{2, 6}, "the presses of a burst did not go as one change");
+        expect(volume.shown() == 32, "the level moved while the burst's second change was on its way");
+
+        burst.answer_volume_change(200, R"({"muted":false,"volume":32})");
+        expect(burst.get_volume_changes().size() == 2 && !volume.is_changing() && volume.level == 32,
+               "a burst did not end at the level pressed to");
+
+        // Presses that cancel each other send nothing.
+        burst.change_volume(Volume::STEP);
+        burst.change_volume(Volume::STEP);
+        burst.change_volume(-Volume::STEP);
+        burst.answer_volume_change(200, VOLUME_34);
+        expect(burst.get_volume_changes().size() == 3 && !volume.is_changing(), "cancelled presses sent a change");
+
+        // The speaker's own answer is the level, whatever the presses led to.
+        burst.change_volume(Volume::STEP);
+        burst.answer_volume_change(200, R"({"muted":true,"volume":50})");
+        expect(volume.shown() == 50 && volume.muted, "the answer to a change is not the level shown");
+    }
+
+    // The level stays within 0 to 100, and no press goes past either end.
+    {
+        Volume volume;
+        std::string error;
+        const auto answer = [&volume, &error](const char* body) {
+            return read_volume_change(200, body, strlen(body), volume, error);
+        };
+        expect(!answer(R"({"muted":false,"volume":3})") && volume.shown() == 3, "the answer to a change was not read");
+
+        volume.pressed(-Volume::STEP);
+        volume.pressed(-Volume::STEP);
+        expect(volume.shown() == 0 && volume.waiting == -3, "the level went under 0");
+        expect(!volume.allows(-Volume::STEP) && volume.allows(Volume::STEP), "down is live at 0");
+        expect(volume.next_change() == -3 && !volume.next_change(), "a second change went while one was on its way");
+
+        expect(!answer(R"({"muted":false,"volume":99})"), "the answer to a change was not read");
+        volume.change_taken();
+        volume.pressed(Volume::STEP);
+        expect(volume.shown() == 100 && volume.waiting == 1, "the level went over 100");
+        expect(volume.allows(-Volume::STEP) && !volume.allows(Volume::STEP), "up is live at 100");
+    }
+
+    open_now_playing(host, shell, PLAYING);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_burst(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_changes() != std::vector<int>{Volume::STEP}) {
+        return "two touches did not send one change";
+    }
+    if (volume.sending != Volume::STEP || volume.waiting != Volume::STEP) {
+        return "the second touch does not wait for the first one's answer";
+    }
+
+    return volume.shown() == 28 ? nullptr : "the level is not the one pressed to";
+}
+
+// The group is muted: the level shows as not in effect.
+static void now_playing_volume_muted(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PAUSED, SPEAKER_MUTED);
+
+    expect(host.get_model().volume.muted, "the muted fixture is not muted");
+
+    // The group's volume and mute are shown, not the speaker's own.
+    Volume volume;
+    std::string error;
+    expect(!read_speaker_volume(200, SPEAKER_GROUPED, strlen(SPEAKER_GROUPED), volume, error) && volume.level == 31 &&
+               !volume.muted,
+           "the group's volume was not read");
+}
+
+// At the top of the range up is unavailable, and a touch on it sends nothing.
+static void now_playing_volume_limit(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING, SPEAKER_LOUDEST);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_limit(const SimHost& host, const Shell&) {
+    return host.get_volume_changes().empty() ? nullptr : "up sent a change at the top of the range";
+}
+
+// A change the backend refuses: the screen says it was not taken, the presses since are dropped,
+// and the volume fetched again shows.
+static void now_playing_volume_refused(SimHost& host, Shell& shell) {
+    // Anything but a 200 with a volume is a change not taken, and leaves the level as it was.
+    Volume volume;
+    std::string error;
+    expect(!read_speaker_volume(200, SPEAKER, strlen(SPEAKER), volume, error), "the speaker fixture was not read");
+    expect(read_volume_change(502, ERROR_SPEAKER, strlen(ERROR_SPEAKER), volume, error) &&
+               error.starts_with("The speaker Garage did not answer"),
+           "a 502 was not read as a change refused");
+    expect(read_volume_change(400, ERROR_VALIDATION, strlen(ERROR_VALIDATION), volume, error) && error.empty(),
+           "a bare array was not read as a change refused");
+    expect(read_volume_change(204, "", 0, volume, error), "a 204 was read as a change taken");
+    for (const auto body : UNREADABLE_VOLUMES) {
+        expect(read_volume_change(200, body, strlen(body), volume, error) && error.empty(),
+               "an unreadable answer to a change was not refused");
+        expect(read_volume_change(502, body, strlen(body), volume, error) && error.empty(),
+               "an unreadable error body gave a message");
+    }
+    expect(volume.is_known() && volume.level == 24, "a change refused changed the level");
+
+    volume.pressed(-Volume::STEP);
+    expect(volume.next_change() == -Volume::STEP, "a press did not go");
+    volume.pressed(-Volume::STEP);
+    volume.change_not_taken();
+    expect(!volume.is_changing() && volume.shown() == 24 && volume.changes_not_taken == 1,
+           "a change refused left presses waiting");
+
+    open_now_playing(host, shell, PLAYING);
+    host.answer_volume_changes(502, ERROR_SPEAKER);
+    host.answer_next_volume(200, SPEAKER_MUTED);
+
+    host.tap(VOLUME_DOWN.x, VOLUME_DOWN.y);
+}
+
+static const char* check_volume_refused(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_changes() != std::vector<int>{-Volume::STEP}) {
+        return "the touch did not send one step down";
+    }
+    if (volume.changes_not_taken != 1 || volume.is_changing()) {
+        return "the refused change does not count as not taken";
+    }
+
+    return volume.is_known() && volume.muted ? nullptr : "the volume was not fetched again";
+}
+
+// Error bodies that are not the envelope, and answers that are not a speaker: each leaves the
+// level unknown, and the last one answered in place. What the document allows is taken, whatever
+// the display does not show holds.
+static void now_playing_volume_unknown(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+
+    const auto& volume = host.get_model().volume;
+
+    for (const auto body : UNREADABLE_SPEAKERS) {
+        host.answer_volume(200, SPEAKER);
+        host.answer_volume(200, body);
+        expect(volume.state == LoadState::Failed && volume.level == 24, "an unreadable speaker was not refused");
+
+        host.answer_volume(502, body);
+        expect(volume.state == LoadState::Failed, "an unreadable error body was read as a speaker");
+    }
+
+    host.answer_volume(200, R"({"group":{"volume":0,"muted":true,"member_ids":7},"id":null,"volume":"loud"})");
+    expect(volume.is_known() && volume.level == 0 && volume.muted,
+           "a speaker was refused for what the display does not show");
+
+    std::string error;
+    Volume gone;
+    expect(read_speaker_volume(404, ERROR_SPEAKER_NOT_FOUND, strlen(ERROR_SPEAKER_NOT_FOUND), gone, error) &&
+               error == "No speaker has the id speaker-garage" && gone.state == LoadState::Failed,
+           "a 404 was not read as a failure");
+
+    host.answer_volume(400, ERROR_VALIDATION);
+    expect(volume.state == LoadState::Failed, "a bare array was not read as a failure");
+}
+
+static const char* check_volume_unknown(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    return volume.allows(Volume::STEP) && volume.allows(-Volume::STEP) ? nullptr
+                                                                       : "an unknown level leaves no press to make";
+}
+
+// The level could not be fetched: a touch on up sends one step without it, and nothing more goes
+// until that one is answered. The answer brings the level.
+static void now_playing_volume_blind(SimHost& host, Shell& shell) {
+    {
+        SimHost blind;
+        blind.model().volume.state = LoadState::Unreachable;
+
+        blind.change_volume(-Volume::STEP);
+        expect(!blind.get_model().volume.allows(Volume::STEP) && !blind.get_model().volume.allows(-Volume::STEP),
+               "a second step can go while the level is unknown");
+
+        blind.answer_volume_change(200, VOLUME_26);
+        expect(blind.get_volume_changes() == std::vector<int>{-Volume::STEP} && blind.get_model().volume.shown() == 26,
+               "the answer to a step did not bring the level");
+    }
+
+    open_now_playing(host, shell, PLAYING);
+    host.model().volume.state = LoadState::Unreachable;
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_blind(const SimHost& host, const Shell&) {
+    return host.get_volume_changes() == std::vector<int>{Volume::STEP} ? nullptr : "two touches did not send one step";
 }
 
 const std::vector<Scene>& get_scenes() {
@@ -689,6 +1019,13 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-speakers", now_playing_speakers, check_speakers_open},
         {"now-playing-same-speaker", now_playing_same_speaker, check_same_speaker},
         {"now-playing-other-speaker", now_playing_other_speaker, check_other_speaker},
+        {"now-playing-volume-up", now_playing_volume_up, check_volume_up},
+        {"now-playing-volume-burst", now_playing_volume_burst, check_volume_burst},
+        {"now-playing-volume-muted", now_playing_volume_muted},
+        {"now-playing-volume-limit", now_playing_volume_limit, check_volume_limit},
+        {"now-playing-volume-refused", now_playing_volume_refused, check_volume_refused},
+        {"now-playing-volume-unknown", now_playing_volume_unknown, check_volume_unknown},
+        {"now-playing-volume-blind", now_playing_volume_blind, check_volume_blind},
     };
 
     return scenes;

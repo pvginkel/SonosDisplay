@@ -26,6 +26,13 @@ public:
     // Asks the backend again for what the chosen speaker plays.
     virtual void refresh_playback() = 0;
 
+    // Asks the backend again for the volume of the chosen speaker's group.
+    virtual void refresh_volume() = 0;
+
+    // Turns the volume of the chosen speaker's group down, by a negative step, or up. A view
+    // sends only a step the volume allows.
+    virtual void change_volume(int step) = 0;
+
     // Sends a transport command to the chosen speaker. A view sends only a command the playback
     // allows.
     virtual void send_command(Command command) = 0;

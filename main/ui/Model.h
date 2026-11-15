@@ -166,6 +166,103 @@ private:
     }
 };
 
+// The volume of the chosen speaker's group, and the rules by which presses change it.
+struct Volume {
+    // What one press changes the level by.
+    static constexpr int STEP = 2;
+
+    static constexpr int MAX_LEVEL = 100;
+
+    // The largest step the API takes in one change.
+    static constexpr int MAX_CHANGE = 100;
+
+    LoadState state{LoadState::Loading};
+
+    // The level, 0 to MAX_LEVEL, and the mute the backend last answered, which a later failure
+    // leaves in place. The level is known while the state is Loaded.
+    int level{};
+    bool muted{};
+
+    // The step on its way to the backend; 0 while none is.
+    int sending{};
+
+    // The steps pressed since that one was sent. They go as one change once it is answered, so
+    // at most one change is on its way however many presses there were.
+    int waiting{};
+
+    // How many changes were not taken: the backend answered an error, or did not answer. A view
+    // says so once for each.
+    uint32_t changes_not_taken{};
+
+    bool is_known() const { return state == LoadState::Loaded; }
+
+    bool is_changing() const { return sending || waiting; }
+
+    // The level the presses lead to, which a view shows while the level is known.
+    int shown() const { return std::clamp(level + sending + waiting, 0, MAX_LEVEL); }
+
+    // Whether a press on down, a negative step, or on up does anything. While the level is on its
+    // way nothing does. While it could not be fetched one step goes without it: the answer to a
+    // change carries the level.
+    bool allows(int step) const {
+        switch (state) {
+            case LoadState::Loading:
+                return false;
+            case LoadState::Loaded:
+                return step > 0 ? shown() < MAX_LEVEL : shown() > 0;
+            case LoadState::Unreachable:
+            case LoadState::Failed:
+                return !sending;
+        }
+
+        return false;
+    }
+
+    // A press on down or up, which the level shows from here on. next_change() says what to send
+    // for it.
+    void pressed(int step) {
+        if (is_known()) {
+            const auto from = shown();
+            waiting += std::clamp(from + step, 0, MAX_LEVEL) - from;
+        } else {
+            waiting = step;
+        }
+    }
+
+    // The change to send now: the steps that wait, once none is on its way. It is on its way
+    // from here on.
+    std::optional<int> next_change() {
+        if (sending || !waiting) {
+            return std::nullopt;
+        }
+
+        sending = std::clamp(waiting, -MAX_CHANGE, MAX_CHANGE);
+        waiting = 0;
+
+        return sending;
+    }
+
+    // The backend took the change, and its answer is the level.
+    void change_taken() { sending = 0; }
+
+    // The backend answered the change with an error, or did not answer. The steps that wait are
+    // dropped with it, and the host fetches the volume again, which puts the level right.
+    void change_not_taken() {
+        sending = 0;
+        waiting = 0;
+        changes_not_taken++;
+    }
+
+    // Another speaker is chosen: nothing is known of its volume. The count goes on, so a view
+    // does not take the change for one that was not taken.
+    void speaker_changed() {
+        const auto not_taken = changes_not_taken;
+
+        *this = {};
+        changes_not_taken = not_taken;
+    }
+};
+
 struct Model {
     // Bumped by the host on every change, so a view redraws only when something changed.
     uint32_t revision{};
@@ -188,6 +285,12 @@ struct Model {
 
     // What the chosen speaker plays.
     Playback playback;
+
+    // The volume of the chosen speaker's group.
+    Volume volume;
+
+    // How many commands and volume changes were not taken.
+    uint32_t not_taken() const { return playback.commands_not_taken + volume.changes_not_taken; }
 
     // Whether the display is held on the speaker picker: no speaker is chosen, or the last list
     // the backend answered lacks the chosen one. A list that was never answered holds nothing.

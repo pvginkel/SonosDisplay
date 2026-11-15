@@ -242,6 +242,72 @@ const char* read_command(int status, const char* body, size_t length, std::strin
     return "not a 204";
 }
 
+// A volume and its mute, which a speaker's group and the answer to a change both hold.
+static const char* read_volume_fields(const cJSON* object, Volume& volume) {
+    const auto level = cJSON_GetObjectItemCaseSensitive(object, "volume");
+    if (!cJSON_IsNumber(level) || level->valuedouble != level->valueint || level->valueint < 0 ||
+        level->valueint > Volume::MAX_LEVEL) {
+        return "volume is not a whole number from 0 to 100";
+    }
+
+    const auto muted = cJSON_GetObjectItemCaseSensitive(object, "muted");
+    if (!cJSON_IsBool(muted)) {
+        return "muted is not a boolean";
+    }
+
+    volume.state = LoadState::Loaded;
+    volume.level = level->valueint;
+    volume.muted = cJSON_IsTrue(muted);
+
+    return nullptr;
+}
+
+// The speaker's own `volume` and `muted`, its `id`, `name` and `model` and its group's members
+// are not shown here, so they are not read.
+const char* read_speaker_volume(int status, const char* body, size_t length, Volume& volume, std::string& error) {
+    const auto root = parse(body, length);
+    const char* problem;
+
+    if (status != 200) {
+        error = read_error(root.get());
+        problem = "not a 200";
+    } else {
+        error.clear();
+
+        if (!cJSON_IsObject(root.get())) {
+            problem = "the body is not a JSON object";
+        } else if (const auto group = cJSON_GetObjectItemCaseSensitive(root.get(), "group"); !cJSON_IsObject(group)) {
+            problem = "group is not an object";
+        } else {
+            problem = read_volume_fields(group, volume);
+        }
+    }
+
+    if (problem) {
+        volume.state = LoadState::Failed;
+    }
+
+    return problem;
+}
+
+const char* read_volume_change(int status, const char* body, size_t length, Volume& volume, std::string& error) {
+    const auto root = parse(body, length);
+
+    if (status != 200) {
+        error = read_error(root.get());
+
+        return "not a 200";
+    }
+
+    error.clear();
+
+    if (!cJSON_IsObject(root.get())) {
+        return "the body is not a JSON object";
+    }
+
+    return read_volume_fields(root.get(), volume);
+}
+
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id) {
     if (!cJSON_IsObject(payload)) {
         return "the payload is not a JSON object";

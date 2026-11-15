@@ -36,6 +36,8 @@ public:
     void choose_speaker(const std::string& id) override;
     void refresh_speakers() override;
     void refresh_playback() override;
+    void refresh_volume() override;
+    void change_volume(int step) override;
     void send_command(Command command) override;
 
 protected:
@@ -50,6 +52,9 @@ private:
     void load_speaker_choice();
     void speakers_answered(HttpResponse&& response);
     void playback_answered(HttpResponse&& response);
+    void volume_answered(HttpResponse&& response);
+    void send_volume_change();
+    void volume_change_answered(HttpResponse&& response);
     void command_answered(Command command, HttpResponse&& response);
     void event_received(const std::string& type, const cJSON* payload);
     void model_changed() { _model.revision++; }

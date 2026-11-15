@@ -10,6 +10,9 @@
 #define ICON_SKIP_NEXT "\xF3\xB0\x92\xAD"  // U+F04AD
 #define ICON_SKIP_PREVIOUS "\xF3\xB0\x92\xAE"  // U+F04AE
 #define ICON_VOLUME_HIGH "\xF3\xB0\x95\xBE"  // U+F057E
+#define ICON_VOLUME_OFF "\xF3\xB0\x96\x81"  // U+F0581
+#define ICON_MINUS "\xF3\xB0\x8D\xB4"  // U+F0374
+#define ICON_PLUS "\xF3\xB0\x90\x95"  // U+F0415
 #define ICON_SPEAKER "\xF3\xB0\x93\x83"  // U+F04C3
 #define ICON_CHECK "\xF3\xB0\x84\xAC"  // U+F012C
 #define ICON_PLAYLIST_MUSIC "\xF3\xB0\xB2\xB8"  // U+F0CB8

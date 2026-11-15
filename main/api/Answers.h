@@ -29,5 +29,14 @@ const char* read_playback(int status, const char* body, size_t length, Playback&
 // what the backend said went wrong, where it said so.
 const char* read_command(int status, const char* body, size_t length, std::string& error);
 
+// Reads the answer to GET /api/speakers/{speaker_id} into `volume`: Loaded with the level and the
+// mute of the speaker's group, or Failed, which leaves the last level answered in place. `error`
+// is what the backend said went wrong, where it said so.
+const char* read_speaker_volume(int status, const char* body, size_t length, Volume& volume, std::string& error);
+
+// Reads the answer to a change of the group's volume, which is a 200 with the level and the mute
+// after the change: `volume` is Loaded with them. Any other answer leaves `volume` as it is.
+const char* read_volume_change(int status, const char* body, size_t length, Volume& volume, std::string& error);
+
 // Reads the payload of an event that names a speaker into `speaker_id`.
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id);

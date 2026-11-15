@@ -6,6 +6,9 @@ pause F03E4
 skip_next F04AD
 skip_previous F04AE
 volume_high F057E
+volume_off F0581
+minus F0374
+plus F0415
 speaker F04C3
 check F012C
 playlist_music F0CB8

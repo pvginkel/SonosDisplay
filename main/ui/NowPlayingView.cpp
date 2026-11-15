@@ -18,6 +18,8 @@ static constexpr int32_t TITLE_LINES = 2;
 static constexpr int32_t ERROR_LINES = 2;
 static constexpr int32_t CONTROL_SIZE = 88;
 static constexpr int32_t BUTTON_HEIGHT = 72;
+static constexpr int32_t VOLUME_SIZE = 72;
+static constexpr int32_t VOLUME_LEVEL_GAP = 8;
 static constexpr int32_t NOTICE_PADDING_HOR = 20;
 static constexpr int32_t NOTICE_PADDING_VER = 12;
 static constexpr uint32_t NOTICE_MS = 5000;
@@ -38,9 +40,10 @@ void NowPlayingView::do_render(lv_obj_t* parent) {
     create_texts(column);
     create_controls(column);
     create_retry(column);
+    create_volume(column);
 
     // A command that was not taken before this view opened is not said by it.
-    _not_taken_said = _host->get_model().playback.commands_not_taken;
+    _not_taken_said = _host->get_model().not_taken();
 
     apply();
 }
@@ -126,21 +129,21 @@ void NowPlayingView::create_controls(lv_obj_t* parent) {
     lv_obj_set_flex_flow(_controls, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_controls, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    _previous = create_control(_controls);
-    _play_pause = create_control(_controls);
-    _next = create_control(_controls);
+    _previous = create_control(_controls, CONTROL_SIZE, Theme::FONT_ICON_LARGE, control_clicked);
+    _play_pause = create_control(_controls, CONTROL_SIZE, Theme::FONT_ICON_LARGE, control_clicked);
+    _next = create_control(_controls, CONTROL_SIZE, Theme::FONT_ICON_LARGE, control_clicked);
 }
 
-lv_obj_t* NowPlayingView::create_control(lv_obj_t* parent) {
+lv_obj_t* NowPlayingView::create_control(lv_obj_t* parent, int32_t size, const lv_font_t* font, lv_event_cb_t clicked) {
     auto control = lv_container_create(parent);
-    lv_obj_set_size(control, CONTROL_SIZE, CONTROL_SIZE);
+    lv_obj_set_size(control, size, size);
     lv_obj_add_flag(control, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_opa(control, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(control, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_add_event_cb(control, control_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(control, clicked, LV_EVENT_CLICKED, this);
 
     auto icon = lv_label_create(control);
-    lv_obj_set_style_text_font(icon, Theme::FONT_ICON_LARGE, LV_PART_MAIN);
+    lv_obj_set_style_text_font(icon, font, LV_PART_MAIN);
     lv_obj_center(icon);
 
     return control;
@@ -158,6 +161,28 @@ void NowPlayingView::create_retry(lv_obj_t* parent) {
     lv_obj_set_style_text_font(label, Theme::FONT_TITLE, LV_PART_MAIN);
     lv_obj_set_style_text_color(label, Theme::color(Theme::BACKGROUND), LV_PART_MAIN);
     lv_obj_center(label);
+}
+
+void NowPlayingView::create_volume(lv_obj_t* parent) {
+    auto row = lv_container_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), VOLUME_SIZE);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    _volume_down = create_control(row, VOLUME_SIZE, Theme::FONT_ICON, volume_clicked);
+
+    auto level = lv_container_create(row);
+    lv_obj_set_style_pad_column(level, VOLUME_LEVEL_GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(level, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(level, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    _volume_icon = lv_label_create(level);
+    lv_obj_set_style_text_font(_volume_icon, Theme::FONT_ICON, LV_PART_MAIN);
+
+    _volume_level = lv_label_create(level);
+    lv_obj_set_style_text_font(_volume_level, Theme::FONT_TITLE, LV_PART_MAIN);
+
+    _volume_up = create_control(row, VOLUME_SIZE, Theme::FONT_ICON, volume_clicked);
 }
 
 void NowPlayingView::do_update() {
@@ -202,6 +227,7 @@ void NowPlayingView::apply() {
     _revision = model.revision;
 
     apply_texts(playback);
+    apply_volume(model.volume);
 
     // Without an answer the commands the speaker allows are not known: asking again is all there
     // is to do.
@@ -218,8 +244,8 @@ void NowPlayingView::apply() {
                   loaded && playback.allows(_pause_shown ? Command::Pause : Command::Play), true, false);
     apply_control(_next, ICON_SKIP_NEXT, loaded && playback.can_next, false, playback.sending == Command::Next);
 
-    if (playback.commands_not_taken != _not_taken_said) {
-        _not_taken_said = playback.commands_not_taken;
+    if (model.not_taken() != _not_taken_said) {
+        _not_taken_said = model.not_taken();
         _notice_since = lv_tick_get();
         lv_obj_remove_flag(_notice, LV_OBJ_FLAG_HIDDEN);
     }
@@ -264,6 +290,38 @@ void NowPlayingView::apply_texts(const Playback& playback) {
 
     set_text(_artist, artist, Theme::FONT_BODY, 1);
     set_text(_detail, detail, Theme::FONT_BODY, detail_lines);
+}
+
+void NowPlayingView::apply_volume(const Volume& volume) {
+    apply_control(_volume_down, ICON_MINUS, volume.allows(-Volume::STEP), false, false);
+    apply_control(_volume_up, ICON_PLUS, volume.allows(Volume::STEP), false, false);
+
+    const auto known = volume.is_known();
+    const auto muted = known && volume.muted;
+
+    // A press shows in the level at once, and in its colour until the backend has answered.
+    auto icon_color = Theme::TEXT_SECONDARY;
+    auto level_color = Theme::TEXT;
+    if (!known) {
+        icon_color = Theme::TEXT_UNAVAILABLE;
+        level_color = Theme::TEXT_UNAVAILABLE;
+    } else if (muted) {
+        icon_color = Theme::ACCENT;
+        level_color = Theme::TEXT_UNAVAILABLE;
+    }
+    if (volume.is_changing()) {
+        level_color = Theme::ACCENT;
+    }
+
+    lv_label_set_text(_volume_icon, muted ? ICON_VOLUME_OFF : ICON_VOLUME_HIGH);
+    lv_obj_set_style_text_color(_volume_icon, Theme::color(icon_color), LV_PART_MAIN);
+
+    if (known) {
+        lv_label_set_text_fmt(_volume_level, "%d", volume.shown());
+    } else {
+        lv_label_set_text(_volume_level, MSG_VOLUME_UNKNOWN);
+    }
+    lv_obj_set_style_text_color(_volume_level, Theme::color(level_color), LV_PART_MAIN);
 }
 
 void NowPlayingView::apply_control(lv_obj_t* control, const char* icon, bool live, bool primary, bool sending) {
@@ -311,4 +369,12 @@ void NowPlayingView::retry_clicked(lv_event_t* event) {
     auto self = (NowPlayingView*)lv_event_get_user_data(event);
 
     self->_host->refresh_playback();
+    self->_host->refresh_volume();
+}
+
+void NowPlayingView::volume_clicked(lv_event_t* event) {
+    auto self = (NowPlayingView*)lv_event_get_user_data(event);
+    const auto control = lv_event_get_current_target_obj(event);
+
+    self->_host->change_volume(control == self->_volume_up ? Volume::STEP : -Volume::STEP);
 }

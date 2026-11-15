@@ -243,9 +243,11 @@ void Application::choose_speaker(const std::string& id) {
 
     _model.speaker_id = id;
     _model.playback.speaker_changed();
+    _model.volume.speaker_changed();
     model_changed();
 
     refresh_playback();
+    refresh_volume();
 }
 
 void Application::refresh_speakers() {
@@ -284,6 +286,7 @@ void Application::speakers_answered(HttpResponse&& response) {
     // went.
     if (was_held && !_model.needs_speaker()) {
         refresh_playback();
+        refresh_volume();
     }
 }
 
@@ -321,6 +324,98 @@ void Application::playback_answered(HttpResponse&& response) {
     } else if (const auto problem =
                    read_playback(response.status, (const char*)response.body.get(), response.length, playback)) {
         ESP_LOGW(TAG, "GET playback answered %d, %s: %s", response.status, problem, playback.error.c_str());
+    }
+
+    model_changed();
+}
+
+void Application::refresh_volume() {
+    if (_model.speaker_id.empty()) {
+        return;
+    }
+
+    // A level that is on screen stays there while a newer one is on its way.
+    if (_model.volume.state != LoadState::Loaded) {
+        _model.volume.state = LoadState::Loading;
+        model_changed();
+    }
+
+    // An answer about a speaker that is no longer the chosen one is dropped.
+    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, "")}, _scope,
+                      [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
+                          if (speaker_id == _model.speaker_id) {
+                              volume_answered(std::move(response));
+                          }
+                      });
+}
+
+void Application::volume_answered(HttpResponse&& response) {
+    auto& volume = _model.volume;
+    std::string error;
+
+    if (response.err == ESP_ERR_INVALID_SIZE) {
+        // An answer over the client's limit, which HttpClient logged.
+        volume.state = LoadState::Failed;
+    } else if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        volume.state = LoadState::Unreachable;
+    } else if (const auto problem = read_speaker_volume(response.status, (const char*)response.body.get(),
+                                                        response.length, volume, error)) {
+        ESP_LOGW(TAG, "GET speaker answered %d, %s: %s", response.status, problem, error.c_str());
+    }
+
+    model_changed();
+}
+
+void Application::change_volume(int step) {
+    _model.volume.pressed(step);
+    model_changed();
+
+    send_volume_change();
+}
+
+// backend_api runs one request at a time, and its queue drops a request when it is full. So at
+// most one change of the volume is in it: the presses made while one is on its way go as one
+// change when it is answered, and a transport command waits for that one change at most.
+void Application::send_volume_change() {
+    const auto delta = _model.volume.next_change();
+    if (!delta) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Sending a volume step of %d", *delta);
+
+    // A step, not a level: the speaker takes it from the volume it has, which may not be the one
+    // on screen. An answer about a speaker that is no longer the chosen one is dropped.
+    _api_client->send(HttpRequest{.method = HTTP_METHOD_POST,
+                                  .path = speaker_path(_model.speaker_id, "/group/volume"),
+                                  .body = "{\"delta\":" + std::to_string(*delta) + "}"},
+                      _scope, [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
+                          if (speaker_id == _model.speaker_id) {
+                              volume_change_answered(std::move(response));
+                          }
+                      });
+}
+
+void Application::volume_change_answered(HttpResponse&& response) {
+    auto& volume = _model.volume;
+    std::string error;
+
+    // Whether the speaker moved for a change that was not taken is not known, so the level is
+    // fetched again.
+    if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        volume.change_not_taken();
+        refresh_volume();
+    } else if (const auto problem = read_volume_change(response.status, (const char*)response.body.get(),
+                                                       response.length, volume, error)) {
+        ESP_LOGW(TAG, "POST group/volume answered %d, %s: %s", response.status, problem, error.c_str());
+
+        volume.change_not_taken();
+        refresh_volume();
+    } else {
+        volume.change_taken();
+        send_volume_change();
     }
 
     model_changed();
@@ -368,18 +463,28 @@ void Application::command_answered(Command command, HttpResponse&& response) {
 }
 
 void Application::event_received(const std::string& type, const cJSON* payload) {
+    const auto about_playback = type == "playback_changed";
+
     if (type == "speakers_changed") {
         refresh_speakers();
-    } else if (type == "playback_changed") {
+
+        // A speaker that joined or left the chosen speaker's group changed the group's volume.
+        refresh_volume();
+    } else if (about_playback || type == "volume_changed") {
         // Sent once for every speaker of a group, so the chosen speaker's own id is the whole
         // filter. An event that does not say whose it is may be the chosen speaker's.
         std::string speaker_id;
-        if (const auto problem = read_speaker_event(payload, speaker_id)) {
+        const auto problem = read_speaker_event(payload, speaker_id);
+        if (problem) {
             ESP_LOGW(TAG, "Event %s: %s", type.c_str(), problem);
+        }
 
-            refresh_playback();
-        } else if (speaker_id == _model.speaker_id) {
-            refresh_playback();
+        if (problem || speaker_id == _model.speaker_id) {
+            if (about_playback) {
+                refresh_playback();
+            } else {
+                refresh_volume();
+            }
         }
     }
 }
@@ -408,6 +513,7 @@ void Application::begin_backend() {
         // Events sent while the stream was away are gone, so what the views show is fetched again.
         refresh_speakers();
         refresh_playback();
+        refresh_volume();
     });
 
     _event_stream->on_disconnected([this]() {
@@ -425,6 +531,7 @@ void Application::begin_backend() {
 
     refresh_speakers();
     refresh_playback();
+    refresh_volume();
 }
 
 void Application::do_process() {
