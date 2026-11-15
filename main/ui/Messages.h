@@ -10,12 +10,11 @@
 
 #define MSG_RECONNECTING "Reconnecting"
 
-#define MSG_PLACEHOLDER "Ready. The music controls arrive with the next firmware."
-#define MSG_PLACEHOLDER_TOUCH "Touch the screen: a dot marks where each touch lands."
-#define MSG_BACKEND "Backend"
-#define MSG_CONNECTION "Connection"
-#define MSG_FIRMWARE "Firmware"
-#define MSG_DISPLAY "Display"
-#define MSG_STREAM_CONNECTING "Connecting"
-#define MSG_STREAM_CONNECTED "Connected"
-#define MSG_STREAM_DISCONNECTED "Not reachable"
+#define MSG_BACKEND_UNREACHABLE "The backend cannot be reached"
+#define MSG_BACKEND_FAILED "The backend answered an error"
+#define MSG_TRY_AGAIN "Try again"
+
+#define MSG_SPEAKERS "Speakers"
+#define MSG_SPEAKERS_PICK "Pick the speaker this display controls"
+#define MSG_SPEAKERS_LOADING "Looking for speakers"
+#define MSG_SPEAKERS_EMPTY "No speaker answers the backend"

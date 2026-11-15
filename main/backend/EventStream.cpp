@@ -2,7 +2,6 @@
 
 #include <algorithm>
 
-#include "esp_crt_bundle.h"
 #include "esp_random.h"
 #include "strformat.h"
 #include "support.h"
@@ -14,7 +13,10 @@ static constexpr uint32_t RECONNECT_DELAYS_MS[] = {1000, 2000, 4000, 8000, 15000
 
 EventStream::EventStream(Queue* ui_queue) : _ui_queue(ui_queue) {}
 
-esp_err_t EventStream::begin(const std::string& base_url, uint32_t stack_size, UBaseType_t priority, BaseType_t core) {
+esp_err_t EventStream::begin(const std::string& base_url, const char* root_certificate, uint32_t stack_size,
+                             UBaseType_t priority, BaseType_t core) {
+    _root_certificate = root_certificate;
+
     // Made once per boot and reused on every reconnect: the server closes an older stream with
     // the same id.
     std::string request_id;
@@ -69,7 +71,7 @@ void EventStream::connect_and_read() {
     esp_http_client_config_t config{};
     config.url = _url.c_str();
     config.timeout_ms = CONNECT_TIMEOUT_MS;
-    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.cert_pem = _root_certificate;
 
     _client = esp_http_client_init(&config);
     if (!_client) {

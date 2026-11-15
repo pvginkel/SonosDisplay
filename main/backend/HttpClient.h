@@ -46,6 +46,7 @@ class HttpClient {
     Queue* _ui_queue;
     const char* _name;
     std::string _base_url;
+    const char* _root_certificate{};
     QueueHandle_t _jobs{};
     esp_http_client_handle_t _client{};
     int64_t _last_used_ms{};
@@ -62,8 +63,11 @@ public:
     HttpClient(const HttpClient&) = delete;
     HttpClient& operator=(const HttpClient&) = delete;
 
-    // `base_url` is scheme, host and optional port, with no trailing slash.
-    esp_err_t begin(const std::string& base_url, uint32_t stack_size, UBaseType_t priority, BaseType_t core);
+    // `base_url` is scheme, host and optional port, with no trailing slash. `root_certificate` is
+    // the PEM of the one root an https:// server's certificate is verified against; the client
+    // keeps the pointer.
+    esp_err_t begin(const std::string& base_url, const char* root_certificate, uint32_t stack_size,
+                    UBaseType_t priority, BaseType_t core);
 
     // Queues a request. `done` runs on the UI task. `scope` is owned by the caller, in practice
     // the view that asked: once it has expired, the request is dropped and `done` is not called.

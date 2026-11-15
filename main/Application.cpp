@@ -3,12 +3,13 @@
 #include <algorithm>
 #include <cstring>
 
-#include "esp_app_desc.h"
+#include "api/Answers.h"
 #include "esp_heap_caps.h"
+#include "nvs.h"
 #include "support.h"
 #include "ui/LoadingView.h"
 #include "ui/Messages.h"
-#include "ui/PlaceholderView.h"
+#include "ui/SpeakerPickerView.h"
 #include "ui/Theme.h"
 
 LOG_TAG(Application);
@@ -29,6 +30,14 @@ static constexpr int64_t MEMORY_LOG_INTERVAL_MS = 60 * 1000;
 static constexpr int MIN_SCREEN_OFF_SECONDS = 10;
 static constexpr int MAX_SCREEN_OFF_SECONDS = 3600;
 
+// Where the speaker choice is stored: not in esp-mdm's namespace, whose unknown keys are deleted
+// when provisioning data is renewed.
+static constexpr char SPEAKER_NVS_NAMESPACE[] = "sonos";
+static constexpr char SPEAKER_NVS_KEY[] = "speaker";
+
+// certs/homelab-root.pem, which main/CMakeLists.txt embeds with a NUL after its last byte.
+extern const char homelab_root_pem[] asm("_binary_homelab_root_pem_start");
+
 // scheme://host[:port], no path and no trailing slash: what the model's schema requires.
 static bool is_valid_backend_url(const char* url) {
     const char* host;
@@ -43,7 +52,41 @@ static bool is_valid_backend_url(const char* url) {
     return *host && !strchr(host, '/');
 }
 
-Application::Application(Board* board) : _board(board) { _model.firmware_version = esp_app_get_description()->version; }
+static esp_err_t read_speaker_choice(std::string& id) {
+    nvs_handle_t handle;
+    auto err = nvs_open(SPEAKER_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    DEFER(nvs_close(handle));
+
+    // The length counts the NUL after the id.
+    size_t length = 0;
+    err = nvs_get_str(handle, SPEAKER_NVS_KEY, nullptr, &length);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    std::string value(length, 0);
+    ESP_ERROR_RETURN(nvs_get_str(handle, SPEAKER_NVS_KEY, value.data(), &length));
+    value.resize(length - 1);
+
+    id = std::move(value);
+
+    return ESP_OK;
+}
+
+static esp_err_t write_speaker_choice(const std::string& id) {
+    nvs_handle_t handle;
+    ESP_ERROR_RETURN(nvs_open(SPEAKER_NVS_NAMESPACE, NVS_READWRITE, &handle));
+    DEFER(nvs_close(handle));
+
+    ESP_ERROR_RETURN(nvs_set_str(handle, SPEAKER_NVS_KEY, id.c_str()));
+
+    return nvs_commit(handle);
+}
+
+Application::Application(Board* board) : _board(board) {}
 
 void Application::do_begin() {
     ESP_LOGI(TAG, "Starting the UI task");
@@ -55,6 +98,8 @@ void Application::do_begin() {
 
 void Application::run() {
     Theme::begin(_board->get_display());
+
+    load_speaker_choice();
 
     _shell = std::make_unique<Shell>(this);
     _shell->begin(_board->get_display());
@@ -78,11 +123,6 @@ void Application::do_configuration_loaded(cJSON* data) {
     ApplicationBase::do_configuration_loaded(data);
 
     // esp-mdm frees the JSON when this returns, so what is needed is copied out.
-
-    auto device_name = cJSON_GetObjectItemCaseSensitive(data, "deviceName");
-    if (cJSON_IsString(device_name) && device_name->valuestring) {
-        _model.device_name = device_name->valuestring;
-    }
 
     auto backend_url = cJSON_GetObjectItemCaseSensitive(data, "backendUrl");
     if (cJSON_IsString(backend_url) && backend_url->valuestring && is_valid_backend_url(backend_url->valuestring)) {
@@ -135,7 +175,72 @@ void Application::do_ready() {
     begin_backend();
 
     _loading_view = nullptr;
-    _shell->replace(std::make_unique<PlaceholderView>(this));
+    _shell->replace(std::make_unique<SpeakerPickerView>(this));
+}
+
+void Application::load_speaker_choice() {
+    const auto err = read_speaker_choice(_model.speaker_id);
+
+    // Neither the namespace nor the key exists before the first pick.
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "This display controls speaker %s", _model.speaker_id.c_str());
+    } else if (err == ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGI(TAG, "No speaker is chosen yet");
+    } else {
+        ESP_LOGE(TAG, "Cannot read the speaker choice: %s", esp_err_to_name(err));
+    }
+}
+
+void Application::choose_speaker(const std::string& id) {
+    if (id == _model.speaker_id) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Speaker %s is chosen", id.c_str());
+
+    const auto err = write_speaker_choice(id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot store the speaker choice: %s", esp_err_to_name(err));
+    }
+
+    // A flash write can shift the picture until the panel is restarted (docs/firmware-design.md,
+    // section 3).
+    _board->resync_panel();
+
+    _model.speaker_id = id;
+    model_changed();
+}
+
+void Application::refresh_speakers() {
+    // A list that is on screen stays there while a newer one is on its way.
+    if (_model.speakers.state != LoadState::Loaded) {
+        _model.speakers.state = LoadState::Loading;
+        model_changed();
+    }
+
+    _api_client->send(HttpRequest{.path = "/api/speakers"}, _scope,
+                      [this](HttpResponse&& response) { speakers_answered(std::move(response)); });
+}
+
+void Application::speakers_answered(HttpResponse&& response) {
+    auto& list = _model.speakers;
+
+    if (response.err == ESP_ERR_INVALID_SIZE) {
+        // An answer over the client's limit, which HttpClient logged.
+        list.state = LoadState::Failed;
+        list.error.clear();
+    } else if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        list.state = LoadState::Unreachable;
+        list.error.clear();
+    } else if (const auto problem =
+                   read_speakers(response.status, (const char*)response.body.get(), response.length, list)) {
+        ESP_LOGW(TAG, "GET /api/speakers answered %d, %s: %s", response.status, problem, list.error.c_str());
+    } else {
+        ESP_LOGI(TAG, "The backend lists %zu speakers", list.speakers.size());
+    }
+
+    model_changed();
 }
 
 void Application::begin_backend() {
@@ -146,20 +251,21 @@ void Application::begin_backend() {
     model_changed();
 
     _api_client = std::make_unique<HttpClient>(&get_queue(), "backend_api");
-    ESP_ERROR_CHECK(
-        _api_client->begin(_model.backend_url, BACKEND_TASK_STACK_SIZE, BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
+    ESP_ERROR_CHECK(_api_client->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
+                                       BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
 
     _art_client = std::make_unique<HttpClient>(&get_queue(), "backend_art");
-    ESP_ERROR_CHECK(
-        _art_client->begin(_model.backend_url, BACKEND_TASK_STACK_SIZE, BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
+    ESP_ERROR_CHECK(_art_client->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
+                                       BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
 
     _event_stream = std::make_unique<EventStream>(&get_queue());
 
     _event_stream->on_connected([this]() {
-        // Events sent while the stream was away are gone: from milestone 1, this is where the
-        // subscriptions are renewed and the state the views show is fetched again.
         _model.stream_state = StreamState::Connected;
         model_changed();
+
+        // Events sent while the stream was away are gone, so what the views show is fetched again.
+        refresh_speakers();
     });
 
     _event_stream->on_disconnected([this]() {
@@ -168,11 +274,17 @@ void Application::begin_backend() {
         model_changed();
     });
 
-    _event_stream->on_event(
-        [](const std::string& type, EventStream::Payload) { ESP_LOGI(TAG, "Event %s", type.c_str()); });
+    // Every connection receives every event, and its payload names what changed.
+    _event_stream->on_event([this](const std::string& type, EventStream::Payload) {
+        if (type == "speakers_changed") {
+            refresh_speakers();
+        }
+    });
 
-    ESP_ERROR_CHECK(
-        _event_stream->begin(_model.backend_url, BACKEND_TASK_STACK_SIZE, BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
+    ESP_ERROR_CHECK(_event_stream->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
+                                         BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
+
+    refresh_speakers();
 }
 
 void Application::do_process() {

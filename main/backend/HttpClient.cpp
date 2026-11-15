@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstring>
 
-#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
 #include "support.h"
 
@@ -15,8 +14,10 @@ void HttpBodyDeleter::operator()(uint8_t* body) const { heap_caps_free(body); }
 
 HttpClient::HttpClient(Queue* ui_queue, const char* name) : _ui_queue(ui_queue), _name(name) {}
 
-esp_err_t HttpClient::begin(const std::string& base_url, uint32_t stack_size, UBaseType_t priority, BaseType_t core) {
+esp_err_t HttpClient::begin(const std::string& base_url, const char* root_certificate, uint32_t stack_size,
+                            UBaseType_t priority, BaseType_t core) {
     _base_url = base_url;
+    _root_certificate = root_certificate;
 
     _jobs = xQueueCreate(QUEUE_DEPTH, sizeof(Job*));
     ESP_RETURN_ON_FALSE(_jobs, ESP_ERR_NO_MEM, TAG, "Cannot create the request queue");
@@ -215,7 +216,7 @@ esp_err_t HttpClient::ensure_client() {
     config.url = _base_url.c_str();
     config.timeout_ms = TIMEOUT_MS;
     config.keep_alive_enable = true;
-    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.cert_pem = _root_certificate;
 
     _client = esp_http_client_init(&config);
     ESP_RETURN_ON_FALSE(_client, ESP_FAIL, TAG, "Cannot create an HTTP client");

@@ -12,6 +12,7 @@ class Theme {
 public:
     static constexpr uint32_t BACKGROUND = 0x101214;
     static constexpr uint32_t SURFACE = 0x1C1F24;
+    static constexpr uint32_t SURFACE_PRESSED = 0x2B3038;
     static constexpr uint32_t TEXT = 0xF2F2F2;
     static constexpr uint32_t TEXT_SECONDARY = 0xA0A6AD;
     static constexpr uint32_t ACCENT = 0xE8A33D;

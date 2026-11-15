@@ -25,12 +25,16 @@ class Application : public ApplicationBase, public UiHost {
     std::unique_ptr<HttpClient> _api_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
+    // The scope of the app's own requests, which lives as long as the app.
+    std::shared_ptr<void> _scope{std::make_shared<int>(0)};
     int64_t _last_memory_log_ms{};
 
 public:
     explicit Application(Board* board);
 
     const Model& get_model() const override { return _model; }
+    void choose_speaker(const std::string& id) override;
+    void refresh_speakers() override;
 
 protected:
     void do_begin() override;
@@ -41,6 +45,8 @@ protected:
 private:
     void run();
     void begin_backend();
+    void load_speaker_choice();
+    void speakers_answered(HttpResponse&& response);
     void model_changed() { _model.revision++; }
     void log_memory();
 };

@@ -22,6 +22,7 @@ public:
 private:
     Queue* _ui_queue;
     std::string _url;
+    const char* _root_certificate{};
     std::function<void()> _connected;
     std::function<void()> _disconnected;
     EventCallback _event;
@@ -52,13 +53,16 @@ public:
     EventStream& operator=(const EventStream&) = delete;
 
     // Each callback runs on the UI task. `connected` follows every `ready` frame, which is when
-    // the app renews its subscriptions and refetches what it shows; `disconnected` follows the
-    // loss of a connection that was ready.
+    // the app refetches what it shows; `disconnected` follows the loss of a connection that was
+    // ready.
     void on_connected(std::function<void()> func) { _connected = std::move(func); }
     void on_disconnected(std::function<void()> func) { _disconnected = std::move(func); }
     void on_event(EventCallback func) { _event = std::move(func); }
 
-    esp_err_t begin(const std::string& base_url, uint32_t stack_size, UBaseType_t priority, BaseType_t core);
+    // `root_certificate` is the PEM of the one root an https:// server's certificate is verified
+    // against; the stream keeps the pointer.
+    esp_err_t begin(const std::string& base_url, const char* root_certificate, uint32_t stack_size,
+                    UBaseType_t priority, BaseType_t core);
 
 private:
     void run();

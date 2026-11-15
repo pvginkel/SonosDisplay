@@ -11,6 +11,7 @@
 #define ICON_SKIP_PREVIOUS "\xF3\xB0\x92\xAE"  // U+F04AE
 #define ICON_VOLUME_HIGH "\xF3\xB0\x95\xBE"  // U+F057E
 #define ICON_SPEAKER "\xF3\xB0\x93\x83"  // U+F04C3
+#define ICON_CHECK "\xF3\xB0\x84\xAC"  // U+F012C
 #define ICON_PLAYLIST_MUSIC "\xF3\xB0\xB2\xB8"  // U+F0CB8
 #define ICON_CLOUD_OFF "\xF3\xB0\x85\xA4"  // U+F0164
 #define ICON_ALERT "\xF3\xB0\x97\x96"  // U+F05D6

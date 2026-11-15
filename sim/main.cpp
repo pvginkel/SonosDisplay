@@ -4,8 +4,8 @@
 //   render <scene>... --out <dir>
 //   render --list
 //
-// Exits non-zero when a scene is unknown, an LVGL assertion fires, or LVGL logs a warning or an
-// error.
+// Exits non-zero when a scene is unknown, an LVGL assertion fires, LVGL logs a warning or an
+// error, or a scene's fixture or touch does not do what the scene says.
 
 #include <cstdio>
 #include <cstdlib>
@@ -33,7 +33,13 @@ static constexpr int32_t HEIGHT = 480;
 static constexpr uint32_t SCENE_TIME_MS = 500;
 static constexpr uint32_t STEP_MS = 10;
 
+// How long a scene's touch stays down: several reads of the input device, and under LVGL's
+// long press.
+static constexpr uint32_t TAP_MS = 100;
+
 static uint32_t tick_ms;
+static const SimHost* scene_host;
+static uint32_t scene_elapsed_ms;
 static int lvgl_problems;
 static uint8_t frame[WIDTH * HEIGHT * 2];
 
@@ -51,6 +57,17 @@ static void print_log(lv_log_level_t level, const char* message) {
 }
 
 static void flush(lv_display_t* display, const lv_area_t*, uint8_t*) { lv_display_flush_ready(display); }
+
+static void read_touch(lv_indev_t*, lv_indev_data_t* data) {
+    const auto& tap = scene_host->get_tap();
+
+    if (tap && scene_elapsed_ms < TAP_MS) {
+        data->point = *tap;
+        data->state = LV_INDEV_STATE_PRESSED;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+    }
+}
 
 static bool write_png(const std::filesystem::path& path) {
     std::vector<uint8_t> rgb(WIDTH * HEIGHT * 3);
@@ -97,10 +114,19 @@ static bool render(const Scene& scene, lv_display_t* display, const std::filesys
 
     scene.build(host, *shell);
 
-    for (uint32_t elapsed = 0; elapsed < SCENE_TIME_MS; elapsed += STEP_MS) {
+    scene_host = &host;
+    for (scene_elapsed_ms = 0; scene_elapsed_ms < SCENE_TIME_MS; scene_elapsed_ms += STEP_MS) {
         tick_ms += STEP_MS;
         shell->update();
         lv_timer_handler();
+    }
+    scene_host = nullptr;
+
+    if (scene.check) {
+        if (const auto problem = scene.check(host)) {
+            fprintf(stderr, "render: %s: %s\n", scene.name, problem);
+            return false;
+        }
     }
 
     // Everything is drawn, so a scene looks the same whichever scene came before it.
@@ -183,6 +209,10 @@ int main(int argc, char** argv) {
     auto display = lv_display_create(WIDTH, HEIGHT);
     lv_display_set_buffers(display, frame, nullptr, sizeof(frame), LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(display, flush);
+
+    auto touch = lv_indev_create();
+    lv_indev_set_type(touch, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(touch, read_touch);
 
     Theme::begin(display);
 

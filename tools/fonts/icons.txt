@@ -7,6 +7,7 @@ skip_next F04AD
 skip_previous F04AE
 volume_high F057E
 speaker F04C3
+check F012C
 playlist_music F0CB8
 cloud_off F0164
 alert F05D6

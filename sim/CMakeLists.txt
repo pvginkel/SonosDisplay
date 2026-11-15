@@ -1,4 +1,5 @@
-# The native render build: main/ui/ against LVGL 9.2.2, each scene written to an 800x480 PNG.
+# The native render build: main/ui/ against LVGL 9.2.2, each scene written to an 800x480 PNG, and
+# main/api/ against cJSON, so the scenes read their fixtures as the device reads the backend.
 # It is the repository's `kc project test` (docs/firmware-design.md, section 5):
 #
 #   cmake -S sim -B build-sim -G Ninja && cmake --build build-sim && build-sim/render --all --out build-sim/screens
@@ -15,7 +16,8 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-set(UI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../main/ui)
+set(MAIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../main)
+set(UI_DIR ${MAIN_DIR}/ui)
 
 # The rule that makes this build possible: main/ui/ includes LVGL and the C++ standard library,
 # and nothing else. A quoted include must be lvgl.h or a file in ui/; an angle include must be a
@@ -62,9 +64,26 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(lvgl)
 
-file(GLOB UI_SOURCES CONFIGURE_DEPENDS ${UI_DIR}/*.cpp ${UI_DIR}/fonts/*.c)
+# cJSON at the version ESP-IDF 5.5.3 carries. Only its one source file is built: its own CMake
+# project is left out by pointing SOURCE_SUBDIR at a directory it does not have.
+FetchContent_Declare(
+    cjson
+    URL https://github.com/DaveGamble/cJSON/archive/refs/tags/v1.7.19.tar.gz
+    URL_HASH SHA256=7fa616e3046edfa7a28a32d5f9eacfd23f92900fe1f8ccd988c1662f30454562
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    SOURCE_SUBDIR none
+)
+FetchContent_MakeAvailable(cjson)
 
-add_executable(render main.cpp SimHost.cpp scenes.cpp ${UI_SOURCES})
-target_include_directories(render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${UI_DIR})
-target_link_libraries(render PRIVATE lvgl)
+add_library(cjson STATIC ${cjson_SOURCE_DIR}/cJSON.c)
+target_include_directories(cjson PUBLIC ${cjson_SOURCE_DIR})
+
+# main/api/ includes cJSON, the C++ standard library and ui/Model.h only: anything else is not on
+# this build's include path.
+file(GLOB UI_SOURCES CONFIGURE_DEPENDS ${UI_DIR}/*.cpp ${UI_DIR}/fonts/*.c)
+file(GLOB API_SOURCES CONFIGURE_DEPENDS ${MAIN_DIR}/api/*.cpp)
+
+add_executable(render main.cpp SimHost.cpp scenes.cpp ${UI_SOURCES} ${API_SOURCES})
+target_include_directories(render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${UI_DIR} ${MAIN_DIR})
+target_link_libraries(render PRIVATE lvgl cjson)
 target_compile_options(render PRIVATE -Wall -Werror)

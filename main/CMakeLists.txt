@@ -8,9 +8,12 @@ endif()
 
 file(GLOB_RECURSE SOURCES ${GLOB_OPTIONS} ${CMAKE_CURRENT_SOURCE_DIR}/*.c ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp)
 
+# The backend's certificate is issued by the homelab CA. Its root is embedded, and Application
+# hands it to the backend's clients; every other client verifies against ESP-IDF's bundle.
 idf_component_register(
     SRCS ${SOURCES}
     INCLUDE_DIRS "."
+    EMBED_TXTFILES "../certs/homelab-root.pem"
 )
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
