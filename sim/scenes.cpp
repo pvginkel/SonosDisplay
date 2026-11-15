@@ -265,6 +265,35 @@ static bool says(const lv_obj_t* obj, const char* text) {
 
 static bool says(const char* text) { return says(lv_screen_active(), text); }
 
+// Whether a button that is on screen is drawn in part only: an object it is in ends before it.
+static bool cuts_button(const lv_obj_t* obj) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return false;
+    }
+
+    if (lv_obj_check_type(obj, &lv_button_class)) {
+        lv_area_t button;
+        lv_obj_get_coords(obj, &button);
+
+        for (auto parent = lv_obj_get_parent(obj); parent; parent = lv_obj_get_parent(parent)) {
+            lv_area_t within;
+            lv_obj_get_coords(parent, &within);
+
+            if (button.x1 < within.x1 || button.y1 < within.y1 || button.x2 > within.x2 || button.y2 > within.y2) {
+                return true;
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        if (cuts_button(lv_obj_get_child(obj, int32_t(i)))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 static const char* check_no_bar(const SimHost&, const Shell& shell) {
     return shell.shows_bar() ? "the bar shows under a view that goes without it" : nullptr;
 }
@@ -432,6 +461,18 @@ static void speakers_error(SimHost& host, Shell& shell) {
     host.answer_speakers(500, ERROR_ENVELOPE);
 
     shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+}
+
+// The picker's notice over the bar: "Try again" is whole above it.
+static const char* check_notice_over_bar(const SimHost&, const Shell& shell) {
+    if (!shell.shows_bar()) {
+        return "the bar does not show";
+    }
+    if (!says(MSG_TRY_AGAIN)) {
+        return "the notice has no \"Try again\"";
+    }
+
+    return cuts_button(lv_screen_active()) ? "\"Try again\" is cut" : nullptr;
 }
 
 // Error bodies that are not the envelope, and answers that are not a list: each is a failure
@@ -1761,8 +1802,8 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-many", speakers_many},
         {"speakers-loading", speakers_loading},
         {"speakers-empty", speakers_empty, check_empty},
-        {"speakers-unreachable", speakers_unreachable},
-        {"speakers-error", speakers_error},
+        {"speakers-unreachable", speakers_unreachable, check_notice_over_bar},
+        {"speakers-error", speakers_error, check_notice_over_bar},
         {"speakers-unreadable", speakers_unreadable},
         {"speakers-retry", speakers_retry, check_retry},
         {"speakers-reconnecting", speakers_reconnecting},

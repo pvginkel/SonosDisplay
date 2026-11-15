@@ -38,7 +38,9 @@ void SpeakerPickerView::do_render(lv_obj_t* parent) {
     _body = lv_container_create(column);
     lv_obj_set_width(_body, LV_PCT(100));
     lv_obj_set_flex_grow(_body, 1);
-    lv_obj_set_style_margin_top(_body, Theme::GAP, LV_PART_MAIN);
+    // Padding, not a margin: LVGL's flex gives a growing item the room its margin takes as well,
+    // which puts the body's end under the view's.
+    lv_obj_set_style_pad_top(_body, Theme::GAP, LV_PART_MAIN);
 
     build();
 }
@@ -116,7 +118,7 @@ void SpeakerPickerView::build_notice(const char* icon, const char* message, cons
 
     auto icon_label = lv_label_create(column);
     lv_label_set_text(icon_label, icon);
-    lv_obj_set_style_text_font(icon_label, Theme::FONT_ICON_LARGE, LV_PART_MAIN);
+    lv_obj_set_style_text_font(icon_label, Theme::FONT_ICON, LV_PART_MAIN);
     lv_obj_set_style_text_color(icon_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
 
     auto message_label = lv_label_create(column);
@@ -145,7 +147,6 @@ void SpeakerPickerView::build_notice(const char* icon, const char* message, cons
         lv_obj_set_style_pad_hor(button, BUTTON_PADDING, LV_PART_MAIN);
         lv_obj_set_style_radius(button, Theme::RADIUS, LV_PART_MAIN);
         lv_obj_set_style_shadow_width(button, 0, LV_PART_MAIN);
-        lv_obj_set_style_margin_top(button, Theme::GAP, LV_PART_MAIN);
         lv_obj_add_event_cb(button, retry_clicked, LV_EVENT_CLICKED, this);
 
         auto button_label = lv_label_create(button);
