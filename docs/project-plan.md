@@ -14,7 +14,7 @@ Two things are built:
 
 - **SonosDisplay** (`pvginkel/SonosDisplay`, exists, empty but for a spike): the firmware for the
   display.
-- **SonosController** (`pvginkel/SonosController`, to be created): a Python backend that talks to
+- **SonosController** (`pvginkel/SonosController`, exists, empty): a Python backend that talks to
   Sonos and Plex and serves the display. It is generic enough that a web UI could be added later;
   no web UI is built in this project.
 
@@ -141,9 +141,10 @@ with the backend deployed and the display updated, so the operator can use what 
 a milestone the backend's part comes first. Research is part of the task that needs it, and its
 questions are listed there.
 
-1. **The SonosController repository and its environment.** A public repository
-   `pvginkel/SonosController`, as every related repository is public, and a KubeCoder environment
-   of its own. Waits on nothing.
+1. **The SonosController environment.** The public repository `pvginkel/SonosController` exists,
+   empty, created on 2026-11-15. It gets a KubeCoder environment of its own, which Pilot creates
+   through its fleet access: "You don't need me to create the SonosController environment. Pilot
+   app has KubeCoder fleet access." Waits on nothing.
 
 2. **A backend-only switch in ModernAppTemplate.** The root template gets a switch that leaves
    the frontend out of the generated repository (its pipeline, dev setup and environment
@@ -207,7 +208,8 @@ questions are listed there.
    and controls play/pause, previous, next and volume; it updates when something changes
    elsewhere. A simple speaker picker is part of it, since the display needs a speaker.
    - Backend: speakers, playback state, transport, volume, the event stream, artwork.
-   - Operator: the address reservations and the firewall opening task 6 names.
+   - Operator: the firewall opening task 6 names. The speakers' address reservations are
+     already made (see "What needs the operator's hands").
    - Firmware: the backend client, the now-playing screen and bar, the speaker picker.
 
    Waits on 3, 5 and 6.
@@ -235,11 +237,14 @@ workflow.
 
 ## What needs the operator's hands
 
-- **Task 1:** the SonosController environment.
+- **Before task 6:** restarting the speakers. The operator made two DHCP reservations on
+  2026-11-15 so the backend can always find the system, and the speakers take them only after a
+  restart: "I still need to restart the devices so they aren't yet reachable." The two addresses
+  are in the project's brief in Pilot, not in this public repository. Until the restart the
+  speakers answer on their old addresses, which the spike's `.env` holds.
 - **Task 5:** flashing and provisioning the first display.
-- **Task 7:** a fixed address (DHCP reservation) for the Garage speaker and for Zitkuil's main
-  device, so the backend can always find the system; and the opening that lets the speakers reach
-  the backend's event port, once task 6 has named it.
+- **Task 7:** the opening that lets the speakers reach the backend's event port, once task 6 has
+  named it.
 - **Task 8:** a Plex token for the backend, stored as a secret.
 - **Each milestone:** trying it on the display.
 
@@ -266,7 +271,7 @@ workflow.
 
 - **Repositories:**
   - `pvginkel/SonosDisplay`: the firmware; holds this plan and the spike.
-  - `pvginkel/SonosController`: the backend, created in task 1.
+  - `pvginkel/SonosController`: the backend; exists, empty.
   - `pvginkel/ThermostatDisplay`: the old firmware for this hardware; the source of the
     hardware code. Its vendor documentation for the board is under `documentation/`.
   - `pvginkel/PaperClock` and `pvginkel/esp-libs`: the reference for firmware conventions.
