@@ -8,6 +8,7 @@
 
 static constexpr int32_t CARD_WIDTH = 640;
 static constexpr int32_t LABEL_WIDTH = 160;
+static constexpr int32_t TOUCH_MARKER_SIZE = 32;
 
 void PlaceholderView::do_render(lv_obj_t* parent) {
     auto column = lv_container_create(parent);
@@ -27,7 +28,8 @@ void PlaceholderView::do_render(lv_obj_t* parent) {
     lv_obj_set_style_text_font(title, Theme::FONT_HEADLINE, LV_PART_MAIN);
 
     auto text = lv_label_create(column);
-    lv_label_set_text(text, MSG_PLACEHOLDER);
+    lv_label_set_text(text, MSG_PLACEHOLDER "\n" MSG_PLACEHOLDER_TOUCH);
+    lv_obj_set_style_text_align(text, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_style_text_font(text, Theme::FONT_BODY, LV_PART_MAIN);
     lv_obj_set_style_text_color(text, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
 
@@ -46,7 +48,35 @@ void PlaceholderView::do_render(lv_obj_t* parent) {
     _firmware = create_row(card, MSG_FIRMWARE);
     _display = create_row(card, MSG_DISPLAY);
 
+    // The view fills the screen from its top left corner, so a touch's screen coordinates are the
+    // marker's.
+    _touch_marker = lv_obj_create(parent);
+    lv_obj_remove_style_all(_touch_marker);
+    lv_obj_remove_flag(_touch_marker, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(_touch_marker, TOUCH_MARKER_SIZE, TOUCH_MARKER_SIZE);
+    lv_obj_set_style_radius(_touch_marker, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_touch_marker, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(_touch_marker, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_add_flag(_touch_marker, LV_OBJ_FLAG_HIDDEN);
+
+    lv_obj_add_flag(parent, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(parent, touched, LV_EVENT_PRESSING, this);
+
     apply();
+}
+
+void PlaceholderView::touched(lv_event_t* event) {
+    auto self = (PlaceholderView*)lv_event_get_user_data(event);
+
+    lv_point_t point;
+    lv_indev_get_point(lv_indev_active(), &point);
+
+    self->show_touch(point);
+}
+
+void PlaceholderView::show_touch(lv_point_t point) {
+    lv_obj_set_pos(_touch_marker, point.x - TOUCH_MARKER_SIZE / 2, point.y - TOUCH_MARKER_SIZE / 2);
+    lv_obj_remove_flag(_touch_marker, LV_OBJ_FLAG_HIDDEN);
 }
 
 lv_obj_t* PlaceholderView::create_row(lv_obj_t* parent, const char* label) {

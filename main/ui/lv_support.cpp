@@ -30,6 +30,7 @@ lv_obj_t* lv_container_create(lv_obj_t* parent) {
     auto obj = lv_obj_create(parent);
 
     lv_obj_remove_style_all(obj);
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_remove_flag(obj, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
 

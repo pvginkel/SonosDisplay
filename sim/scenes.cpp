@@ -24,6 +24,14 @@ static void no_backend(SimHost& host, Shell& shell) {
 
 static void placeholder(SimHost& host, Shell& shell) { shell.replace(std::make_unique<PlaceholderView>(&host)); }
 
+static void placeholder_touch(SimHost& host, Shell& shell) {
+    auto view = std::make_unique<PlaceholderView>(&host);
+    auto placeholder_view = view.get();
+    shell.replace(std::move(view));
+
+    placeholder_view->show_touch({760, 440});
+}
+
 static void placeholder_reconnecting(SimHost& host, Shell& shell) {
     host.model().stream_state = StreamState::Disconnected;
     host.model().stream_down_since = lv_tick_get() - 10 * 1000;
@@ -37,6 +45,7 @@ const std::vector<Scene>& get_scenes() {
         {"loading-update", loading_update},
         {"no-backend", no_backend},
         {"placeholder", placeholder},
+        {"placeholder-touch", placeholder_touch},
         {"placeholder-reconnecting", placeholder_reconnecting},
     };
 

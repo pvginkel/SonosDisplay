@@ -11,6 +11,7 @@
 #define MSG_RECONNECTING "Reconnecting"
 
 #define MSG_PLACEHOLDER "Ready. The music controls arrive with the next firmware."
+#define MSG_PLACEHOLDER_TOUCH "Touch the screen: a dot marks where each touch lands."
 #define MSG_BACKEND "Backend"
 #define MSG_CONNECTION "Connection"
 #define MSG_FIRMWARE "Firmware"
