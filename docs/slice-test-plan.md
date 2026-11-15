@@ -37,7 +37,7 @@ requirements:
 - what the requirement says is on the screen is there, in the dark theme;
 - no label is cut off or runs into another, and no glyph shows as LVGL's placeholder box (a
   character outside the fonts' ranges);
-- the now-playing bar, once it exists, is on every screen that should carry it;
+- the now-playing bar is on every screen that should carry it;
 - touch targets are large enough to hit in a workshop: about 64 pixels or more.
 
 A screen the requirements describe and no scene renders is a finding: the slice owes the scene.

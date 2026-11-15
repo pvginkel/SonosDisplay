@@ -20,9 +20,10 @@ projects:
     build: cexec esp-idf idf.py build
 
     # sim/: main/ui/ against LVGL 9.2.2 natively, every scene rendered to
-    # build-sim/screens/<scene>.png. It fails on an ESP-IDF include in main/ui/, an LVGL
-    # assertion, or an LVGL warning. Jenkins does not run it: its firmware job has the ESP-IDF
-    # container only. A slice that changes a screen reads the PNGs it changed.
+    # build-sim/screens/<scene>.png. It fails on an ESP-IDF include in main/ui/ or main/api/,
+    # an LVGL assertion, an LVGL warning, or a scene whose fixture or touch does not do what the
+    # scene says. Jenkins does not run it: its firmware job has the ESP-IDF container only. A
+    # slice that changes a screen reads the PNGs it changed.
     test: cexec native sh -c 'cmake -S sim -B build-sim -G Ninja && cmake --build build-sim && build-sim/render --all --out build-sim/screens'
 
     lint:

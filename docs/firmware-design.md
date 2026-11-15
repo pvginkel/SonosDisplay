@@ -14,7 +14,7 @@ the first display", with what the first display, flashed the same day, showed.
 
 | Question | Decision |
 |---|---|
-| Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events) and `ui/` (LVGL and standard C++ only). |
+| Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events), `api/` (the backend's answers, read into the UI's types) and `ui/` (LVGL and standard C++ only). |
 | Carried over | The panel, expander, touch, backlight and motion-sensor code of ThermostatDisplay's shipped build: two framebuffers in PSRAM at a 14 MHz pixel clock. Rewritten for LVGL 9.2 and for ESP-IDF's current I2C driver, not copied. |
 | Picture drift | No change to `esp-libs`. The panel resynchronises whenever the screen is switched on, as ThermostatDisplay's did, and code runs from PSRAM. Not every frame: on the S3, `CONFIG_LCD_RGB_RESTART_IN_VSYNC` pins the picture to the first framebuffer, which was the first display's artifacts. An update is only written during boot, and the display restarts after it. |
 | Brown-out | The backlight is switched at most once a second, in either direction, by one state machine. Boot lights the screen only after a power-on reset. |
@@ -74,6 +74,7 @@ sdkconfig.defaults
 partitions.csv
 Jenkinsfile                 job Firmware/SonosDisplay
 scripts/upload.sh
+certs/homelab-root.pem      the root the backend's certificate is verified against (section 4)
 main/
   CMakeLists.txt  idf_component.yml  .clang-format  lvgl_assert.h
   main.cpp                  app_main: Board, Application, idle loop
@@ -89,10 +90,15 @@ main/
     lv_mem_psram.c          LVGL's allocator on PSRAM (section 7)
   backend/                  ESP-IDF only; no LVGL, no app types
     HttpClient.{h,cpp}  EventStream.{h,cpp}
+  api/                      cJSON, LVGL, standard C++ and ui/'s two doors only; sim/ builds it too
+    Answers.{h,cpp}         the backend's answers, checked and read into the model
+    Artwork.{h,cpp}         the artwork's checks, its cache and its loader (section 7)
   ui/                       LVGL and standard C++ only
     UiHost.h  Model.h       the only two doors between ui/ and the rest
     Shell.{h,cpp}  View.{h,cpp}  Theme.{h,cpp}  Messages.h  lv_support.{h,cpp}  log.h
-    LoadingView.{h,cpp}  PlaceholderView.{h,cpp}
+    LoadingView.{h,cpp}  SpeakerPickerView.{h,cpp}  NowPlayingView.{h,cpp}
+    NowPlayingBar.{h,cpp}   the bar under the content area
+    Cover.{h,cpp}  Controls.{h,cpp}  shared by the now-playing screen and the bar
     fonts/                  generated .c files and icons.h
 sim/                        the native render build (section 5)
 tools/fonts/                the TTF files, their licences and generate.sh
@@ -119,14 +125,18 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
 1. `app_main` constructs `Board` and calls `board.begin()`: panel, I2C bus, expander, touch,
    `lv_init()`, the LVGL display and input device. Then `Application(&board).begin()`, then it
    idles.
-2. `do_begin()` creates the UI task. Its first act is the Shell with `LoadingView` ("Starting").
+2. `do_begin()` creates the UI task. It reads the speaker choice from NVS (section 4), then builds
+   the Shell with `LoadingView` ("Starting").
 3. `do_configuration_loaded(cJSON*)` runs on the UI task once WiFi is up. It copies `backendUrl`
    and `screenOffSeconds` out of the JSON, which esp-mdm frees when the hook returns. It then sets
    the loading text to "Checking for an update" and calls `lv_refr_now(nullptr)`, because the
    update check that follows blocks this task (section 2).
-4. `do_ready()` runs once MQTT is connected. It starts the three backend tasks and replaces
-   `LoadingView` with the app's first view. In task 5 that is `PlaceholderView`.
-5. `do_process()` calls `board.process()` and the current view's `update()`.
+4. `do_ready()` runs once MQTT is connected. It starts the three backend tasks, asks for the
+   speakers, the chosen speaker's playback and its group's volume, and calls `Shell::open()`,
+   which replaces `LoadingView` with the app's first view: the speaker picker or the now-playing
+   screen (section 5).
+5. `do_process()` calls `board.process()`, tells the artwork loader whether the screen is lit
+   (section 7), and calls the Shell's `update()`, which updates the top view and the bar.
 
 esp-mdm restarts the device when WiFi cannot be joined, when WiFi or MQTT drops, and when IoT
 Support announces a new configuration or firmware. SonosDisplay accepts that: a restart takes
@@ -346,9 +356,6 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 
-CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
-CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="certs/homelab-root.pem"
-
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
 
@@ -410,7 +417,8 @@ wired: `OTAManager` declares the callback and nothing calls it.
 
 The other flash writes are short: the speaker choice saved to NVS, esp-mdm storing new
 provisioning data (followed by a restart), and a coredump being erased after its upload at boot.
-Item 1 covers them, and the restart on the next wake puts right what it does not.
+Item 1 covers them, and the restart on the next wake puts right what it does not. After the
+speaker choice is saved, the app restarts the panel at once (`Board::resync_panel`).
 
 The loading view cannot animate during an update, since its task is blocked. It shows "Checking
 for an update" as a still frame (section 1, step 3).
@@ -456,8 +464,8 @@ comes up short. The costs:
 - an interrupt that copies 25 MB a second out of PSRAM, a third or more of core 0;
 - the frame-complete callback in place of the vblank as the sign that a swap took effect.
 
-The firmware itself writes flash only when the speaker choice is saved, so drift in use is not
-expected.
+The firmware itself writes flash only when the speaker choice is saved, and restarts the panel
+right after, so drift in use is not expected.
 
 ### Switching the backlight too fast browns the board out
 
@@ -509,40 +517,50 @@ another project's repository and is the operator's to rule then.
 ### Requests
 
 The backend is unauthenticated and on the local network, so requests carry no token. Both
-schemes work: the client is configured with `crt_bundle_attach = esp_crt_bundle_attach`.
+schemes work: an `https://` server's certificate is verified against the one root each client is
+handed in `begin()`.
 
 **The deployed backend is HTTPS only**, found at the first display's bring-up on 2026-11-15: its
 ingress answers plain HTTP with a 301 to HTTPS, and its certificate is issued by the homelab CA,
 which Mozilla's bundle does not hold. Every connection then failed the handshake
 (`esp-x509-crt-bundle: No matching trusted root certificate found`), and the screen stayed at
-"Connecting". The firmware therefore adds the homelab root, `certs/homelab-root.pem`, to the
-bundle (`CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE`), so `backendUrl` is `https://`. The file is a
-root certificate, public by nature, and holds no hostname or address; it is valid until 2036.
-Every client in the firmware verifies against the same bundle, esp-mdm's included.
+"Connecting". The firmware therefore carries the homelab root, `certs/homelab-root.pem`, which
+`main/CMakeLists.txt` embeds and `Application` hands to the backend's two `HttpClient`s and its
+`EventStream` as their `cert_pem`, so `backendUrl` is `https://`. Those three verify against that
+root alone. esp-mdm's own connections keep ESP-IDF's bundle: none of them goes to the backend, and
+the first display installed an update over the air on that bundle alone. The file is a root
+certificate, public by nature, and holds no hostname or address; it is valid until 2036.
 
 ```cpp
 struct HttpRequest {
-    esp_http_client_method_t method;
+    esp_http_client_method_t method{HTTP_METHOD_GET};
     std::string path;                    // "/api/..." appended to the base URL
     std::string body;                    // JSON for POST/PUT/DELETE, else empty
-    size_t max_response = 256 * 1024;
+    size_t max_response{256 * 1024};
 };
 struct HttpResponse {
     esp_err_t err;                       // transport error, or ESP_OK
     int status;
-    uint8_t* body; size_t length;        // in PSRAM; the receiver frees it or keeps it
+    HttpBody body; size_t length;        // in PSRAM, NUL-ended; the receiver moves it out to keep it
 };
+esp_err_t HttpClient::begin(const std::string& base_url, const char* root_certificate, ...);
 void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
                       std::function<void(HttpResponse&&)> done);
 ```
 
 - **One task per client, one request at a time.** `send` puts the request on the client's
-  FreeRTOS queue (16 deep). The task keeps one `esp_http_client` handle with keep-alive and
+  FreeRTOS queue (16 deep), and drops it when the queue is full. The task keeps one
+  `esp_http_client` handle with keep-alive and
   reuses it; after a transport error it destroys the handle and makes a new one. A connection idle
   for more than 1.5 seconds is closed before the next request: a server that closed it first would
   fail that request, and only a GET is retried.
 - **Two clients.** `backend_api` carries API calls and `backend_art` carries artwork, so a
   command is never queued behind twenty covers.
+- **One change of the volume in the queue at most.** A press sends `{"delta": n}` to the group's
+  volume: a step, which the speaker takes from the volume it has, where a level sent from the
+  screen could undo a change made in the Sonos app. The presses made while a change is on its way
+  wait in the model (`Volume`) and go as one change when it is answered, so a burst of presses is
+  one request at a time, and a transport command waits behind one change at most.
 - **The body goes to PSRAM.** The task reads with `esp_http_client_open`,
   `esp_http_client_fetch_headers` and a read loop into a `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`
   buffer sized from `Content-Length`, growing when there is none, and failing with
@@ -554,9 +572,16 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   downloads behind it.
 - **Timeouts and retries:** 5 seconds. A GET is retried once after a transport error; nothing
   else is retried, since a repeated "next" is a different command.
+- **Answers are read in `main/api/Answers`**, where what the backend sends enters the app. The
+  client hands status and body to the caller, which hands them there. An answer the API's
+  document does not allow is refused whole, and one it allows is never refused for a field the
+  display does not show. A command is taken when it is answered 204; any other answer, or none,
+  is a command not taken, and the playback is fetched again.
 - **Errors:** a status of 400 or above carries the template's envelope,
-  `{"error": ..., "details": {"message": ...}, "code": ...}`. The client hands status and body to
-  the caller; the UI shows `error`.
+  `{"error": ..., "details": {"message": ...}, "code": ...}`, though not always: a validation
+  error is a bare array. The envelope's `error`, cut at 200 bytes on a character boundary, is
+  what the speaker picker and the now-playing screen show; any other body is a failure without a
+  message.
 
 `cJSON_InitHooks` is set at start-up to allocate from PSRAM (section 7).
 
@@ -590,9 +615,16 @@ fields, no replay. `EventStream` owns the `backend_events` task and a second `es
      and handed to the UI task as `(type, payload)`.
    - The template's own `version` event is ignored.
 7. **Reconnect** after 1, 2, 4, 8, then 15 seconds, reset by `ready`.
-8. **After every `ready`** the app is told the stream is (re)connected. It renews whatever
-   subscriptions the API defines, since they end with the connection, and refetches the state it
-   shows, since events sent while it was away are gone.
+8. **After every `ready`** the app is told the stream is (re)connected, and fetches the speakers,
+   the chosen speaker's playback and its group's volume again, since events sent while it was
+   away are gone. There is nothing to renew: every connection receives every event.
+
+**What the app does with an event.** `speakers_changed` fetches the speakers, and the group's
+volume, which a speaker joining or leaving the group changes. `playback_changed` and
+`volume_changed` name a speaker and come once for every member of a group, so the chosen
+speaker's own id is the whole filter: one that names it fetches the playback or the volume. One
+whose payload cannot be read is taken for the chosen speaker's. When the chosen speaker comes back
+into the speakers list, its playback and volume are fetched too.
 
 The UI works without the stream: commands go over `HttpClient` either way. While the stream has
 been down for more than five seconds the Shell shows a "Reconnecting" marker. The backend being
@@ -644,7 +676,8 @@ These are the firmware's constraints. The endpoints' shapes are task 6's.
 - **Text** in Unicode NFC. The fonts hold composed characters, so a decomposed accent would be
   drawn beside its letter.
 - **Lists** are paged; the template's paging allows at most 100 items per page, and the firmware
-  asks for 100.
+  asks for 100. The speakers alone come unpaged, a household's being few; the firmware reads the
+  first 200.
 - **The queue** needs a way to ask for the page that holds the current track.
 - **Events** are small and name what changed; the firmware fetches the state itself.
 
@@ -664,58 +697,104 @@ window, where the aim here is an image a session can produce, read and attach.
 no FreeRTOS, no `esp-libs`, no `Application.h`. It has two doors to the rest of the firmware,
 both headers in `ui/`:
 
-- **`Model.h`**: plain structs holding what the views draw, such as the loading state now and the
-  now-playing state and list items from milestone 1.
-- **`UiHost.h`**: an abstract class with what a view may ask for, such as a command to the
-  backend, a piece of artwork, a restart. `Application` implements it on the device; `sim/`
-  implements it with fixtures.
+- **`Model.h`**: plain structs holding what the views draw: the event stream's state, the
+  speakers and the chosen one, the playback and the group's volume, with the rules by which a
+  command or a press changes what they show (`Playback`, `Volume`).
+- **`UiHost.h`**: an abstract class with what a view may ask for: a speaker chosen, a transport
+  command, a step of the volume, a fetch again, a piece of artwork. `Application` implements it
+  on the device; `sim/` implements it with fixtures.
 
 `ui/log.h` gives the views `UI_LOGI`, `UI_LOGW` and `UI_LOGE`: `ESP_LOGx` when `ESP_PLATFORM` is
 defined, `printf` otherwise. The rule is enforced by the build: an ESP-IDF include in `ui/` fails
 `kc project test`.
 
+**`main/api/`** is built by `sim/` too: the backend's answers read into the model's types
+(`Answers`), and the artwork's checks, cache and loader (`Artwork`). It includes cJSON, LVGL, the
+C++ standard library and `ui/`'s two doors only, and nothing of ESP-IDF is on `sim/`'s include
+path, so an ESP-IDF include there fails `kc project test` as well. The scenes' fixtures are bodies
+as the backend sends them, read by the code the device runs.
+
 ### The UI's structure
 
-- **One LVGL screen.** `Shell` owns it: a content area, and from milestone 1 the now-playing bar
-  under it, which is how the bar "stays at the bottom of every screen".
+- **One LVGL screen.** `Shell` owns it: a content area, the now-playing bar under it, which is how
+  the bar "stays at the bottom of every screen", and the "Reconnecting" marker. The bar shows
+  under every view that has it (`View::has_bar()`, true unless a view says otherwise) while the
+  display is not held on the speaker picker, and the content area then ends where the bar
+  begins. `NowPlayingView`, which carries the bar's controls in full, and `LoadingView` say
+  otherwise. `Shell::layout()` alone decides, and runs in `push()`, `pop()` and `update()`, so no
+  frame draws a view at the wrong height.
+- **The first view.** `Shell::open()` shows the speaker picker while the display needs a speaker
+  (`Model::needs_speaker()`: none is chosen, or the last list the backend answered lacks the
+  chosen one; a list never answered holds nothing), and the now-playing screen otherwise. From
+  then on `update()` keeps it the right one: when the hold begins or ends, every view gives way.
 - **Views** are what PaperClock calls a UI: a class deriving from `View`, with `do_render(parent)`
-  building its objects inside the content area and `do_update()` called from the loop. `Shell`
-  keeps a stack of them. Going back destroys the view that is left, so memory is bounded by the
-  depth of the stack, not by what was visited.
+  building its objects inside the content area, `do_update()` called from the loop while it is
+  the top view, and `do_show()` when it shows again after the view over it closed. `Shell` keeps
+  a stack of them. Going back destroys the view that is left, so memory is bounded by the depth
+  of the stack, not by what was visited. A view that navigates takes the `Shell*`:
+  `open_speaker_picker()`, and `back()`, which acts at the next `update()` so a view may call it
+  from its own event.
+- **The views of milestone 1.** The speaker picker lists the speakers and stores a pick; it is
+  reached from now playing, and a pick goes back. The now-playing screen shows the cover at
+  400 px, title, artist and album, previous, play or pause, and next, and under them the group's
+  volume: down, the level, up. The bar shows the cover at 80 px, title and artist, play or pause,
+  next, and the volume. Both build from `Cover` and `Controls`, so the rules are in one place: a
+  control is live only while the playback lists its command or the volume allows the step, and
+  one that is not is `LV_STATE_DISABLED`, which LVGL sends no click. A play or pause shows at
+  once; next and previous wait for the speaker's event. A command or a volume change that was not
+  taken shows "That did not go through" for five seconds, said once, by whichever of the two is
+  on screen. A muted group shows as muted; the display does not unmute it.
 - **`Theme`** sets up the dark theme once, with `lv_theme_default_init(disp, primary, secondary,
   true, font)`, and holds the palette and the type scale as named constants. Starting values:
   background `#101214`, surface `#1C1F24`, text `#F2F2F2`, secondary text `#A0A6AD`, accent
   `#E8A33D`. The milestones' slices own the look and change these freely.
 - **`Messages.h`** holds every string the UI shows, in English, one macro each, as PaperClock
   does.
+- **`lv_support`** adds to LVGL's API, among others `lv_label_set_text_lines`, for a label whose
+  text changes: LVGL cuts a dotted label to the height it has when the text is set, and one sized
+  by its content keeps the height of the text before, so the height is set from the text.
 
 ### The build
 
 ```
 sim/
-  CMakeLists.txt    C++20; FetchContent of lvgl at tag v9.2.2; globs ../main/ui/*.cpp and ../main/ui/fonts/*.c
+  CMakeLists.txt    C++20, -Wall -Werror; FetchContent of lvgl at tag v9.2.2 and of cJSON 1.7.19;
+                    globs ../main/ui/*.cpp, ../main/ui/fonts/*.c and ../main/api/*.cpp
   lv_conf.h         LVGL's template with the same changes as sdkconfig.defaults, plus LV_USE_LODEPNG 1
-  main.cpp          display, tick, scene loop, PNG writer
+  main.cpp          display, tick, touch, scene loop, PNG writer
   SimHost.{h,cpp}   UiHost on fixtures
-  scenes.cpp        the scenes
+  scenes.{h,cpp}    the scenes
 ```
+
+- **Warnings are errors** here, where the firmware build lets some pass: two LVGL enums combined,
+  such as `LV_PART_MAIN | LV_STATE_PRESSED`, fail the render's build, so such a selector is cast
+  to `lv_style_selector_t`.
 
 - **Display:** `lv_display_create(800, 480)` with one full-frame RGB565 buffer in direct mode and
   a flush callback that only calls `lv_display_flush_ready`.
 - **Time:** `lv_tick_set_cb` returns a counter the program advances itself, so a scene renders
   the same on every run.
-- **A scene** is a name and a function that builds a view from fixture data, for example
-  `loading`, `loading-update`, `placeholder`, and later `now-playing`, `now-playing-radio`,
-  `artists`, `queue-empty`. One view has several scenes where its states differ.
-- **Rendering a scene:** build it, advance the clock by 500 ms in 10 ms steps calling
-  `lv_timer_handler()`, call `lv_refr_now(disp)`, convert the buffer to 24-bit RGB, encode it with
+- **A scene** is a name and a function that builds the screen from fixtures, for example
+  `loading`, `speakers`, `now-playing`, `now-playing-radio`, `bar`, and later `artists`,
+  `queue-empty`. One view has several scenes where its states differ. A fixture is a body as the
+  backend sends it (`SimHost::answer_speakers(status, body)` and its siblings), and `expect()` in
+  `sim/scenes.cpp` fails the render on one that reads wrong.
+- **A scene can touch and check.** `host.tap(x, y)` presses for 100 ms as the scene starts, and a
+  second touch comes 200 ms after the first. The scene's optional `check` runs once it has run,
+  with the host and the Shell, and fails the render with the string it returns. A scene runs for
+  500 ms unless its `run_ms` asks for longer.
+- **Rendering a scene:** build it, advance the clock by its run time in 10 ms steps calling the
+  Shell's `update()` and `lv_timer_handler()`, run its check, call `lv_refr_now(disp)`, convert
+  the buffer to 24-bit RGB, encode it with
   `lodepng_encode24` and write the file with stdio. LVGL bundles lodepng with its encoder compiled
   in, so no other library is needed; its `lodepng_encode24_file` writes through `lv_fs`, which has
   no driver here.
 - **Artwork in scenes** is generated by `SimHost`: a deterministic two-colour pattern at the
-  requested size. No image files are committed.
-- **Use:** `render --all --out <dir>`, or `render <scene> --out <dir>`. It exits non-zero when a
-  scene is unknown, an LVGL assertion fires, or LVGL logs a warning or an error.
+  requested size, in the backend's form, read through `main/api/Artwork` as the device reads it.
+  No image files are committed.
+- **Use:** `render --all --out <dir>`, `render <scene>... --out <dir>`, or `render --list`. It
+  exits non-zero when a scene is unknown, an LVGL assertion fires, LVGL logs a warning or an
+  error, or a scene's fixture or touch does not do what the scene says.
 
 `lv_conf.h` and `sdkconfig.defaults` configure the same LVGL twice. Because both start from
 LVGL's defaults and differ only in the short list of section 2, the rule is: an LVGL option
@@ -745,8 +824,8 @@ attaches the ones that changed to what it puts to the operator. `build-sim/` is 
 Jenkins does not build `sim/`: its firmware job has the ESP-IDF container only, and the dev
 workflow runs `kc project test` on every slice.
 
-**What it does not show:** timing, scrolling speed, touch, the panel's colours, memory use. Those
-are seen on the display.
+**What it does not show:** timing, scrolling speed, touch under a finger, the panel's colours,
+memory use. Those are seen on the display.
 
 ## 6. Registering the model and provisioning a display
 
@@ -839,7 +918,7 @@ architecture changes below, and steps 4 and 5 wait for the Flash device slice.
    credentials and the WiFi, MQTT and IoT Support addresses. It reads the partition table from
    the board, which is why it comes after Flash device. Then reset the display.
 6. **Check:** the device's Logs tab in IoT Support shows the boot log, and the screen shows the
-   placeholder view.
+   speaker picker.
 
 Until Flash device exists, the same first flash is `idf.py -p <port> flash` from a workstation
 with ESP-IDF 5.5.3.
@@ -926,9 +1005,12 @@ Support's device log, where every milestone can read them.
 ### Artwork
 
 The display decodes nothing. An image arrives in the form section 4 names, is read straight into
-its PSRAM buffer, checked (magic, colour format, width and height as requested, length equal to
-12 + width × height × 2), and handed to LVGL as an `lv_image_dsc_t` pointing into that buffer.
-`CONFIG_LV_CACHE_DEF_SIZE=0`: LVGL has nothing to decode or cache.
+its PSRAM buffer, checked (a 200, magic, colour format, flags `0`, width and height as requested,
+stride 2 × width, length equal to 12 + width × height × 2; a set flag would have LVGL decompress
+the pixels), and handed to LVGL as an `lv_image_dsc_t` pointing into that buffer.
+`CONFIG_LV_CACHE_DEF_SIZE=0`: LVGL has nothing to decode or cache. `main/api/Artwork` holds the
+checks (`read_artwork`), the cache (`ArtworkCache`) and `ArtworkLoader`, which answers a view's
+`UiHost::request_artwork`.
 
 | Size | Used for | Bytes each |
 |---|---|---|
@@ -937,11 +1019,14 @@ its PSRAM buffer, checked (magic, colour format, width and height as requested, 
 | 80 × 80 | list rows, the now-playing bar | 12,800 |
 
 The cache holds images by artwork id and size, capped at 1.5 MiB in total. That is, for example,
-two large images and sixteen tiles. An image shown by a live widget is pinned. When the cap is
-reached the least recently used unpinned image is freed; when everything is pinned, the new image
-is not loaded and its widget keeps the placeholder, a flat tile with an icon. A view asks only
-for what is visible, and its requests die with it (the `scope` of section 4). Nothing is fetched
-while the screen is dark.
+two large images and sixteen tiles. An image a view holds is pinned: the view holds the `Artwork`,
+a shared pointer, for exactly as long as a widget draws from it. When the cap is reached the
+least recently used unpinned images are freed; when the pinned ones leave no room, the new image
+is not kept, the view is handed `nullptr`, and its widget keeps the placeholder, a flat tile with
+an icon. A picture the backend did not give, or that was not kept, is asked for again at the next
+change of the model, never on a timer. A view asks only for what is visible, and its requests die
+with it (the `scope` of section 4). Nothing is fetched while the screen is dark: what is asked for
+meanwhile, and still wanted, is fetched when it wakes.
 
 ### Lists
 
@@ -991,9 +1076,9 @@ provisioned on 2026-11-15; the results are from its log in IoT Support (Elastics
 | Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). With that fixed, the picture drifted at power-on, until the next wake; startup now ends with a restart (section 3). Holds since `f2217d1`: the operator's "Works" after a power-on and a wake, 2026-11-15 | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here. For drift in use: bounce buffers (section 3) |
 | `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | Failed: on the S3 it pins the picture to fb0. Taken out | done: the restart on every wake remains |
 | The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | The expander holds: the backlight is switched through it. The touch controller answered at bring-up, when the board had only been reset by esptool, but not after the operator's power-ons: it was probed before it left reset. It is now probed until it answers, and the result is logged where IoT Support gets it (section 2). Holds since `f2217d1`: `Touch: GT911 at 0x5D` after a power-on, and the operator's "Works" | none needed |
-| Touch coordinates match what is drawn, corner to corner: `PlaceholderView` draws a dot where each touch lands | Holds: the operator's "Works" at bring-up | `swap_xy` or the mirror flags of the touch configuration |
+| Touch coordinates match what is drawn, corner to corner: the skeleton's placeholder view drew a dot where each touch landed | Holds: the operator's "Works" at bring-up | `swap_xy` or the mirror flags of the touch configuration |
 | No brown-out reset in IoT Support's device log after a day of waking and sleeping at 240 MHz | One boot so far, `ESP_RST_POWERON`, then 7 minutes without a reset. The day is still to come | `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y` |
-| Free internal RAM at the placeholder view is above 100 KB | Holds: 144,735 bytes free with the event stream connected, at least 140,011 since boot | lower the UI task's stack to 12 KB; read the per-task high-water marks |
+| Free internal RAM at the skeleton's placeholder view is above 100 KB | Holds: 144,735 bytes free with the event stream connected, at least 140,011 since boot | lower the UI task's stack to 12 KB; read the per-task high-water marks |
 | An OTA update from IoT Support installs and the display comes back by itself | Holds: the display was off when `55f0ff2` was uploaded, and installed it when switched on. The install boot's own lines were not shipped before its restart, but the next boot runs `55f0ff2` with reset reason `ESP_RST_SW` and connects by itself | this is esp-mdm's path, unchanged from PaperClock |
 | The event stream reaches the deployed backend (added at bring-up) | Failed at first: "Connecting" on screen. The backend answered, but its certificate is the homelab CA's, and every handshake failed. With that root trusted (section 4), `Event stream ready` 1.5 seconds after startup, on every boot since | `backendUrl` on plain HTTP needs the backend's ingress to stop redirecting to HTTPS |
 
@@ -1008,6 +1093,10 @@ Two more things from the first boot's log:
   board check needs from earlier, such as the touch address, is logged again later or read over
   USB.
 
-The event stream and the HTTP client are first exercised against a real backend in milestone 1.
-What to watch there: that `esp_http_client_read` returns `-ESP_ERR_HTTP_EAGAIN` on a quiet stream
-as its header documents, and that the 75-second idle limit holds against the deployed heartbeat.
+Milestone 1 is the first firmware to use the backend, and what only a display shows of it is
+still to check there: the backend's connections on the handed root, the speaker choice's NVS read
+and write and the panel restart after it, a `POST` with an empty body and its 204 through
+`esp_http_client`, the events and every timing, the covers' fetch and how they draw, and the
+bar's touch targets under a finger. Also to watch: that `esp_http_client_read` returns
+`-ESP_ERR_HTTP_EAGAIN` on a quiet stream as its header documents, and that the 75-second idle
+limit holds against the deployed heartbeat.

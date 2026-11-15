@@ -23,7 +23,9 @@ board that cannot start; an LVGL assertion restarts the device on purpose.
 What comes from outside the firmware is the exception, and it is checked where it enters: an HTTP
 response, a JSON body, an event frame, an artwork header, IoT Support's device configuration. Bad
 data from there never crashes or restarts the display. It is logged and shown: the view says what
-is wrong, and the device stays usable. A backend that is down never restarts the device.
+is wrong, and the device stays usable. A backend that is down never restarts the device. An answer
+the API's document does not allow is refused whole; one it allows is never refused for a field the
+display does not show.
 
 ## The structure's rules
 
@@ -34,6 +36,10 @@ is wrong, and the device stays usable. A backend that is down never restarts the
   render the screens.
 - **`main/backend/` knows nothing of `ui/` or `Application`**, so it can move to `esp-libs` as it
   is when a second firmware needs it.
+- **`main/api/` is where the backend's answers are read**, into `ui/`'s types. It includes cJSON,
+  LVGL, the C++ standard library and `ui/`'s two doors only, so `sim/` builds it and the scenes
+  read their fixtures as the device reads the backend; `kc project test` fails on an ESP-IDF
+  include there.
 - **`main/board/` is the only code that talks to the hardware.** `ScreenPower` is the only code
   that switches the backlight, and never twice within a second.
 - **Memory.** Anything large or numerous goes to PSRAM: response bodies, artwork, JSON trees,
@@ -55,11 +61,12 @@ macros, no exceptions. Each file includes what it uses. Every string the UI show
 ## What "tested" means here
 
 The gates are `kc project build` (the firmware compiles and fits), `kc project test` (every screen
-renders to a PNG with no LVGL warning, and `ui/` keeps its include rule) and `kc project lint`
+renders to a PNG with no LVGL warning, every scene's fixtures and checks hold, and `ui/` and `api/`
+keep their include rules) and `kc project lint`
 (formatting and the architecture model). They prove the code builds and the screens draw. They do
-not prove timing, touch, the panel's colours, memory on the device, or anything the backend and
-the speaker do. Those are proven on a display, by the operator. Never describe device behaviour as
-verified on the strength of a green gate or a rendered PNG.
+not prove timing, touch under a finger, the panel's colours, memory on the device, or anything the
+backend and the speaker do. Those are proven on a display, by the operator. Never describe device
+behaviour as verified on the strength of a green gate or a rendered PNG.
 
 A slice that changes a screen adds or updates the scenes in `sim/scenes.cpp` so that every state
 it adds renders.
