@@ -6,9 +6,9 @@ questions with a decision each, and task 5 builds the firmware's skeleton from i
 **What it rests on.** Read on 2026-11-15: `pvginkel/ThermostatDisplay` (the old firmware for this
 board, with the vendor documentation under `documentation/`), `pvginkel/PaperClock`,
 `pvginkel/esp-libs` at `29e9f7e`, `pvginkel/IoTSupport`, the Jenkins shared library, the backend
-template's guide, LVGL 9.2.2's source and ESP-IDF 5.5.3's headers and Kconfig. Nothing here was
-run on a display: there is none flashed yet. What only a device can settle is listed under
-"To check on the first display", and each such item names its fallback.
+template's guide, LVGL 9.2.2's source and ESP-IDF 5.5.3's headers and Kconfig. It was written
+before any display ran the firmware. What only a device could settle is listed under "To check on
+the first display", with what the first display, flashed the same day, showed.
 
 ## The decisions
 
@@ -16,7 +16,7 @@ run on a display: there is none flashed yet. What only a device can settle is li
 |---|---|
 | Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events) and `ui/` (LVGL and standard C++ only). |
 | Carried over | The panel, expander, touch, backlight and motion-sensor code of ThermostatDisplay's shipped build: two framebuffers in PSRAM at a 14 MHz pixel clock. Rewritten for LVGL 9.2 and for ESP-IDF's current I2C driver, not copied. |
-| Picture drift | No change to `esp-libs`. The panel resynchronises every frame (`CONFIG_LCD_RGB_RESTART_IN_VSYNC`) and again whenever the screen is switched on, and code runs from PSRAM. An update is only written during boot, and the display restarts after it. |
+| Picture drift | No change to `esp-libs`. The panel resynchronises whenever the screen is switched on, as ThermostatDisplay's did, and code runs from PSRAM. Not every frame: on the S3, `CONFIG_LCD_RGB_RESTART_IN_VSYNC` pins the picture to the first framebuffer, which was the first display's artifacts. An update is only written during boot, and the display restarts after it. |
 | Brown-out | The backlight is switched at most once a second, in either direction, by one state machine. Boot lights the screen only after a power-on reset. |
 | HTTP and events | Three small tasks in the app: one for API calls, one for artwork, one holding the event stream. Results reach the UI task through esp-mdm's queue. The code lives in the app, `main/backend/`, written free of app types so it can move to `esp-libs` when a second firmware needs it. |
 | Backend address | IoT Support's device configuration, key `backendUrl`, required by the model's schema. Not a build setting. |
@@ -240,18 +240,40 @@ the other buffer itself (`refr_sync_areas` in `lv_refr.c`). The flush callback:
 ```cpp
 void RgbPanel::flush(lv_display_t* disp, const lv_area_t*, uint8_t* px_map) {
     if (lv_display_flush_is_last(disp)) {
-        xSemaphoreTake(_vsync, 0);                                  // drop a stale signal
-        esp_lcd_panel_draw_bitmap(_panel, 0, 0, 800, 480, px_map);  // px_map is a panel framebuffer: the driver swaps
-        xSemaphoreTake(_vsync, pdMS_TO_TICKS(100));                 // until the swap has happened
+        present(px_map);
     }
     lv_display_flush_ready(disp);
+}
+
+void RgbPanel::present(uint8_t* fb) {
+    if (now - _last_vsync_us > LCD_SWAP_DEADLINE_US) {   // 20 ms into a 30.6 ms frame
+        xSemaphoreTake(_vsync, 0);
+        wait_vsync();                                     // swap at the start of the next frame instead
+    }
+    esp_lcd_panel_draw_bitmap(_panel, 0, 0, 800, 480, fb);  // fb is a panel framebuffer: the driver swaps
+    xSemaphoreTake(_vsync, 0);                            // drop a signal from before the swap
+    wait_vsync();                                         // the DMA is on the new buffer from here
 }
 ```
 
 `_vsync` is a binary semaphore given from the panel's `on_vsync` callback with
-`xSemaphoreGiveFromISR`. Waiting for it keeps LVGL from drawing into the buffer that is still on
-screen. If direct mode shows stale or torn areas on the device, the fallback is one line:
-`LV_DISPLAY_RENDER_MODE_FULL`, which is exactly what ThermostatDisplay ran.
+`xSemaphoreGiveFromISR`; the callback also records the time. Waiting for it keeps LVGL from
+drawing into the buffer that is still on screen. That holds only because of how the driver swaps,
+read in ESP-IDF 5.5.3's `esp_lcd_panel_rgb.c` after the first display's artifacts (section 3):
+
+- `esp_lcd_panel_draw_bitmap` with a panel framebuffer writes the cache back over the rows given
+  (all 480: LVGL's copies between the buffers are not in the flushed areas) and points the last
+  DMA node of every framebuffer at the new one. The swap takes effect at the end of the frame on
+  screen, not at once.
+- The DMA reads that last node's link a few lines before the frame ends. A swap made later shows
+  the old buffer one frame more, while LVGL already draws into it. So a swap more than 20 ms
+  after the last vblank waits for the next one first; the frame is 840 × 510 clocks, 30.6 ms at
+  14 MHz.
+- The panel starts on fb0, so LVGL is given fb1 as its first buffer: its first frame is drawn
+  out of sight.
+
+Direct mode itself is not what went wrong on the first display: `LV_DISPLAY_RENDER_MODE_FULL`
+alternates the same two buffers and would have shown the same artifacts.
 
 ### Expander
 
@@ -317,9 +339,11 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE_PATH="certs/homelab-root.pem"
+
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
-CONFIG_LCD_RGB_RESTART_IN_VSYNC=y
 
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_USE_CUSTOM_MALLOC=y
@@ -367,9 +391,10 @@ wired: `OTAManager` declares the callback and nothing calls it.
 1. **Keeps all three.** `CONFIG_SPIRAM_XIP_FROM_PSRAM=y` is ESP-IDF 5.5's switch for both
    options; its help text says code "that need to be executing during Flash operation can
    continue working normally".
-2. **Adds `CONFIG_LCD_RGB_RESTART_IN_VSYNC=y`**, which ESP-IDF describes as "Reset the GDMA
-   channel every VBlank to stop permanent desyncs from happening". A drift then lasts one frame
-   instead of until the next wake.
+2. **Does not set `CONFIG_LCD_RGB_RESTART_IN_VSYNC`.** The skeleton set it, to make a drift last
+   one frame instead of until the next wake, and the first display showed artifacts with it
+   ("What the first display showed", below). A drift now lasts until the screen is next switched
+   on, as it did on ThermostatDisplay.
 3. **Adds no hook for updates, and changes nothing in `esp-libs`.** In esp-mdm, a firmware
    update is downloaded and written only during boot, synchronously, on the task that calls
    `process()`, and it ends in `esp_restart()`. So while flash is written the UI task is blocked,
@@ -378,10 +403,38 @@ wired: `OTAManager` declares the callback and nothing calls it.
 
 The other flash writes are short: the speaker choice saved to NVS, esp-mdm storing new
 provisioning data (followed by a restart), and a coredump being erased after its upload at boot.
-Items 1 and 2 cover them.
+Item 1 covers them, and the restart on the next wake puts right what it does not.
 
 The loading view cannot animate during an update, since its task is blocked. It shows "Checking
 for an update" as a still frame (section 1, step 3).
+
+### What the first display showed
+
+The skeleton, flashed on 2026-11-15, showed screen update artifacts. The cause is in ESP-IDF
+5.5.3's RGB driver, not in flash or PSRAM traffic:
+
+- **On the S3 a restart always scans out fb0.** A hardware workaround (`RGB_LCD_NEEDS_SEPARATE_RESTART_LINK`)
+  restarts the DMA through a one-node "restart link" that is mounted on `fbs[0]` when the panel
+  is created and never moved. The transfer follows the current buffer only through the link at
+  the end of a frame.
+- **`CONFIG_LCD_RGB_RESTART_IN_VSYNC` restarts on every vblank**, so it never gets there. The
+  panel showed fb0 always. LVGL alternates the two buffers, so every second update was drawn
+  straight into the visible buffer, and every other one was never shown until the next update
+  copied it across. ESP-IDF's FAQ calls the option a last resort, "Not Recommended", and its
+  own RGB example does not set it.
+- **ThermostatDisplay never set it.** Its only restart was the one on waking, which costs one
+  frame from fb0 and then follows the current buffer.
+
+So the option is off, and the restart on wake remains. `RgbPanel::restart` waits out the frame
+from fb0 before it returns, so the backlight comes on over the current picture. The swap itself
+is made safe in section 2.
+
+What would come next if the picture drifts in use (shifted sideways until the next wake): bounce
+buffers (`bounce_buffer_size_px = 10 * 800`, 32 KB of internal RAM, a copy from PSRAM in an
+interrupt on every ten lines), which the driver restarts by itself when a frame comes up short;
+then moving WiFi's and lwIP's buffers out of PSRAM (`CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=n`).
+At 14 MHz the panel uses about a fifth of what ESP-IDF's FAQ gives octal PSRAM at 80 MHz, so
+neither is expected to be needed.
 
 ### Switching the backlight too fast browns the board out
 
@@ -397,7 +450,8 @@ runs on the UI task, from `board.process()`:
 - **States:** `Off`, `On`, and `WaitRelease` (lit by a touch that is still down).
 - **The interval:** at least 1000 ms between two switches of the backlight. A request inside the
   interval stays pending and is applied when it ends. The first switch after boot is not delayed.
-- **Switching on:** `esp_lcd_rgb_panel_restart(panel)` first, then the expander write.
+- **Switching on:** `RgbPanel::restart()` first, which returns once the restarted frame is past
+  (section 3, up to two frames), then the expander write.
 - **Switching off:** the expander write only. The panel keeps scanning and LVGL keeps drawing.
 - **Wake:** motion, or a touch. A touch on a dark screen wakes it and is swallowed until the
   finger lifts, so it cannot press what was under it.
@@ -431,9 +485,17 @@ another project's repository and is the operator's to rule then.
 
 ### Requests
 
-The backend is unauthenticated and on the local network, so requests are plain HTTP with no
-token. If `backendUrl` starts with `https://`, the same code works: the client is configured with
-`crt_bundle_attach = esp_crt_bundle_attach`.
+The backend is unauthenticated and on the local network, so requests carry no token. Both
+schemes work: the client is configured with `crt_bundle_attach = esp_crt_bundle_attach`.
+
+**The deployed backend is HTTPS only**, found at the first display's bring-up on 2026-11-15: its
+ingress answers plain HTTP with a 301 to HTTPS, and its certificate is issued by the homelab CA,
+which Mozilla's bundle does not hold. Every connection then failed the handshake
+(`esp-x509-crt-bundle: No matching trusted root certificate found`), and the screen stayed at
+"Connecting". The firmware therefore adds the homelab root, `certs/homelab-root.pem`, to the
+bundle (`CONFIG_MBEDTLS_CUSTOM_CERTIFICATE_BUNDLE`), so `backendUrl` is `https://`. The file is a
+root certificate, public by nature, and holds no hostname or address; it is valid until 2036.
+Every client in the firmware verifies against the same bundle, esp-mdm's included.
 
 ```cpp
 struct HttpRequest {
@@ -896,18 +958,32 @@ The cost is a fixed set of sizes.
 
 ## To check on the first display
 
-Each of these is designed from the sources and has not run on the board. Task 5 checks them when
-the first display is flashed, and the fallback is the change to make if one fails.
+Each of these was designed from the sources before any display ran it, and the fallback is the
+change to make if one fails. The first display, `sonos_display_garage`, was flashed and
+provisioned on 2026-11-15; the results are from its log in IoT Support (Elasticsearch,
+`logstash-http-*`) and from the operator's look at it.
 
-| Check | Fallback |
-|---|---|
-| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode |
-| `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | remove the option; the restart on every wake remains |
-| The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | none needed in design: the addresses and the sequence are ThermostatDisplay's |
-| Touch coordinates match what is drawn, corner to corner: `PlaceholderView` draws a dot where each touch lands | `swap_xy` or the mirror flags of the touch configuration |
-| No brown-out reset in IoT Support's device log after a day of waking and sleeping at 240 MHz | `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y` |
-| Free internal RAM at the placeholder view is above 100 KB | lower the UI task's stack to 12 KB; read the per-task high-water marks |
-| An OTA update from IoT Support installs and the display comes back by itself | this is esp-mdm's path, unchanged from PaperClock |
+| Check | Result on the first display | Fallback |
+|---|---|---|
+| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). Whether they are gone is the operator's to see | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here |
+| `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | Failed: on the S3 it pins the picture to fb0. Taken out | done: the restart on every wake remains |
+| The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | Holds. The probe's lines come before log shipping starts, 3.9 s after boot, so they are not in the log; but touch answers and the backlight is switched on and off through the expander | none needed |
+| Touch coordinates match what is drawn, corner to corner: `PlaceholderView` draws a dot where each touch lands | Holds: the operator's "Works" at bring-up | `swap_xy` or the mirror flags of the touch configuration |
+| No brown-out reset in IoT Support's device log after a day of waking and sleeping at 240 MHz | One boot so far, `ESP_RST_POWERON`, then 7 minutes without a reset. The day is still to come | `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y` |
+| Free internal RAM at the placeholder view is above 100 KB | Holds: 152,983 bytes free, at least 141,103 since boot, flat over 7 minutes, with the event stream failing its handshake every 15 seconds | lower the UI task's stack to 12 KB; read the per-task high-water marks |
+| An OTA update from IoT Support installs and the display comes back by itself | To be read from the log of the update that carries these fixes | this is esp-mdm's path, unchanged from PaperClock |
+| The event stream reaches the deployed backend (added at bring-up) | Failed: "Connecting" on screen. The backend answered, but its certificate is the homelab CA's, and every handshake failed. The firmware now trusts that root (section 4) | `backendUrl` on plain HTTP needs the backend's ingress to stop redirecting to HTTPS |
+
+Two more things from the first boot's log:
+
+- **A core dump was uploaded at that boot**, from an earlier session whose log never reached IoT
+  Support. The session between Flash device and Provision device fits: until provisioning, NVS
+  holds no `prov` namespace, and esp-mdm's `ESP_ERROR_CHECK(_mdm_configuration.load())` aborts
+  on every start. IoT Support parsed it (core dump 333), but its summary is in IoT Support's
+  database only, so this is inferred, not read.
+- **The log shows only from 3.9 seconds after boot**, when esp-mdm's log shipping starts. What a
+  board check needs from earlier, such as the touch address, is logged again later or read over
+  USB.
 
 The event stream and the HTTP client are first exercised against a real backend in milestone 1.
 What to watch there: that `esp_http_client_read` returns `-ESP_ERR_HTTP_EAGAIN` on a quiet stream

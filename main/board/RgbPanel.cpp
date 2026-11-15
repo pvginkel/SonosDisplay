@@ -3,6 +3,7 @@
 #include "BoardConfig.h"
 #include "esp_attr.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_timer.h"
 #include "support.h"
 
 LOG_TAG(RgbPanel);
@@ -62,22 +63,53 @@ esp_err_t RgbPanel::begin_lvgl() {
     ESP_RETURN_ON_FALSE(_display, ESP_ERR_NO_MEM, TAG, "Cannot create the LVGL display");
 
     // Direct mode: LVGL draws only what changed, into the panel's own framebuffers, and copies
-    // those areas into the other buffer itself. The fallback is LV_DISPLAY_RENDER_MODE_FULL,
-    // which is what ThermostatDisplay ran.
+    // those areas into the other buffer itself. The panel starts on fb0, so LVGL's first frame
+    // goes into fb1, out of sight.
     lv_display_set_user_data(_display, this);
-    lv_display_set_buffers(_display, fb0, fb1, LCD_H_RES * LCD_V_RES * (LCD_BITS_PER_PIXEL / 8),
+    lv_display_set_buffers(_display, fb1, fb0, LCD_H_RES * LCD_V_RES * (LCD_BITS_PER_PIXEL / 8),
                            LV_DISPLAY_RENDER_MODE_DIRECT);
     lv_display_set_flush_cb(_display, flush);
 
     return ESP_OK;
 }
 
-void RgbPanel::restart() { ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_rgb_panel_restart(_panel)); }
+void RgbPanel::restart() {
+    // The driver restarts on the next vblank, and on the S3 always from fb0: its restart link is
+    // mounted there whatever buffer is current, and the transfer follows the current buffer
+    // only from the frame after. That frame from fb0 may be stale, or being drawn into, so this
+    // returns once it is past. The caller lights the backlight after it.
+    xSemaphoreTake(_vsync, 0);
+    ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_rgb_panel_restart(_panel));
+    wait_vsync();
+    wait_vsync();
+}
+
+void RgbPanel::wait_vsync() { xSemaphoreTake(_vsync, pdMS_TO_TICKS(LCD_VSYNC_TIMEOUT_MS)); }
+
+void RgbPanel::present(uint8_t* framebuffer) {
+    // Late in a frame the DMA has already read the link to the next one, so a swap made then
+    // would show the old buffer once more while LVGL draws into it. The swap waits for the
+    // next frame to start instead.
+    if (uint32_t(esp_timer_get_time()) - _last_vsync_us.load() > LCD_SWAP_DEADLINE_US) {
+        xSemaphoreTake(_vsync, 0);
+        wait_vsync();
+    }
+
+    // framebuffer is one of the panel's own, so the driver writes the cache back and points the
+    // end of every frame at it, rather than copying.
+    esp_lcd_panel_draw_bitmap(_panel, 0, 0, LCD_H_RES, LCD_V_RES, framebuffer);
+
+    // The next vblank comes after the DMA moved to the new buffer: from then on LVGL may draw
+    // into the old one.
+    xSemaphoreTake(_vsync, 0);
+    wait_vsync();
+}
 
 bool IRAM_ATTR RgbPanel::on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*, void* user_ctx) {
     auto self = (RgbPanel*)user_ctx;
     BaseType_t higher_priority_task_woken = pdFALSE;
 
+    self->_last_vsync_us.store(uint32_t(esp_timer_get_time()));
     xSemaphoreGiveFromISR(self->_vsync, &higher_priority_task_woken);
 
     return higher_priority_task_woken == pdTRUE;
@@ -87,16 +119,7 @@ void RgbPanel::flush(lv_display_t* display, const lv_area_t*, uint8_t* px_map) {
     auto self = (RgbPanel*)lv_display_get_user_data(display);
 
     if (lv_display_flush_is_last(display)) {
-        // Drop a stale signal.
-        xSemaphoreTake(self->_vsync, 0);
-
-        // px_map is one of the panel's framebuffers, so the driver swaps to it rather than
-        // copying.
-        esp_lcd_panel_draw_bitmap(self->_panel, 0, 0, LCD_H_RES, LCD_V_RES, px_map);
-
-        // Wait until the swap has happened, so LVGL does not draw into the buffer that is still
-        // on screen.
-        xSemaphoreTake(self->_vsync, pdMS_TO_TICKS(LCD_VSYNC_TIMEOUT_MS));
+        self->present(px_map);
     }
 
     lv_display_flush_ready(display);

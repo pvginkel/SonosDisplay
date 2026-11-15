@@ -42,8 +42,13 @@ constexpr gpio_num_t LCD_GPIO_DATA[LCD_DATA_WIDTH] = {
     GPIO_NUM_48, GPIO_NUM_47, GPIO_NUM_21, GPIO_NUM_1,  GPIO_NUM_2,  GPIO_NUM_42, GPIO_NUM_41, GPIO_NUM_40,
 };
 
-// How long a flush waits for the panel to swap to the frame just drawn.
+// How long a flush waits for one vblank. A frame is 840 x 510 clocks, 30.6 ms at 14 MHz.
 constexpr uint32_t LCD_VSYNC_TIMEOUT_MS = 100;
+
+// How far into a frame, counted from its vblank, a swap of framebuffers still takes effect at
+// the end of that frame. The DMA reads the link to the next buffer a few lines before the frame
+// ends, about 29 ms in; the rest is margin for the cache writeback and for preemption.
+constexpr uint32_t LCD_SWAP_DEADLINE_US = 20 * 1000;
 
 // I2C bus, shared by the expander and the touch controller.
 
