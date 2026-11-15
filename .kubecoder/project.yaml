@@ -1,0 +1,31 @@
+projects:
+  root:
+    description: >-
+      SonosDisplay: ESP32-S3 touch-screen Sonos controller firmware (ESP-IDF 5.5, LVGL 9.2),
+      built against the shared components in ../esp-libs, with sim/, a native render of the
+      screens in main/ui/ to PNG files.
+
+    # The firmware build pipeline. This repo also carries Jenkinsfile.architecture, built by
+    # the separate Jenkins job AaC/SonosDisplay (the architecture-as-code producer); `jenkins:`
+    # takes one name and this is the main build.
+    jenkins: Firmware/SonosDisplay
+
+    # No setup: the toolchains live in the sidecars, ../esp-libs is mounted by the environment,
+    # `idf.py build` downloads the managed components into managed_components/ on the first
+    # build, and sim/'s configure downloads LVGL 9.2.2 into build-sim/_deps/.
+
+    # What CI runs (espFirmware.build: `/opt/esp/entrypoint.sh idf.py build`). The sidecar
+    # applies that wrapper to every command itself, so it is not spelled here. The build fails
+    # when build/sonos_display.bin passes 2.5 MiB (tools/check-image-size.cmake).
+    build: cexec esp-idf idf.py build
+
+    # sim/: main/ui/ against LVGL 9.2.2 natively, every scene rendered to
+    # build-sim/screens/<scene>.png. It fails on an ESP-IDF include in main/ui/, an LVGL
+    # assertion, or an LVGL warning. Jenkins does not run it: its firmware job has the ESP-IDF
+    # container only. A slice that changes a screen reads the PNGs it changed.
+    test: cexec native sh -c 'cmake -S sim -B build-sim -G Ninja && cmake --build build-sim && build-sim/render --all --out build-sim/screens'
+
+    lint:
+      # clang-format over main/ and sim/ with main/.clang-format. main/ui/fonts/ is left out:
+      # tools/fonts/generate.sh writes it, so it stays as the generator emits it.
+      - cexec native sh -c 'find main sim \( -name "*.c" -o -name "*.cpp" -o -name "*.h" \) ! -path "main/ui/fonts/*" -print0 | xargs -0 clang-format --style=file:main/.clang-format --dry-run --Werror'
