@@ -1,0 +1,7 @@
+/build
+/build-sim
+/managed_components
+/sdkconfig
+/sdkconfig.old
+/dependencies.lock
+/tools/fonts/node_modules

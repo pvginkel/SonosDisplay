@@ -1,0 +1,13 @@
+# The icons in main/ui/fonts/icons_*.c: a name, then its Material Design Icons codepoint, as in
+# @mdi/font 7.4.47's scss/_variables.scss. generate.sh makes ICON_<NAME> in icons.h from each line.
+music F075A
+play F040A
+pause F03E4
+skip_next F04AD
+skip_previous F04AE
+volume_high F057E
+speaker F04C3
+playlist_music F0CB8
+cloud_off F0164
+alert F05D6
+update F06B0
