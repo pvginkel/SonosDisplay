@@ -29,7 +29,13 @@ public:
 
     std::weak_ptr<void> get_scope() const { return _scope; }
 
+    // Whether the Shell shows the now-playing bar under this view.
+    virtual bool has_bar() const { return true; }
+
 protected:
     virtual void do_render(lv_obj_t* parent) = 0;
     virtual void do_update() {}
+
+    // Called when the view shows again, after a view that was over it closed.
+    virtual void do_show() {}
 };

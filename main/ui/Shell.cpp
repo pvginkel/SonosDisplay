@@ -9,7 +9,7 @@
 
 LOG_TAG(Shell);
 
-Shell::Shell(UiHost* host) : _host(host) {}
+Shell::Shell(UiHost* host) : _host(host), _bar(host) {}
 
 Shell::~Shell() {
     _views.clear();
@@ -26,8 +26,12 @@ void Shell::begin(lv_display_t* display) {
     _screen = lv_display_get_screen_active(display);
     lv_obj_remove_flag(_screen, LV_OBJ_FLAG_SCROLLABLE);
 
+    _height = lv_display_get_vertical_resolution(display);
+
     _content = lv_container_create(_screen);
-    lv_obj_set_size(_content, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_size(_content, LV_PCT(100), _height);
+
+    _bar.create(_screen);
 
     create_marker();
 }
@@ -63,6 +67,8 @@ void Shell::push(std::unique_ptr<View> view) {
 
     view->render(_content);
     _views.push_back(std::move(view));
+
+    layout();
 }
 
 void Shell::pop() {
@@ -73,6 +79,8 @@ void Shell::pop() {
 
     _views.pop_back();
     _views.back()->set_visible(true);
+
+    layout();
 }
 
 void Shell::replace(std::unique_ptr<View> view) {
@@ -110,11 +118,28 @@ void Shell::update() {
         show_first_view();
     }
 
+    layout();
+
     if (auto current = get_current()) {
         current->update();
     }
 
+    _bar.update();
+
     update_marker();
+}
+
+// Runs whenever the top view or the hold on the picker may have changed, so no frame is drawn
+// with the bar over a view's content.
+void Shell::layout() {
+    const auto current = get_current();
+    const auto bar = current && current->has_bar() && !_host->get_model().needs_speaker();
+    if (bar == _bar.is_shown()) {
+        return;
+    }
+
+    _bar.set_shown(bar);
+    lv_obj_set_height(_content, _height - (bar ? NowPlayingBar::HEIGHT : 0));
 }
 
 void Shell::update_marker() {

@@ -1,5 +1,7 @@
 #include "lv_support.h"
 
+#include <algorithm>
+
 void lv_obj_set_grid_cell(lv_obj_t* obj, lv_grid_align_t x_align, uint8_t col_pos, lv_grid_align_t y_align,
                           uint8_t row_pos) {
     lv_obj_set_grid_cell(obj, x_align, col_pos, 1, y_align, row_pos, 1);
@@ -35,4 +37,16 @@ lv_obj_t* lv_container_create(lv_obj_t* parent) {
     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
 
     return obj;
+}
+
+void lv_label_set_text_lines(lv_obj_t* label, const char* text, int32_t width, int32_t lines) {
+    const auto font = lv_obj_get_style_text_font(label, LV_PART_MAIN);
+
+    lv_point_t size;
+    lv_text_get_size(&size, text, font, 0, 0, width, LV_TEXT_FLAG_NONE);
+
+    lv_obj_set_height(label, std::min(size.y, lines * lv_font_get_line_height(font)));
+    lv_label_set_text(label, text);
+
+    lv_obj_update_flag(label, LV_OBJ_FLAG_HIDDEN, !*text);
 }

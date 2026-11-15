@@ -26,6 +26,7 @@ void View::update() { do_update(); }
 void View::set_visible(bool visible) {
     if (visible) {
         lv_obj_remove_flag(_root, LV_OBJ_FLAG_HIDDEN);
+        do_show();
     } else {
         lv_obj_add_flag(_root, LV_OBJ_FLAG_HIDDEN);
     }

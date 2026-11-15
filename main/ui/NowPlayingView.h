@@ -7,9 +7,8 @@
 // speaker picker. While the playback is on its way, nothing is loaded or the backend gave none,
 // it says so instead.
 
-#include <memory>
-#include <string>
-
+#include "Controls.h"
+#include "Cover.h"
 #include "View.h"
 
 class Shell;
@@ -21,56 +20,35 @@ class NowPlayingView : public View {
     // The model's count of commands and volume changes not taken that this view has said.
     uint32_t _not_taken_said{};
     uint32_t _notice_since{};
-    // Whether the middle control is pause; it is play otherwise.
-    bool _pause_shown{};
-    // The id of the cover that is shown or asked for; empty while the track has none, or the
-    // backend did not give it.
-    std::string _cover_id;
-    // The scope of the request for it, which ends when another cover is wanted.
-    std::shared_ptr<void> _cover_request;
-    // The cover, held while _cover_image draws from it.
-    Artwork _cover;
-    lv_obj_t* _cover_tile{};
-    lv_obj_t* _cover_image{};
+    // Destroyed before View deletes the tile it is in.
+    Cover _cover;
+    TransportControls _transport;
+    VolumeControl _volume;
     lv_obj_t* _title{};
     lv_obj_t* _artist{};
     lv_obj_t* _detail{};
     lv_obj_t* _controls{};
-    lv_obj_t* _previous{};
-    lv_obj_t* _play_pause{};
-    lv_obj_t* _next{};
     lv_obj_t* _retry{};
-    lv_obj_t* _volume_down{};
-    lv_obj_t* _volume_up{};
-    lv_obj_t* _volume_icon{};
-    lv_obj_t* _volume_level{};
     lv_obj_t* _notice{};
 
 public:
-    NowPlayingView(UiHost* host, Shell* shell) : View(host), _shell(shell) {}
-    ~NowPlayingView() override;
+    NowPlayingView(UiHost* host, Shell* shell);
+
+    // It carries the bar's controls in full.
+    bool has_bar() const override { return false; }
 
 protected:
     void do_render(lv_obj_t* parent) override;
     void do_update() override;
+    void do_show() override;
 
 private:
     void create_cover(lv_obj_t* parent);
     void create_speaker_button(lv_obj_t* parent);
     void create_texts(lv_obj_t* parent);
-    void create_controls(lv_obj_t* parent);
-    lv_obj_t* create_control(lv_obj_t* parent, int32_t size, const lv_font_t* font, lv_event_cb_t clicked);
     void create_retry(lv_obj_t* parent);
-    void create_volume(lv_obj_t* parent);
     void apply();
-    void apply_cover(const Playback& playback);
-    void show_cover(Artwork artwork);
-    void drop_cover();
     void apply_texts(const Playback& playback);
-    void apply_volume(const Volume& volume);
-    void apply_control(lv_obj_t* control, const char* icon, bool live, bool primary, bool sending);
     static void speaker_clicked(lv_event_t* event);
-    static void control_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
-    static void volume_clicked(lv_event_t* event);
 };

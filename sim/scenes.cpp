@@ -138,11 +138,12 @@ static const char* const UNREADABLE_PLAYBACKS[] = {
     R"("artwork_id":7}})",
 };
 
-// The pictures of the playing and the paused fixtures' tracks, and the size the now-playing
-// screen shows a cover at.
+// The pictures of the playing and the paused fixtures' tracks, and the sizes the now-playing
+// screen and the bar show a cover at.
 static const char ARTWORK_PLAYING[] = "YXJ0d29yay9zdmVmbg";
 static const char ARTWORK_PAUSED[] = "YXJ0d29yay9yYW1lYXU";
 static constexpr int32_t COVER_SIZE = 400;
+static constexpr int32_t BAR_COVER_SIZE = 80;
 
 // One speaker, as GET /api/speakers/{speaker_id} answers it: the Garage of the list, alone in its
 // group.
@@ -220,6 +221,12 @@ static constexpr lv_point_t TRY_AGAIN = {612, 332};
 static constexpr lv_point_t VOLUME_DOWN = {492, 420};
 static constexpr lv_point_t VOLUME_UP = {732, 420};
 
+// Where the bar's controls are.
+static constexpr lv_point_t BAR_PLAY_PAUSE = {400, 433};
+static constexpr lv_point_t BAR_NEXT = {484, 433};
+static constexpr lv_point_t BAR_VOLUME_DOWN = {580, 433};
+static constexpr lv_point_t BAR_VOLUME_UP = {748, 433};
+
 // Where the speaker picker's first two rows are.
 static constexpr lv_point_t FIRST_SPEAKER = {400, 163};
 static constexpr lv_point_t SECOND_SPEAKER = {400, 263};
@@ -237,13 +244,46 @@ static bool shows(const Shell& shell) {
     return dynamic_cast<const T*>(shell.get_current()) != nullptr;
 }
 
-static void loading(SimHost& host, Shell& shell) { shell.replace(std::make_unique<LoadingView>(&host, MSG_STARTING)); }
+// Whether a label that is on screen says this.
+static bool says(const lv_obj_t* obj, const char* text) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return false;
+    }
+    if (lv_obj_check_type(obj, &lv_label_class) && !strcmp(lv_label_get_text(obj), text)) {
+        return true;
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        if (says(lv_obj_get_child(obj, int32_t(i)), text)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool says(const char* text) { return says(lv_screen_active(), text); }
+
+static const char* check_no_bar(const SimHost&, const Shell& shell) {
+    return shell.shows_bar() ? "the bar shows under a view that goes without it" : nullptr;
+}
+
+// The views of the start go without the bar, with a speaker chosen too: the stored choice is read
+// before they show.
+static void loading(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+
+    shell.replace(std::make_unique<LoadingView>(&host, MSG_STARTING));
+}
 
 static void loading_update(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+
     shell.replace(std::make_unique<LoadingView>(&host, MSG_CHECKING_FOR_UPDATE));
 }
 
 static void no_backend(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
     host.model().backend_url.clear();
 
     auto view = std::make_unique<LoadingView>(&host, MSG_CHECKING_FOR_UPDATE);
@@ -270,8 +310,12 @@ static void speakers(SimHost& host, Shell& shell) {
     shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
 }
 
-static const char* check_held(const SimHost&, const Shell& shell) {
-    return shows<SpeakerPickerView>(shell) ? nullptr : "the display is not held on the speaker picker";
+static const char* check_held(const SimHost& host, const Shell& shell) {
+    if (!shows<SpeakerPickerView>(shell)) {
+        return "the display is not held on the speaker picker";
+    }
+
+    return check_no_bar(host, shell);
 }
 
 // No speaker is chosen: the display is held on the picker.
@@ -444,15 +488,16 @@ static void open_now_playing(SimHost& host, Shell& shell, const char* playback, 
     shell.open();
 }
 
-// The cover a view holds is the loaded track's, at the screen's size, and it holds no other.
-static const char* check_cover(const SimHost& host) {
+// The covers held are the loaded track's and no other: the now-playing screen's at its size, and
+// the bar's at its own for as long as the bar shows.
+static const char* check_cover(const SimHost& host, const Shell& shell) {
     const auto& playback = host.get_model().playback;
     const auto shows_track = playback.state == LoadState::Loaded && playback.track;
     const auto wanted = shows_track ? playback.track->artwork_id : std::string();
 
     for (const auto& fetch : host.get_artwork_fetches()) {
-        if (fetch.size != COVER_SIZE) {
-            return "a cover was fetched at another size than the screen shows it at";
+        if (fetch.size != COVER_SIZE && fetch.size != BAR_COVER_SIZE) {
+            return "a cover was fetched at a size neither the screen nor the bar shows it at";
         }
         if (fetch.artwork_id != wanted && host.is_artwork_shown(fetch.artwork_id, fetch.size)) {
             return "the cover of another track than the loaded one is held";
@@ -463,15 +508,23 @@ static const char* check_cover(const SimHost& host) {
         return "the loaded track's cover is not shown";
     }
 
-    return nullptr;
+    const auto in_bar = host.is_artwork_shown(wanted, BAR_COVER_SIZE);
+    if (shell.shows_bar()) {
+        return in_bar || wanted.empty() ? nullptr : "the bar does not show the loaded track's cover";
+    }
+
+    return in_bar ? "the bar holds a cover while it is hidden" : nullptr;
 }
 
 static const char* check_now_playing(const SimHost& host, const Shell& shell) {
     if (!shows<NowPlayingView>(shell)) {
         return "the display is not on the now-playing screen";
     }
+    if (shell.shows_bar()) {
+        return "the now-playing screen shows the bar";
+    }
 
-    return check_cover(host);
+    return check_cover(host, shell);
 }
 
 static void now_playing(SimHost& host, Shell& shell) {
@@ -743,8 +796,23 @@ static void now_playing_speakers(SimHost& host, Shell& shell) {
     host.tap(SPEAKER_BUTTON.x, SPEAKER_BUTTON.y);
 }
 
-static const char* check_speakers_open(const SimHost&, const Shell& shell) {
-    return shows<SpeakerPickerView>(shell) ? nullptr : "the touch did not open the speaker picker";
+static const char* check_bar(const SimHost& host, const Shell& shell) {
+    if (!shows<SpeakerPickerView>(shell)) {
+        return "the display is not on the speaker picker";
+    }
+    if (!shell.shows_bar()) {
+        return "the picker reached from the now-playing screen does not show the bar";
+    }
+
+    return check_cover(host, shell);
+}
+
+static const char* check_speakers_open(const SimHost& host, const Shell& shell) {
+    if (!shows<SpeakerPickerView>(shell)) {
+        return "the touch did not open the speaker picker";
+    }
+
+    return check_bar(host, shell);
 }
 
 // A pick of the speaker that is chosen already changes nothing, and comes back to now playing.
@@ -1181,7 +1249,7 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
         host.answer_playback(200, playback);
         shell.update();
 
-        return check_cover(host);
+        return check_cover(host, shell);
     };
 
     // The next track's cover is on its way: the one of the track before it does not stay.
@@ -1208,7 +1276,7 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     host.answer_artwork();
 }
 
-static const char* check_cover_change(const SimHost& host, const Shell&) {
+static const char* check_cover_change(const SimHost& host, const Shell& shell) {
     const std::vector<ArtworkFetch> fetches = {
         {ARTWORK_PLAYING, COVER_SIZE},
         {ARTWORK_PAUSED, COVER_SIZE},
@@ -1218,7 +1286,7 @@ static const char* check_cover_change(const SimHost& host, const Shell&) {
         return "the covers were not fetched as the tracks changed";
     }
 
-    return check_cover(host);
+    return check_cover(host, shell);
 }
 
 // An image that fails its checks, or an answer that is not an image, keeps the placeholder.
@@ -1353,19 +1421,299 @@ static void now_playing_cover_wake(SimHost& host, Shell& shell) {
     host.set_screen_lit(true);
 }
 
-static const char* check_cover_wake(const SimHost& host, const Shell&) {
+static const char* check_cover_wake(const SimHost& host, const Shell& shell) {
     if (host.get_artwork_fetches() != std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}}) {
         return "the cover of what plays was not fetched once when the screen woke";
     }
 
-    return check_cover(host);
+    return check_cover(host, shell);
+}
+
+// The picker reached from the now-playing screen, which is where the bar shows.
+static void open_bar(SimHost& host, Shell& shell, const char* playback, const char* speaker = SPEAKER) {
+    open_now_playing(host, shell, playback, speaker);
+    expect(!shell.shows_bar(), "the now-playing screen shows the bar");
+
+    shell.open_speaker_picker();
+    expect(shell.shows_bar(), "the picker reached from the now-playing screen does not show the bar");
+}
+
+// The bar under the picker: the cover at its own size, beside the one the now-playing screen
+// under the picker still holds.
+static void bar(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, BAR_COVER_SIZE},
+    };
+    expect(host.get_artwork_fetches() == fetches, "the bar's cover was not fetched once, at the bar's size");
+
+    static constexpr uint8_t WITNESSED_HEADER[] = {0x19, 0x12, 0, 0, 0x50, 0, 0x50, 0, 0xA0, 0, 0, 0};
+    const auto cover = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    expect(cover.size() == 12812 && !memcmp(cover.data(), WITNESSED_HEADER, sizeof(WITNESSED_HEADER)),
+           "the generated cover of the bar is not in the form the backend answers");
+}
+
+// Paused, with texts longer than their places.
+static void bar_paused(SimHost& host, Shell& shell) { open_bar(host, shell, PAUSED); }
+
+// A radio stream: the station under the title, the placeholder, pause live and Next unavailable.
+// A touch on Next sends nothing.
+static void bar_radio(SimHost& host, Shell& shell) {
+    open_bar(host, shell, RADIO);
+
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+}
+
+static const char* check_bar_radio(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_radio(host, shell)) {
+        return problem;
+    }
+    if (!host.get_model().playback.can_pause) {
+        return "the radio stream does not allow a pause";
+    }
+
+    return check_bar(host, shell);
+}
+
+static const char* check_nothing_sent(const SimHost& host, const Shell& shell) {
+    if (!host.get_commands().empty()) {
+        return "a control that is not live sent a command";
+    }
+    if (!host.get_volume_changes().empty()) {
+        return "a volume control that is not live sent a change";
+    }
+
+    return shell.shows_bar() ? nullptr : "the bar does not show";
+}
+
+// Nothing is loaded: neither play nor next is live.
+static void bar_nothing(SimHost& host, Shell& shell) {
+    open_bar(host, shell, NOTHING_LOADED);
+
+    host.tap(BAR_PLAY_PAUSE.x, BAR_PLAY_PAUSE.y);
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+}
+
+// The playback and the volume are on their way: no control is live.
+static void bar_loading(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+    answer_speakers(host);
+
+    shell.open();
+    shell.open_speaker_picker();
+
+    host.tap(BAR_PLAY_PAUSE.x, BAR_PLAY_PAUSE.y);
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+// The backend cannot be reached: the bar says so, no command goes, and one step of the volume
+// goes without the level.
+static void bar_unreachable(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+    host.model().speakers.state = LoadState::Unreachable;
+    host.model().playback.state = LoadState::Unreachable;
+    host.model().volume.state = LoadState::Unreachable;
+
+    shell.open();
+    shell.open_speaker_picker();
+
+    host.tap(BAR_PLAY_PAUSE.x, BAR_PLAY_PAUSE.y);
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+static const char* check_bar_unreachable(const SimHost& host, const Shell& shell) {
+    if (!host.get_commands().empty()) {
+        return "a control that is not live sent a command";
+    }
+    if (host.get_volume_changes() != std::vector<int>{Volume::STEP}) {
+        return "the touch did not send one step without the level";
+    }
+
+    return shell.shows_bar() && says(MSG_BACKEND_UNREACHABLE) ? nullptr : "the bar does not say what is wrong";
+}
+
+// An error after a playback: the bar says so in the track's place, without its cover, and the
+// commands the last playback listed are not live.
+static void bar_error(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_playback(502, ERROR_SPEAKER);
+
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+}
+
+static const char* check_bar_error(const SimHost& host, const Shell& shell) {
+    if (!host.get_commands().empty()) {
+        return "a control that is not live sent a command";
+    }
+    if (host.is_artwork_shown(ARTWORK_PLAYING, BAR_COVER_SIZE)) {
+        return "the bar shows a cover beside an error";
+    }
+
+    return shell.shows_bar() && says(MSG_BACKEND_FAILED) ? nullptr : "the bar does not say what is wrong";
+}
+
+// A touch on the bar's pause shows at once, and the backend's 204 leaves it showing.
+static void bar_press(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_commands(204, "");
+
+    host.tap(BAR_PLAY_PAUSE.x, BAR_PLAY_PAUSE.y);
+}
+
+// A touch on the bar's Next shows while the backend has not answered it.
+static void bar_next(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+}
+
+// A command the speaker refuses: the bar says it was not taken, and the playback fetched again no
+// longer lists it.
+static void bar_refused(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_commands(409, ERROR_NOT_AVAILABLE);
+    host.answer_next_playback(200, PLAYING_LAST);
+
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+}
+
+static const char* check_bar_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+    if (!says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar does not say that the command was not taken";
+    }
+
+    return check_bar(host, shell);
+}
+
+// What the bar said is said once: back on the now-playing screen it is not said again.
+static void bar_refused_back(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_commands(409, ERROR_NOT_AVAILABLE);
+    host.answer_next_playback(200, PLAYING_LAST);
+
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+    host.tap(FIRST_SPEAKER.x, FIRST_SPEAKER.y);
+}
+
+static const char* check_bar_refused_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+    if (says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the now-playing screen says again what the bar said";
+    }
+
+    return check_now_playing(host, shell);
+}
+
+// What the now-playing screen said is said once: the bar that shows next does not say it again.
+static void bar_after_refused(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+    host.answer_commands(409, ERROR_NOT_AVAILABLE);
+    host.answer_next_playback(200, PLAYING_LAST);
+
+    host.tap(NEXT.x, NEXT.y);
+    host.tap(SPEAKER_BUTTON.x, SPEAKER_BUTTON.y);
+}
+
+static const char* check_bar_after_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+    if (says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar says again what the now-playing screen said";
+    }
+
+    return check_bar(host, shell);
+}
+
+// A touch on the bar's up shows in the level at once, and the backend's answer leaves it showing.
+static void bar_volume_up(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_volume_changes(200, VOLUME_26);
+
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+// A burst of presses on the bar: one change is on its way, and the press since waits.
+static void bar_volume_burst(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+// The group is muted: the level shows as not in effect.
+static void bar_volume_muted(SimHost& host, Shell& shell) { open_bar(host, shell, PAUSED, SPEAKER_MUTED); }
+
+// At the top of the range the bar's up is unavailable, and a touch on it sends nothing.
+static void bar_volume_limit(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING, SPEAKER_LOUDEST);
+
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+// A change the backend refuses: the bar says it was not taken, and the volume fetched again shows.
+static void bar_volume_refused(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_volume_changes(502, ERROR_SPEAKER);
+    host.answer_next_volume(200, SPEAKER_MUTED);
+
+    host.tap(BAR_VOLUME_DOWN.x, BAR_VOLUME_DOWN.y);
+}
+
+static const char* check_bar_volume_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_volume_refused(host, shell)) {
+        return problem;
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) ? nullptr : "the bar does not say that the change was not taken";
+}
+
+// Another track while the bar shows: the bar's cover follows it, and the bar lets go of its cover
+// when it hides.
+static void bar_cover_change(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+
+    host.answer_playback(200, PAUSED);
+    shell.update();
+    expect(host.is_artwork_shown(ARTWORK_PAUSED, BAR_COVER_SIZE) &&
+               !host.is_artwork_shown(ARTWORK_PLAYING, BAR_COVER_SIZE),
+           "the bar's cover did not follow the track");
+
+    // Back on the now-playing screen, which was not kept current under the picker.
+    shell.back();
+    shell.update();
+    expect(!check_now_playing(host, shell), "the now-playing screen did not come back with the track's cover");
+
+    // The bar's cover is in the cache when it shows again.
+    shell.open_speaker_picker();
+}
+
+static const char* check_bar_cover_change(const SimHost& host, const Shell& shell) {
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, BAR_COVER_SIZE},
+        {ARTWORK_PAUSED, BAR_COVER_SIZE},
+        {ARTWORK_PAUSED, COVER_SIZE},
+    };
+    if (host.get_artwork_fetches() != fetches) {
+        return "the covers were not fetched as the track changed under the bar";
+    }
+
+    return check_bar(host, shell);
 }
 
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
-        {"loading", loading},
-        {"loading-update", loading_update},
-        {"no-backend", no_backend},
+        {"loading", loading, check_no_bar},
+        {"loading-update", loading_update, check_no_bar},
+        {"no-backend", no_backend, check_no_bar},
         {"speakers", speakers},
         {"speakers-none", speakers_none, check_held},
         {"speakers-missing", speakers_missing, check_missing},
@@ -1405,6 +1753,24 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-cover-change", now_playing_cover_change, check_cover_change},
         {"now-playing-cover-refused", now_playing_cover_refused, check_cover_refused},
         {"now-playing-cover-wake", now_playing_cover_wake, check_cover_wake},
+        {"bar", bar, check_bar},
+        {"bar-paused", bar_paused, check_bar},
+        {"bar-radio", bar_radio, check_bar_radio},
+        {"bar-nothing", bar_nothing, check_nothing_sent},
+        {"bar-loading", bar_loading, check_nothing_sent},
+        {"bar-unreachable", bar_unreachable, check_bar_unreachable},
+        {"bar-error", bar_error, check_bar_error},
+        {"bar-press", bar_press, check_press},
+        {"bar-next", bar_next, check_next},
+        {"bar-refused", bar_refused, check_bar_refused},
+        {"bar-refused-back", bar_refused_back, check_bar_refused_back},
+        {"bar-after-refused", bar_after_refused, check_bar_after_refused},
+        {"bar-volume-up", bar_volume_up, check_volume_up},
+        {"bar-volume-burst", bar_volume_burst, check_volume_burst},
+        {"bar-volume-muted", bar_volume_muted, check_bar},
+        {"bar-volume-limit", bar_volume_limit, check_volume_limit},
+        {"bar-volume-refused", bar_volume_refused, check_bar_volume_refused},
+        {"bar-cover-change", bar_cover_change, check_bar_cover_change},
     };
 
     return scenes;

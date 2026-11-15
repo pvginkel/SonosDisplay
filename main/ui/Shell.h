@@ -1,8 +1,9 @@
 #pragma once
 
-// The one LVGL screen: a content area holding a stack of views, and the "Reconnecting" marker.
-// From milestone 1 the now-playing bar sits under the content area, which is how it stays at the
-// bottom of every screen.
+// The one LVGL screen: a content area holding a stack of views, the now-playing bar under it, and
+// the "Reconnecting" marker. The bar is the Shell's, which is how it stays at the bottom of every
+// screen: it shows under every view that has it (View::has_bar()) while the display is not held
+// on the speaker picker, and the content area ends where it begins.
 //
 // It also decides which view the app opens on: now playing, or the speaker picker while the
 // display is held on it (Model::needs_speaker()).
@@ -11,6 +12,7 @@
 #include <optional>
 #include <vector>
 
+#include "NowPlayingBar.h"
 #include "UiHost.h"
 #include "View.h"
 #include "lvgl.h"
@@ -18,7 +20,9 @@
 class Shell {
     UiHost* _host;
     lv_obj_t* _screen{};
+    int32_t _height{};
     lv_obj_t* _content{};
+    NowPlayingBar _bar;
     lv_obj_t* _marker{};
     std::vector<std::unique_ptr<View>> _views;
     // Whether the app's first view is the speaker picker; empty until open().
@@ -59,11 +63,14 @@ public:
 
     View* get_current() const { return _views.empty() ? nullptr : _views.back().get(); }
 
+    bool shows_bar() const { return _bar.is_shown(); }
+
     // Called from the UI loop.
     void update();
 
 private:
     void show_first_view();
+    void layout();
     void create_marker();
     void update_marker();
 };

@@ -20,6 +20,9 @@ public:
     void set_message(const char* message);
     void set_error(const char* message);
 
+    // It shows before the backend's tasks start: the bar has nothing to control yet.
+    bool has_bar() const override { return false; }
+
 protected:
     void do_render(lv_obj_t* parent) override;
 
