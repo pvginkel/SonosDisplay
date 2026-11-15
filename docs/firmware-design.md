@@ -24,9 +24,9 @@ run on a display: there is none flashed yet. What only a device can settle is li
 | Model and provisioning | Model code `sonos_display`, which is also the CMake project name. The operator creates the model and the device in IoT Support, then runs Flash device and Provision device. `scripts/upload.sh` is the two-line fetcher of the script IoT Support serves. |
 | Memory | Everything large is in PSRAM: framebuffers 1.5 MB, LVGL's heap, an artwork cache capped at 1.5 MiB, response bodies. At most 200 list rows are built at a time. Roboto as pre-rendered bitmap fonts for Basic Latin, Latin-1 and Latin Extended-A. |
 
-One thing in this note is not task 5's to decide: registering the firmware as an architecture
-producer changes three other repositories. It is put to the operator separately, and
-"Registering the model" says what waits on the answer.
+One thing in this note was the operator's to rule: registering the firmware as an architecture
+producer changes three other repositories. They ruled on 2026-11-15 that task 5 makes those
+changes, and section 6 lists them.
 
 ## 1. Layout on `esp-libs`
 
@@ -739,8 +739,8 @@ on a different hand-over, task 5 follows it.
 
 ### Bringing up a fresh display
 
-Task 5 registers these as the operator's steps. Steps 1 and 3 can be done at once; steps 4 and 5
-wait for the Flash device slice.
+Task 5 registers these as the operator's steps. Step 1 can be done at once. Step 3 waits for the
+architecture changes below, and steps 4 and 5 wait for the Flash device slice.
 
 1. **Create the model** in IoT Support: code `sonos_display`, name `Sonos Display`, the schema
    above. This comes before the Jenkins job's first build can pass its Deploy stage.
@@ -759,21 +759,38 @@ wait for the Flash device slice.
 Until Flash device exists, the same first flash is `idf.py -p <port> flash` from a workstation
 with ESP-IDF 5.5.3.
 
-### The architecture model, which waits on the operator
+### The architecture model
 
 Every firmware in IoT Support is also an architecture producer: PaperClock has
 `docs/architecture/architecture.yaml`, a `Jenkinsfile.architecture` and the job `AaC/PaperClock`.
 This is not optional for SonosDisplay. IoT Support's own architecture job reads the registered
 devices and stops at one whose model it does not know; its generator says "add its firmware
-product UUID". From the moment the first display is registered in step 3, that job fails until
-three other repositories are changed: the producer's registration in `pvginkel/Architecture`, one
-line in IoT Support's `firmware-products.yaml`, and the list of firmware jobs in the pipelines
-guide.
+product UUID", and it also stops at a UUID the published architecture does not hold. From the
+moment the first display is registered in step 3, that job fails unless the changes below are in
+place.
 
-Changes to other projects' repositories are the operator's to rule, and this one has been put to
-them. Task 5 writes SonosDisplay's own part either way (the model under `docs/architecture/`,
-`Jenkinsfile.architecture`, the job `AaC/SonosDisplay`, the `aac-tools` toolchain and its lint
-line, all after PaperClock) and takes the three outside changes from the operator's answer.
+**In SonosDisplay,** after PaperClock: the model under `docs/architecture/` with the producer id
+`sonos-display` and a firmware product whose UUID is minted once, `Jenkinsfile.architecture`, the
+job `AaC/SonosDisplay`, and the `aac-tools` toolchain with its `arch-validate` lint line.
+
+**In three other repositories.** Changes to another project's repository are the operator's to
+rule. Asked on 2026-11-15, they answered "Task 5 makes them": three small commits, with each push
+asked for when it comes. In the order they have to land:
+
+1. `pvginkel/Architecture`, `pipeline-producers.yaml`: an entry for the producer `sonos-display`,
+   repository `pvginkel/SonosDisplay`, job `AaC/SonosDisplay`, after that job's first green
+   build. The collector fails on a registered producer that has no artifact yet. PaperClock's
+   entry is the model.
+2. `pvginkel/IoTSupport`, `backend/docs/architecture/firmware-products.yaml`: the line
+   `sonos_display: <the firmware product's UUID>`. It must be in before step 3 of the bring-up,
+   the device's creation.
+3. `pvginkel/JenkinsPipelineUtils`, `docs/pages/guide/job-properties.md`: the row that names "the
+   eight ESP-IDF firmware jobs" gains `Firmware/SonosDisplay`.
+
+None of the three pushes is pre-approved, and task 5 names each one when it registers its work.
+The push to IoTSupport runs its pipeline, which tests it, builds its images and deploys them to
+prd. The push to Architecture runs the collector, and the push to JenkinsPipelineUtils publishes
+the pipelines guide.
 
 ## 7. The memory budget
 
