@@ -1,0 +1,16 @@
+# The dev workflow's contract for SonosDisplay. The keys are the dev plugin's project contract.
+
+spec_repo = "../SonosDisplaySpecs"
+design_philosophy = "docs/change-discipline.md"
+
+[test_phase]
+strategy = "docs/slice-test-plan.md"
+
+[doc_phase]
+plan = "docs/slice-doc-plan.md"
+
+# A push to main is the release: Firmware/SonosDisplay uploads the firmware to every display over
+# the air. No [devlock]: there is no dev instance to share.
+[push]
+enabled = true
+deploys = true

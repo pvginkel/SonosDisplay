@@ -9,6 +9,10 @@ repos:
   # component path. Shared and read-only: nothing here writes into it.
   - url: https://github.com/pvginkel/esp-libs
     shared: true
+  # The spec repo of the dev workflow: slices, plans and each run's state. .aiworkflowrc names it
+  # as ../SonosDisplaySpecs. Shared, so every environment of the project sees one spec tree.
+  - url: https://github.com/pvginkel/SonosDisplaySpecs
+    shared: true
 
 capabilities:
   # Work here pushes to GitHub.
