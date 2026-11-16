@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "api/Answers.h"
+#include "api/Requests.h"
 #include "board/RunMark.h"
 #include "esp_heap_caps.h"
 #include "nvs.h"
@@ -417,14 +418,12 @@ void Application::send_volume_change() {
         return;
     }
 
-    ESP_LOGI(TAG, "Sending a volume step of %d", change->step);
+    ESP_LOGI(TAG, "Sending a volume step of %d%s", change->step, change->unmutes ? " with an unmute" : "");
 
-    // A step, not a level: the speaker takes it from the volume it has, which may not be the one
-    // on screen.
     _press_client->send(
         HttpRequest{.method = HTTP_METHOD_POST,
                     .path = speaker_path(_model.speaker_id, "/group/volume"),
-                    .body = "{\"delta\":" + std::to_string(change->step) + "}"},
+                    .body = write_volume_change(*change)},
         _scope, [this, id = change->id](HttpResponse&& response) { volume_change_answered(id, std::move(response)); });
 }
 

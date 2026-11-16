@@ -28,6 +28,7 @@ class Shell {
     // Whether the app's first view is the speaker picker; empty until open().
     std::optional<bool> _held;
     bool _back_requested{};
+    bool _now_playing_requested{};
 
 public:
     // The marker shows once the event stream has been down for this long.
@@ -61,7 +62,13 @@ public:
     // one of its own events. Nothing happens when the top view is the only one.
     void back() { _back_requested = true; }
 
+    // Brings the now-playing screen to the top at the next update(), as back() does: the views
+    // over it close, wherever it sits in the stack, and with none in the stack one opens on top.
+    void open_now_playing() { _now_playing_requested = true; }
+
     View* get_current() const { return _views.empty() ? nullptr : _views.back().get(); }
+
+    size_t count_views() const { return _views.size(); }
 
     bool shows_bar() const { return _bar.is_shown(); }
 
@@ -70,6 +77,7 @@ public:
 
 private:
     void show_first_view();
+    void show_now_playing();
     void layout();
     void create_marker();
     void update_marker();

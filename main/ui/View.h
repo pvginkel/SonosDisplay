@@ -32,6 +32,9 @@ public:
     // Whether the Shell shows the now-playing bar under this view.
     virtual bool has_bar() const { return true; }
 
+    // Whether this is the now-playing screen, which Shell::open_now_playing() brings to the top.
+    virtual bool is_now_playing() const { return false; }
+
 protected:
     virtual void do_render(lv_obj_t* parent) = 0;
     virtual void do_update() {}

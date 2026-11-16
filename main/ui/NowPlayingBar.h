@@ -3,7 +3,8 @@
 // The now-playing bar, which the Shell shows under its content area: the cover of the track the
 // chosen speaker plays, its title and artist, play or pause, next, and the volume of the
 // speaker's group. Its controls are the now-playing screen's, under the same rules. A command or
-// a change of the volume that was not taken is said in the place of the title.
+// a change of the volume that was not taken is said in the place of the title. A touch on the
+// cover or the texts opens the now-playing screen.
 
 #include <cstdint>
 
@@ -12,12 +13,15 @@
 #include "UiHost.h"
 #include "lvgl.h"
 
+class Shell;
+
 class NowPlayingBar {
 public:
     static constexpr int32_t HEIGHT = 96;
 
 private:
     UiHost* _host;
+    Shell* _shell;
     bool _shown{};
     // What is on screen, so it is drawn again only when the model changed.
     uint32_t _revision{};
@@ -34,7 +38,7 @@ private:
     lv_obj_t* _artist{};
 
 public:
-    explicit NowPlayingBar(UiHost* host);
+    NowPlayingBar(UiHost* host, Shell* shell);
     NowPlayingBar(const NowPlayingBar&) = delete;
     NowPlayingBar& operator=(const NowPlayingBar&) = delete;
     ~NowPlayingBar();
@@ -53,4 +57,5 @@ public:
 private:
     void apply();
     void apply_texts(const Playback& playback);
+    static void opened(lv_event_t* event);
 };

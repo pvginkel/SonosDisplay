@@ -37,6 +37,8 @@ public:
     // It carries the bar's controls in full.
     bool has_bar() const override { return false; }
 
+    bool is_now_playing() const override { return true; }
+
 protected:
     void do_render(lv_obj_t* parent) override;
     void do_update() override;

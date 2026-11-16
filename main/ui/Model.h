@@ -313,6 +313,9 @@ struct VolumeChange {
     // What the level changes by.
     int step{};
 
+    // Whether the change unmutes the group too.
+    bool unmutes{};
+
     // LVGL's tick when the change was sent.
     uint32_t sent_at{};
 };
@@ -343,13 +346,17 @@ struct Volume {
     // at most one change is on its way however many presses there were.
     int waiting{};
 
+    // Whether a press on up since that one was sent unmutes the group. The unmute goes with the
+    // steps that wait, also where they come to none.
+    bool unmuting{};
+
     // How many changes were not taken: the backend answered an error, or did not answer. A view
     // says so once for each.
     uint32_t changes_not_taken{};
 
     bool is_known() const { return state == LoadState::Loaded; }
 
-    bool is_changing() const { return sending || waiting; }
+    bool is_changing() const { return sending || waiting || unmuting; }
 
     // Whether the change with this id is the one on its way.
     bool is_sending(uint32_t id) const { return sending && sending->id == id; }
@@ -357,15 +364,20 @@ struct Volume {
     // The level the presses lead to, which a view shows while the level is known.
     int shown() const { return std::clamp(level + (sending ? sending->step : 0) + waiting, 0, MAX_LEVEL); }
 
+    // Whether the group shows as muted: the mute the backend last answered, until a press on up
+    // unmutes it. A view shows it while the level is known.
+    bool shown_muted() const { return muted && !unmuting && !(sending && sending->unmutes); }
+
     // Whether a press on down, a negative step, or on up does anything. While the level is on its
-    // way nothing does. While it could not be fetched one step goes without it: the answer to a
+    // way nothing does. While the group shows muted up does, also at the top of the range: it
+    // unmutes. While the level could not be fetched one step goes without it: the answer to a
     // change carries the level.
     bool allows(int step) const {
         switch (state) {
             case LoadState::Loading:
                 return false;
             case LoadState::Loaded:
-                return step > 0 ? shown() < MAX_LEVEL : shown() > 0;
+                return step > 0 ? shown() < MAX_LEVEL || shown_muted() : shown() > 0;
             case LoadState::Unreachable:
             case LoadState::Failed:
                 return !sending;
@@ -374,10 +386,14 @@ struct Volume {
         return false;
     }
 
-    // A press on down or up, which the level shows from here on. next_change() says what to send
-    // for it.
+    // A press on down or up, which the level shows from here on. A press on up while the group
+    // shows muted unmutes it too; down leaves the mute. next_change() says what to send for it.
     void pressed(int step) {
         if (is_known()) {
+            if (step > 0 && shown_muted()) {
+                unmuting = true;
+            }
+
             const auto from = shown();
             waiting += std::clamp(from + step, 0, MAX_LEVEL) - from;
         } else {
@@ -385,15 +401,19 @@ struct Volume {
         }
     }
 
-    // The change to send now, at `now`, LVGL's tick: the steps that wait, once none is on its
-    // way. It is on its way from here on.
+    // The change to send now, at `now`, LVGL's tick: the steps that wait and the unmute, once none
+    // is on its way. It is on its way from here on.
     std::optional<VolumeChange> next_change(uint32_t now) {
-        if (sending || !waiting) {
+        if (sending || (!waiting && !unmuting)) {
             return std::nullopt;
         }
 
-        sending = VolumeChange{.id = ++_last_id, .step = std::clamp(waiting, -MAX_CHANGE, MAX_CHANGE), .sent_at = now};
+        sending = VolumeChange{.id = ++_last_id,
+                               .step = std::clamp(waiting, -MAX_CHANGE, MAX_CHANGE),
+                               .unmutes = unmuting,
+                               .sent_at = now};
         waiting = 0;
+        unmuting = false;
 
         return sending;
     }
@@ -401,17 +421,19 @@ struct Volume {
     // The backend took the change on its way, and its answer is the level.
     void change_taken() { sending.reset(); }
 
-    // The backend answered the change on its way with an error, or did not answer. The steps that
-    // wait are dropped with it, and the host fetches the volume again, which puts the level right.
+    // The backend answered the change on its way with an error, or did not answer. The steps and
+    // the unmute that wait are dropped with it, and the host fetches the volume again, which puts
+    // the level right.
     void change_not_taken() {
         sending.reset();
         waiting = 0;
+        unmuting = false;
         changes_not_taken++;
     }
 
     // Settles the change on its way when it was sent ANSWER_TIME_LIMIT_MS or longer before `now`,
-    // LVGL's tick, and returns whether there was one. The steps that wait are dropped with it, and
-    // the host fetches the volume again, which puts the level right.
+    // LVGL's tick, and returns whether there was one. The steps and the unmute that wait are
+    // dropped with it, and the host fetches the volume again, which puts the level right.
     bool timed_out(uint32_t now) {
         if (!sending || now - sending->sent_at < ANSWER_TIME_LIMIT_MS) {
             return false;
@@ -419,6 +441,7 @@ struct Volume {
 
         sending.reset();
         waiting = 0;
+        unmuting = false;
 
         return true;
     }

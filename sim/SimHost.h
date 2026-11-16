@@ -56,6 +56,7 @@ class SimHost : public UiHost {
     std::optional<Answer> _command_answer;
     std::optional<Answer> _next_playback;
     std::vector<int> _volume_changes;
+    std::vector<std::string> _volume_change_bodies;
     std::vector<uint32_t> _unanswered_volume_changes;
     std::optional<Answer> _volume_change_answer;
     std::optional<Answer> _next_volume;
@@ -156,6 +157,10 @@ public:
 
     // The steps of the changes of the volume sent to the backend, in order.
     const std::vector<int>& get_volume_changes() const { return _volume_changes; }
+
+    // The bodies of the changes of the volume sent to the backend, in order, as the device writes
+    // them.
+    const std::vector<std::string>& get_volume_change_bodies() const { return _volume_change_bodies; }
 
     // What the backend answers a request for artwork with: LVGL 9's binary image, a deterministic
     // pattern of two colours that the id decides, `size` by `size` pixels.

@@ -215,6 +215,10 @@ static const char SPEAKER_LOUDEST[] =
     R"({"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"muted":false,"volume":100},)"
     R"("id":"speaker-garage","model":"Play:3","muted":false,"name":"Garage","volume":100})";
 
+static const char SPEAKER_LOUDEST_MUTED[] =
+    R"({"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"muted":true,"volume":100},)"
+    R"("id":"speaker-garage","model":"Play:3","muted":true,"name":"Garage","volume":100})";
+
 static const char ERROR_SPEAKER_NOT_FOUND[] =
     R"({"code":"SPEAKER_NOT_FOUND","correlationId":"8a41d0c7-5e2b-4f39-b6a8-1c9e7d3f2a50",)"
     R"("details":{"message":"The requested resource could not be found"},)"
@@ -276,6 +280,13 @@ static constexpr lv_point_t BAR_PLAY_PAUSE = {400, 433};
 static constexpr lv_point_t BAR_NEXT = {484, 433};
 static constexpr lv_point_t BAR_VOLUME_DOWN = {580, 433};
 static constexpr lv_point_t BAR_VOLUME_UP = {748, 433};
+
+// Where the bar's cover, its texts, and the volume's level between down and up are; and a point of
+// the texts above their lines.
+static constexpr lv_point_t BAR_COVER = {48, 433};
+static constexpr lv_point_t BAR_TEXTS = {226, 433};
+static constexpr lv_point_t BAR_ABOVE_TEXTS = {226, 392};
+static constexpr lv_point_t BAR_VOLUME_LEVEL = {664, 433};
 
 // Where the speaker picker's first two rows are.
 static constexpr lv_point_t FIRST_SPEAKER = {400, 163};
@@ -1272,6 +1283,9 @@ static const char* check_refused_said(const SimHost& host, const Shell& shell) {
 // taken.
 static constexpr uint32_t AFTER_NOTICE_MS = NOT_TAKEN_NOTICE_MS + 1000;
 
+// A scene of this many touches runs this long: what the last one changed is drawn.
+static constexpr uint32_t after_touches_ms(uint32_t touches) { return touches * SimHost::TAP_INTERVAL_MS + 300; }
+
 static const char* check_refused_later(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_refused(host, shell)) {
         return problem;
@@ -1609,6 +1623,170 @@ static void now_playing_volume_limit(SimHost& host, Shell& shell) {
 
 static const char* check_volume_limit(const SimHost& host, const Shell&) {
     return host.get_volume_changes().empty() ? nullptr : "up sent a change at the top of the range";
+}
+
+static const char UNMUTE_STEP_UP[] = R"({"delta":2,"muted":false})";
+static const char UNMUTE_ALONE[] = R"({"delta":0,"muted":false})";
+static const char STEP_UP[] = R"({"delta":2})";
+static const char STEP_DOWN[] = R"({"delta":-2})";
+
+// While the group shows muted, a press on up unmutes it with its step, in one change; down leaves
+// the mute. The unmute is a change of its own: steps that come to none still send it. A change
+// that is settled without an answer drops the unmute with its steps.
+static void expect_unmute_rules() {
+    using Bodies = std::vector<std::string>;
+
+    // Up, and up again while the first change is on its way: one unmute, with the first change's
+    // step; the step since goes without one.
+    {
+        SimHost host;
+        host.answer_volume(200, SPEAKER_MUTED);
+
+        host.change_volume(Volume::STEP);
+        const auto& volume = host.get_model().volume;
+        expect(host.get_volume_change_bodies() == Bodies{UNMUTE_STEP_UP}, "up on a muted group did not unmute it");
+        expect(!volume.shown_muted() && volume.is_changing(), "the unmute does not show while it is on its way");
+
+        // A volume fetched while the unmute is on its way is from before it.
+        host.answer_volume(200, SPEAKER_MUTED);
+        expect(!volume.shown_muted(), "a volume fetched during an unmute shows the group muted again");
+
+        host.change_volume(Volume::STEP);
+        host.answer_volume_change(200, R"({"muted":false,"volume":26})");
+        expect(host.get_volume_change_bodies() == Bodies{UNMUTE_STEP_UP, STEP_UP},
+               "a press on up after the unmute sent a second one");
+
+        host.answer_volume_change(200, R"({"muted":false,"volume":28})");
+        expect(!volume.is_changing() && !volume.muted && volume.level == 28, "the unmute did not end unmuted");
+    }
+
+    // Down while muted, then up and down before the down's answer: the steps come to none, and
+    // the unmute goes alone.
+    {
+        SimHost host;
+        host.answer_volume(200, SPEAKER_MUTED);
+
+        host.change_volume(-Volume::STEP);
+        host.change_volume(Volume::STEP);
+        host.change_volume(-Volume::STEP);
+        const auto& volume = host.get_model().volume;
+        expect(host.get_volume_change_bodies() == Bodies{STEP_DOWN}, "down on a muted group sent an unmute");
+        expect(!volume.shown_muted() && volume.waiting == 0, "the unmute pressed after a down does not show");
+
+        host.answer_volume_change(200, R"({"muted":true,"volume":22})");
+        expect(host.get_volume_change_bodies() == Bodies{STEP_DOWN, UNMUTE_ALONE},
+               "an unmute whose steps came to none was not sent");
+        expect(!volume.shown_muted(), "the unmute on its way does not show");
+    }
+
+    // Muted at the top of the range: up takes a press, which unmutes and steps none.
+    {
+        static const char MUTED_LOUDEST[] = R"({"muted":true,"volume":100})";
+        Volume volume;
+        std::string error;
+        expect(!read_volume_change(200, MUTED_LOUDEST, strlen(MUTED_LOUDEST), volume, error) && volume.shown_muted(),
+               "the answer to a change was not read");
+        expect(volume.allows(Volume::STEP) && volume.allows(-Volume::STEP), "up is not live on a group muted at 100");
+
+        volume.pressed(Volume::STEP);
+        const auto change = volume.next_change(0);
+        expect(change && change->step == 0 && change->unmutes, "up at 100 did not send the unmute alone");
+        expect(!volume.allows(Volume::STEP) && volume.shown() == Volume::MAX_LEVEL,
+               "up is live at 100 once the unmute is on its way");
+    }
+
+    // The unmute waiting behind a change goes with it when that change is not taken, or is
+    // settled by its time limit; the group then shows muted again, and the late answer is not
+    // read.
+    {
+        static const char MUTED[] = R"({"muted":true,"volume":24})";
+        Volume volume;
+        std::string error;
+        expect(!read_volume_change(200, MUTED, strlen(MUTED), volume, error), "the answer to a change was not read");
+
+        volume.pressed(-Volume::STEP);
+        const auto down = volume.next_change(1000);
+        volume.pressed(Volume::STEP);
+        expect(down && !down->unmutes && volume.unmuting && !volume.shown_muted(), "the unmute does not wait");
+        volume.change_not_taken();
+        expect(!volume.unmuting && volume.shown_muted() && !volume.next_change(1000),
+               "a change not taken left its unmute waiting");
+
+        volume.pressed(Volume::STEP);
+        const auto up = volume.next_change(2000);
+        expect(up && up->unmutes, "up did not unmute");
+        expect(volume.timed_out(2000 + ANSWER_TIME_LIMIT_MS) && volume.shown_muted() && !volume.is_changing() &&
+                   !volume.is_sending(up->id),
+               "the time limit did not settle an unmute");
+    }
+
+    // While the level is not known the mute is not shown, and up does not unmute.
+    {
+        Volume volume;
+        volume.state = LoadState::Failed;
+        volume.muted = true;
+
+        volume.pressed(Volume::STEP);
+        const auto change = volume.next_change(0);
+        expect(change && !change->unmutes, "up unmuted a group whose level is not known");
+    }
+}
+
+// A press on up while the group is muted: the change carries the unmute, and the level shows in
+// effect while it is on its way.
+static void now_playing_volume_unmute(SimHost& host, Shell& shell) {
+    expect_unmute_rules();
+
+    open_now_playing(host, shell, PAUSED, SPEAKER_MUTED);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_unmute(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_change_bodies() != std::vector<std::string>{UNMUTE_STEP_UP}) {
+        return "the touch did not send one step up with the unmute";
+    }
+
+    return !volume.shown_muted() && volume.shown() == 26 ? nullptr : "the unmute does not show at once";
+}
+
+// A group muted at 100: up takes one press, sent as a step of none with the unmute, and is not
+// live once the unmute is on its way.
+static void now_playing_volume_unmute_loudest(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PAUSED, SPEAKER_LOUDEST_MUTED);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_unmute_loudest(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_change_bodies() != std::vector<std::string>{UNMUTE_ALONE}) {
+        return "the touches did not send one unmute without a step";
+    }
+
+    return !volume.shown_muted() && volume.shown() == Volume::MAX_LEVEL ? nullptr : "the unmute does not show at once";
+}
+
+// Down on a muted group leaves the mute.
+static void now_playing_volume_muted_down(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PAUSED, SPEAKER_MUTED);
+    host.answer_volume_changes(200, R"({"muted":true,"volume":22})");
+
+    host.tap(VOLUME_DOWN.x, VOLUME_DOWN.y);
+}
+
+static const char* check_volume_muted_down(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_change_bodies() != std::vector<std::string>{STEP_DOWN}) {
+        return "the touch did not send one step down without an unmute";
+    }
+
+    return volume.shown_muted() && volume.shown() == 22 ? nullptr : "down did not leave the group muted";
 }
 
 // A change the backend refuses: the screen says it was not taken, the presses since are dropped,
@@ -2385,6 +2563,53 @@ static void bar_volume_limit(SimHost& host, Shell& shell) {
     host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
 }
 
+// The bar's up on a muted group: the change carries the unmute.
+static void bar_volume_unmute(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PAUSED, SPEAKER_MUTED);
+
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+static const char* check_bar_volume_unmute(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_volume_unmute(host, shell)) {
+        return problem;
+    }
+
+    return check_bar(host, shell);
+}
+
+// The bar's up on a group muted at 100: one press, sent as a step of none with the unmute.
+static void bar_volume_unmute_loudest(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PAUSED, SPEAKER_LOUDEST_MUTED);
+
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+}
+
+static const char* check_bar_volume_unmute_loudest(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_volume_unmute_loudest(host, shell)) {
+        return problem;
+    }
+
+    return check_bar(host, shell);
+}
+
+// The bar's down on a muted group leaves the mute.
+static void bar_volume_muted_down(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PAUSED, SPEAKER_MUTED);
+    host.answer_volume_changes(200, R"({"muted":true,"volume":22})");
+
+    host.tap(BAR_VOLUME_DOWN.x, BAR_VOLUME_DOWN.y);
+}
+
+static const char* check_bar_volume_muted_down(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_volume_muted_down(host, shell)) {
+        return problem;
+    }
+
+    return check_bar(host, shell);
+}
+
 // A change the backend refuses: the bar says it was not taken, and the volume fetched again shows.
 static void bar_volume_refused(SimHost& host, Shell& shell) {
     open_bar(host, shell, PLAYING);
@@ -2431,6 +2656,94 @@ static const char* check_bar_cover_change(const SimHost& host, const Shell& shel
     };
     if (host.get_artwork_fetches() != fetches) {
         return "the covers were not fetched as the track changed under the bar";
+    }
+
+    return check_bar(host, shell);
+}
+
+// A touch on the bar's cover, from the speakers screen: the screen closes, and the now-playing
+// screen under it is the top view again.
+static void bar_open_cover(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+
+    host.tap(BAR_COVER.x, BAR_COVER.y);
+}
+
+static const char* check_bar_opened(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_now_playing(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 1 ? nullptr : "the views over the now-playing screen did not close";
+}
+
+// A touch on the bar's texts, from the speakers screen.
+static void bar_open_texts(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+// The speakers screen whose list failed to load has its way back by the bar, which takes a touch
+// above its texts' lines too.
+static void bar_open_failed_list(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_speakers(500, ERROR_ENVELOPE);
+    shell.update();
+    expect(says(MSG_TRY_AGAIN) && shell.shows_bar(), "the speakers screen does not show its failed list over the bar");
+
+    host.tap(BAR_ABOVE_TEXTS.x, BAR_ABOVE_TEXTS.y);
+}
+
+// The now-playing screen is not the root, as it is not once a home screen is: with none in the
+// stack a touch on the bar opens one on top, and with one under the top view it closes the views
+// over it and none under it.
+static void bar_open_not_root(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+    answer_speakers(host);
+    host.answer_playback(200, PLAYING);
+    host.answer_volume(200, SPEAKER);
+
+    shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+    shell.update();
+    expect(shell.shows_bar(), "the speakers screen at the root does not show the bar");
+
+    host.tap(BAR_COVER.x, BAR_COVER.y);
+    host.tap(SPEAKER_BUTTON.x, SPEAKER_BUTTON.y);
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+static const char* check_bar_open_not_root(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_now_playing(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 2 ? nullptr : "the views were not closed down to the now-playing screen";
+}
+
+// The bar's controls, and the volume's level between down and up, open nothing: each does only
+// what it does.
+static void bar_controls(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_commands(204, "");
+    host.answer_volume_changes(200, VOLUME_26);
+
+    host.tap(BAR_PLAY_PAUSE.x, BAR_PLAY_PAUSE.y);
+    host.tap(BAR_NEXT.x, BAR_NEXT.y);
+    host.tap(BAR_VOLUME_UP.x, BAR_VOLUME_UP.y);
+    host.tap(BAR_VOLUME_DOWN.x, BAR_VOLUME_DOWN.y);
+    host.tap(BAR_VOLUME_LEVEL.x, BAR_VOLUME_LEVEL.y);
+}
+
+static const char* check_bar_controls(const SimHost& host, const Shell& shell) {
+    if (host.get_commands() != std::vector<Command>{Command::Pause, Command::Next}) {
+        return "the bar's play or pause and next did not send their commands";
+    }
+    if (host.get_volume_changes() != std::vector<int>{Volume::STEP, -Volume::STEP}) {
+        return "the bar's up and down did not send their steps";
+    }
+    if (shell.count_views() != 2) {
+        return "a touch on the bar's controls changed the views";
     }
 
     return check_bar(host, shell);
@@ -2539,6 +2852,9 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-volume-burst", now_playing_volume_burst, check_volume_burst},
         {"now-playing-volume-muted", now_playing_volume_muted},
         {"now-playing-volume-limit", now_playing_volume_limit, check_volume_limit},
+        {"now-playing-volume-unmute", now_playing_volume_unmute, check_volume_unmute},
+        {"now-playing-volume-unmute-loudest", now_playing_volume_unmute_loudest, check_volume_unmute_loudest},
+        {"now-playing-volume-muted-down", now_playing_volume_muted_down, check_volume_muted_down},
         {"now-playing-volume-refused", now_playing_volume_refused, check_volume_refused},
         {"now-playing-volume-unknown", now_playing_volume_unknown, check_volume_unknown},
         {"now-playing-volume-blind", now_playing_volume_blind, check_volume_blind},
@@ -2566,8 +2882,16 @@ const std::vector<Scene>& get_scenes() {
         {"bar-volume-burst", bar_volume_burst, check_volume_burst},
         {"bar-volume-muted", bar_volume_muted, check_bar},
         {"bar-volume-limit", bar_volume_limit, check_volume_limit},
+        {"bar-volume-unmute", bar_volume_unmute, check_bar_volume_unmute},
+        {"bar-volume-unmute-loudest", bar_volume_unmute_loudest, check_bar_volume_unmute_loudest},
+        {"bar-volume-muted-down", bar_volume_muted_down, check_bar_volume_muted_down},
         {"bar-volume-refused", bar_volume_refused, check_bar_volume_refused},
         {"bar-cover-change", bar_cover_change, check_bar_cover_change},
+        {"bar-open-cover", bar_open_cover, check_bar_opened},
+        {"bar-open-texts", bar_open_texts, check_bar_opened},
+        {"bar-open-failed-list", bar_open_failed_list, check_bar_opened},
+        {"bar-open-not-root", bar_open_not_root, check_bar_open_not_root, after_touches_ms(3)},
+        {"bar-controls", bar_controls, check_bar_controls, after_touches_ms(5)},
     };
 
     return scenes;

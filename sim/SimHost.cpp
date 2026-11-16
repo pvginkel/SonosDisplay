@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "api/Answers.h"
+#include "api/Requests.h"
 
 SimHost::SimHost() {
     _model.backend_url = "http://sonos-controller.example:5000";
@@ -84,6 +85,7 @@ void SimHost::send_volume_change() {
     }
 
     _volume_changes.push_back(change->step);
+    _volume_change_bodies.push_back(write_volume_change(*change));
 
     if (_volume_change_answer) {
         volume_change_answered(change->id, _volume_change_answer->status, _volume_change_answer->body.c_str());

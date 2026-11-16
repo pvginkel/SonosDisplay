@@ -1,5 +1,7 @@
 #include "Shell.h"
 
+#include <algorithm>
+
 #include "Messages.h"
 #include "NowPlayingView.h"
 #include "SpeakerPickerView.h"
@@ -9,7 +11,7 @@
 
 LOG_TAG(Shell);
 
-Shell::Shell(UiHost* host) : _host(host), _bar(host) {}
+Shell::Shell(UiHost* host) : _host(host), _bar(host, this) {}
 
 Shell::~Shell() {
     _views.clear();
@@ -104,6 +106,24 @@ void Shell::show_first_view() {
 
 void Shell::open_speaker_picker() { push(std::make_unique<SpeakerPickerView>(_host, this)); }
 
+void Shell::show_now_playing() {
+    const auto found =
+        std::find_if(_views.rbegin(), _views.rend(), [](const auto& view) { return view->is_now_playing(); });
+
+    if (found == _views.rend()) {
+        push(std::make_unique<NowPlayingView>(_host, this));
+        return;
+    }
+    if (found == _views.rbegin()) {
+        return;
+    }
+
+    _views.erase(found.base(), _views.end());
+    _views.back()->set_visible(true);
+
+    layout();
+}
+
 void Shell::update() {
     if (_back_requested) {
         _back_requested = false;
@@ -111,6 +131,12 @@ void Shell::update() {
         if (_views.size() > 1) {
             pop();
         }
+    }
+
+    if (_now_playing_requested) {
+        _now_playing_requested = false;
+
+        show_now_playing();
     }
 
     if (_held && *_held != _host->get_model().needs_speaker()) {

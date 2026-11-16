@@ -1,6 +1,7 @@
 #include "NowPlayingBar.h"
 
 #include "Messages.h"
+#include "Shell.h"
 #include "Theme.h"
 #include "lv_support.h"
 
@@ -14,7 +15,8 @@ static constexpr int32_t VOLUME_WIDTH = 240;
 // Between next and the volume's down, on top of the bar's own gap.
 static constexpr int32_t VOLUME_MARGIN = 8;
 
-NowPlayingBar::NowPlayingBar(UiHost* host) : _host(host), _cover(host, COVER_SIZE), _transport(host), _volume(host) {}
+NowPlayingBar::NowPlayingBar(UiHost* host, Shell* shell)
+    : _host(host), _shell(shell), _cover(host, COVER_SIZE), _transport(host), _volume(host) {}
 
 NowPlayingBar::~NowPlayingBar() {
     // The cover's widget goes before its image, and both before the bar.
@@ -39,11 +41,18 @@ void NowPlayingBar::create(lv_obj_t* parent) {
     lv_obj_set_flex_align(_bar, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_add_flag(_bar, LV_OBJ_FLAG_HIDDEN);
 
-    _cover.create(_bar, Theme::FONT_ICON);
+    auto cover = _cover.create(_bar, Theme::FONT_ICON);
+    lv_obj_add_flag(cover, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(cover, opened, LV_EVENT_CLICKED, this);
 
+    // The bar's full height, so the texts take a touch above and below their lines too.
     _texts = lv_container_create(_bar);
+    lv_obj_set_height(_texts, LV_PCT(100));
     lv_obj_set_flex_grow(_texts, 1);
     lv_obj_set_flex_flow(_texts, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(_texts, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(_texts, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(_texts, opened, LV_EVENT_CLICKED, this);
 
     // What plays is any length: apply_texts() gives each label its lines.
     _title = lv_label_create(_texts);
@@ -155,4 +164,10 @@ void NowPlayingBar::apply_texts(const Playback& playback) {
     lv_obj_set_style_text_color(_title, Theme::color(title_color), LV_PART_MAIN);
 
     lv_label_set_text_lines(_artist, artist, width, 1);
+}
+
+void NowPlayingBar::opened(lv_event_t* event) {
+    auto self = (NowPlayingBar*)lv_event_get_user_data(event);
+
+    self->_shell->open_now_playing();
 }

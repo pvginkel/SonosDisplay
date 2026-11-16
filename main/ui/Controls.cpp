@@ -121,7 +121,7 @@ void VolumeControl::apply(const Volume& volume) {
     apply_control(_up, ICON_PLUS, volume.allows(Volume::STEP), false, false);
 
     const auto known = volume.is_known();
-    const auto muted = known && volume.muted;
+    const auto muted = known && volume.shown_muted();
 
     // A press shows in the level at once, and in its colour until the backend has answered.
     auto icon_color = Theme::TEXT_SECONDARY;
