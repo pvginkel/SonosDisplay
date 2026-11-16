@@ -87,8 +87,8 @@ static const char SPEAKERS_MANY[] = R"({"data":[
  "group":{"coordinator_id":"speaker-office","member_ids":["speaker-office"],"volume":12,"muted":false}}
 ]})";
 
-// Names with characters the fonts draw since slice 002 (U+2010 the hyphen, U+02BC the modifier
-// apostrophe, U+201E the low quote) and two they do not (U+266B and U+2192).
+// Names with characters the fonts draw (U+2010 the hyphen, U+02BC the modifier apostrophe, U+201E
+// the low quote) and two they do not (U+266B and U+2192).
 static const char SPEAKERS_GLYPHS[] = R"({"data":[
 {"id":"speaker-garage","name":"Garage‐Werkbank","model":"Play:3","volume":24,"muted":false,
  "group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"volume":24,"muted":false}},
@@ -172,10 +172,10 @@ static const char RADIO[] =
     R"("duration_ms":null,"title":"Dvořák: Slovanské tance, č. 8 – Česká filharmonie","track_id":null}})";
 
 // Texts with the characters the library's titles hold beyond Latin-1 and Latin Extended-A, which
-// the fonts draw since slice 002: U+2010 the hyphen, U+201E the low quote, U+2032 and U+2033 the
-// primes, U+02BC the modifier apostrophe, U+2082, U+1D62 and U+2C7C subscripts, U+2202, U+2206,
-// U+2211, U+221A and U+2212 signs of maths, U+207B and U+2070 superscripts. And three characters
-// they do not: U+2192, U+266B and U+6771.
+// the fonts draw: U+2010 the hyphen, U+201E the low quote, U+2032 and U+2033 the primes, U+02BC the
+// modifier apostrophe, U+2082, U+1D62 and U+2C7C subscripts, U+2202, U+2206, U+2211, U+221A and
+// U+2212 signs of maths, U+207B and U+2070 superscripts. And three characters they do not: U+2192,
+// U+266B and U+6771.
 static const char PLAYING_GLYPHS[] =
     R"({"actions":["play","pause","next","previous"],"queue_length":5,"queue_position":2,"shuffle":false,)"
     R"("source":"queue","state":"playing","track":{"album":"Signs 東∂ ∆ ∑ √ − 10⁻⁰",)"

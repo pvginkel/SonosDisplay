@@ -410,9 +410,10 @@ void Application::change_volume(int step) {
     send_volume_change();
 }
 
-// backend_press runs one request at a time, and its queue drops a request when it is full. So at
-// most one change of the volume is in it: the presses made while one is on its way go as one
-// change when it is answered, and a transport command waits for that one change at most.
+// backend_press runs every press, one request at a time and in the order sent; its queue drops a
+// request when it is full. The presses made while a change of the volume is on its way go as one
+// change when it is answered. A change its time limit settled may still be queued or under way, so
+// a second change can wait behind it, as any press waits behind the presses sent before it.
 void Application::send_volume_change() {
     const auto change = _model.volume.next_change(lv_tick_get());
     if (!change) {
