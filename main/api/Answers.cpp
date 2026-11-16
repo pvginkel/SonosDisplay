@@ -1,5 +1,6 @@
 #include "Answers.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <memory>
@@ -367,6 +368,65 @@ const char* read_queue_answer(int status, const char* body, size_t length, std::
     return nullptr;
 }
 
+// A double holds every whole number up to this one, 2^53, exactly.
+static constexpr double MAX_WHOLE_NUMBER = 9007199254740992.0;
+
+// The id of a favourite: a whole number.
+static bool read_favourite_number(const cJSON* item, int64_t& id) {
+    if (!cJSON_IsNumber(item) || std::fabs(item->valuedouble) > MAX_WHOLE_NUMBER ||
+        item->valuedouble != std::trunc(item->valuedouble)) {
+        return false;
+    }
+
+    id = int64_t(item->valuedouble);
+
+    return true;
+}
+
+// The favourite's other keys are not shown where it is marked, so they are not read.
+const char* read_favourite_mark(int status, const char* body, size_t length, int64_t& favourite_id,
+                                std::string& error) {
+    const auto root = parse(body, length);
+
+    if (status != 200 && status != 201) {
+        error = read_error(root.get());
+
+        return "not a 200 or a 201";
+    }
+
+    error.clear();
+
+    if (!cJSON_IsObject(root.get())) {
+        return "the body is not a JSON object";
+    }
+
+    if (!read_favourite_number(cJSON_GetObjectItemCaseSensitive(root.get(), "id"), favourite_id)) {
+        return "the favourite's id is not a whole number";
+    }
+
+    return nullptr;
+}
+
+const char* read_favourite_unmark(int status, const char* body, size_t length, std::string& error) {
+    if (status == 204) {
+        error.clear();
+
+        return nullptr;
+    }
+
+    const auto root = parse(body, length);
+    error = read_error(root.get());
+
+    const auto code = status == 404 && cJSON_IsObject(root.get()) ? get_string(root.get(), "code") : nullptr;
+    if (code && !strcmp(code, "RECORD_NOT_FOUND")) {
+        error.clear();
+
+        return nullptr;
+    }
+
+    return "not a 204, or a 404 with the code RECORD_NOT_FOUND";
+}
+
 // A volume and its mute, which a speaker's group and the answer to a change both hold.
 static const char* read_volume_fields(const cJSON* object, Volume& volume) {
     const auto level = cJSON_GetObjectItemCaseSensitive(object, "volume");
@@ -557,6 +617,26 @@ static const char* read_item_names(const cJSON* item, std::string& id, std::stri
     return nullptr;
 }
 
+// The `favourite_id` of an artist, an album or a playlist: the id of the favourite that marks it,
+// or null.
+static const char* read_favourite_id(const cJSON* item, std::optional<int64_t>& favourite_id) {
+    const auto value = cJSON_GetObjectItemCaseSensitive(item, "favourite_id");
+    if (cJSON_IsNull(value)) {
+        favourite_id.reset();
+
+        return nullptr;
+    }
+
+    int64_t id;
+    if (!read_favourite_number(value, id)) {
+        return "an item's favourite_id is not a whole number or null";
+    }
+
+    favourite_id = id;
+
+    return nullptr;
+}
+
 // An artist's `artwork_id` is not shown, so it is not read.
 static const char* read_artist(const cJSON* item, Artist& artist) {
     Artist read;
@@ -570,6 +650,11 @@ static const char* read_artist(const cJSON* item, Artist& artist) {
     }
 
     read.index_letter = *letter;
+
+    if (const auto problem = read_favourite_id(item, read.favourite_id)) {
+        return problem;
+    }
+
     artist = std::move(read);
 
     return nullptr;
@@ -608,6 +693,10 @@ static const char* read_album(const cJSON* item, Album& album) {
         return "an album's year is not a whole number or null";
     }
 
+    if (const auto problem = read_favourite_id(item, read.favourite_id)) {
+        return problem;
+    }
+
     album = std::move(read);
 
     return nullptr;
@@ -629,7 +718,17 @@ const char* read_tracks(int status, const char* body, size_t length, Page<AlbumT
 
 // A playlist's `track_count`, `duration_ms` and `artwork_id` are not shown, so they are not read.
 static const char* read_playlist(const cJSON* item, Playlist& playlist) {
-    return read_item_names(item, playlist.id, playlist.title);
+    Playlist read;
+    if (const auto problem = read_item_names(item, read.id, read.title)) {
+        return problem;
+    }
+    if (const auto problem = read_favourite_id(item, read.favourite_id)) {
+        return problem;
+    }
+
+    playlist = std::move(read);
+
+    return nullptr;
 }
 
 const char* read_playlists(int status, const char* body, size_t length, Page<Playlist>& page) {

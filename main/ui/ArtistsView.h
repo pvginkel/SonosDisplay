@@ -5,7 +5,8 @@
 // grid over the list, each letter as large a target as the grid allows; a press on one brings
 // its first artist to the top, and closes the grid. The letters are those of the rows built,
 // which are the whole library while it has 200 artists or fewer. A press on an artist opens its
-// albums, and its buttons play it, its albums newest first, shuffle it or add it to the queue. The
+// albums, and its buttons play it, its albums newest first, shuffle it or add it to the queue, and
+// mark it as a favourite or unmark it. The
 // button under the letters' opens the playlists, whatever came of the artists.
 
 #include <cstddef>
@@ -31,6 +32,7 @@ protected:
     void request_page(uint32_t page) override;
     void build_row(lv_obj_t* row, size_t index) override;
     void open_row(size_t index) override;
+    void apply_favourite(const FavouriteChange& change) override;
     const char* get_loading_message() const override;
     const char* get_empty_message() const override;
     void do_render_beside(lv_obj_t* body, lv_obj_t* area) override;

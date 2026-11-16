@@ -21,6 +21,7 @@
 #include "Messages.h"
 #include "NowPlayingView.h"
 #include "PlaylistsView.h"
+#include "PressButton.h"
 #include "QueueView.h"
 #include "SpeakerPickerView.h"
 #include "Theme.h"
@@ -2998,8 +2999,28 @@ static std::string make_page_body(cJSON* data, uint32_t number, size_t total, co
     return body;
 }
 
+// The `favourite_id` of the item at `index` of a list's fixture: every fourth item from the third
+// is marked, by the favourite whose id is `first_id` and the item's index.
+static void add_favourite_id(cJSON* item, size_t index, int first_id) {
+    if (index % 4 == 2) {
+        cJSON_AddNumberToObject(item, "favourite_id", double(first_id + int(index)));
+    } else {
+        cJSON_AddNullToObject(item, "favourite_id");
+    }
+}
+
+// Whether the item at `index` of a list's fixture is marked as a favourite.
+static bool is_marked(size_t index) { return index % 4 == 2; }
+
+// The ids of the favourites that mark the fixtures' artists, albums and playlists: the first, which
+// would mark the first item.
+static constexpr int ARTIST_FAVOURITES = 100;
+static constexpr int ALBUM_FAVOURITES = 200;
+static constexpr int PLAYLIST_FAVOURITES = 300;
+
 // The answer to GET /api/library/artists for page `number` of `artists`, its data the `count`
-// artists from `first`. The ids are made up, and every third artist has no picture.
+// artists from `first`. The ids are made up, every third artist has no picture, and every fourth
+// from the third is marked as a favourite.
 static std::string make_artists_body(const std::vector<ArtistFixture>& artists, size_t first, size_t count,
                                      uint32_t number) {
     const auto data = cJSON_CreateArray();
@@ -3011,6 +3032,8 @@ static std::string make_artists_body(const std::vector<ArtistFixture>& artists, 
         } else {
             cJSON_AddNullToObject(artist, "artwork_id");
         }
+
+        add_favourite_id(artist, i, ARTIST_FAVOURITES);
 
         const char letter[] = {artists[i].second, 0};
         cJSON_AddStringToObject(artist, "id", ("artist-" + std::to_string(i + 1)).c_str());
@@ -3064,28 +3087,51 @@ static const char* const UNREADABLE_ARTISTS[] = {
     R"({"data":[],"meta":{"page":1,"per_page":100,"total":1e30}})",
     R"({"meta":{"page":1,"per_page":100,"total":0}})",
     R"({"data":null,"meta":{"page":1,"per_page":100,"total":0}})",
-    R"({"data":{"id":"artist-1","index_letter":"A","title":"ABBA"},"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":0}})",
-    R"({"data":[{"id":"artist-101","index_letter":"A","title":"ABBA"}],"meta":{"page":2,"per_page":100,)"
+    R"({"data":{"favourite_id":null,"id":"artist-1","index_letter":"A","title":"ABBA"},"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"A","title":"ABBA"}],"meta":{"page":1,)"
+    R"("per_page":100,"total":0}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-101","index_letter":"A","title":"ABBA"}],"meta":{"page":2,)"
+    R"("per_page":100,)"
     R"("total":100}})",
     R"({"data":["artist-1"],"meta":{"page":1,"per_page":100,"total":1}})",
     R"({"data":[{"index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"","index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":7,"index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"A"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"A","title":null}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":null,"title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"a","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"AB","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"Ä","title":"ÄBBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"artist-1","index_letter":"A","title":"ABBA"},{"id":"artist-2"}],)"
+    R"({"data":[{"favourite_id":null,"id":"","index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+    R"({"data":[{"favourite_id":null,"id":7,"index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"A"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"A","title":null}],"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":null,"title":"ABBA"}],"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"","title":"ABBA"}],"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"a","title":"ABBA"}],"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"AB","title":"ABBA"}],"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"Ä","title":"ÄBBA"}],"meta":{"page":1,)"
+    R"("per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"artist-1","index_letter":"A","title":"ABBA"},{"favourite_id":null,)"
+    R"("id":"artist-2"}],)"
     R"("meta":{"page":1,"per_page":100,"total":2}})",
-    R"({"data":[{"id":"artist-2","index_letter":"B","title":"Björk"},{"id":"artist-1","index_letter":"A",)"
+    R"({"data":[{"favourite_id":null,"id":"artist-2","index_letter":"B","title":"Björk"},{"favourite_id":null,)"
+    R"("id":"artist-1","index_letter":"A",)"
     R"("title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":2}})",
-    R"({"data":[{"id":"artist-2","index_letter":"A","title":"ABBA"},{"id":"artist-1","index_letter":"#",)"
+    R"({"data":[{"favourite_id":null,"id":"artist-2","index_letter":"A","title":"ABBA"},{"favourite_id":null,)"
+    R"("id":"artist-1","index_letter":"#",)"
     R"("title":"10cc"}],"meta":{"page":1,"per_page":100,"total":2}})",
+    R"({"data":[{"id":"artist-1","index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":"7","id":"artist-1","index_letter":"A","title":"ABBA"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":7.5,"id":"artist-1","index_letter":"A","title":"ABBA"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":true,"id":"artist-1","index_letter":"A","title":"ABBA"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":1e30,"id":"artist-1","index_letter":"A","title":"ABBA"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
 };
 
 // Where the artists screen's back button and the button that opens its letters are, and the now
@@ -3358,6 +3404,8 @@ static void artists(SimHost& host, Shell& shell) {
                page.items.size() == LIBRARY.size(),
            "the artists fixture's page was not read as it is");
     expect(page.items[0] == Artist{.id = "artist-1", .title = "10 000 Maniacs", .index_letter = '#'} &&
+               page.items[26] ==
+                   Artist{.id = "artist-27", .title = "Portishead", .index_letter = 'P', .favourite_id = 126} &&
                page.items[27] == Artist{.id = "artist-28", .title = "Röyksopp", .index_letter = 'R'},
            "the artists fixture's artists were not read as they are");
 
@@ -3521,10 +3569,11 @@ static void artists_unreadable(SimHost& host, Shell& shell) {
     Page<Artist> page;
 
     const auto allowed =
-        R"({"data":[{"artwork_id":7,"id":"artist-1","index_letter":"A","title":"ABBA","country":"SE"}],)"
-        R"("meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
-    expect(!read_artists(200, allowed, strlen(allowed), page) && page.items.size() == 1,
-           "a page was refused for what the display does not show");
+        R"({"data":[{"artwork_id":7,"favourite_id":7,"id":"artist-1","index_letter":"A","title":"ABBA",)"
+        R"("country":"SE"}],"meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
+    expect(
+        !read_artists(200, allowed, strlen(allowed), page) && page.items.size() == 1 && page.items[0].favourite_id == 7,
+        "a page was refused for what the display does not show");
 
     for (const auto body : UNREADABLE_ARTISTS) {
         page = {};
@@ -3956,7 +4005,8 @@ static const std::vector<AlbumFixture> ALBUMS = {
 };
 
 // The answer to GET /api/library/artists/{artist_id}/albums for page `number` of `albums`, of the
-// artist "artist-29", its data the `count` albums from `first`. Every third album has no picture.
+// artist "artist-29", its data the `count` albums from `first`. Every third album has no picture,
+// and every fourth from the third is marked as a favourite.
 static std::string make_albums_body(const std::vector<AlbumFixture>& albums, size_t first, size_t count,
                                     uint32_t number) {
     const auto data = cJSON_CreateArray();
@@ -3971,6 +4021,7 @@ static std::string make_albums_body(const std::vector<AlbumFixture>& albums, siz
             cJSON_AddNullToObject(album, "artwork_id");
         }
 
+        add_favourite_id(album, i, ALBUM_FAVOURITES);
         cJSON_AddStringToObject(album, "id", ("album-" + std::to_string(i + 1)).c_str());
         cJSON_AddStringToObject(album, "title", albums[i].title.c_str());
         cJSON_AddNumberToObject(album, "track_count", 9);
@@ -4040,7 +4091,7 @@ static const std::vector<std::string> PLAYLISTS = {
 };
 
 // The answer to GET /api/library/playlists for page `number` of `titles`, its data the `count`
-// playlists from `first`.
+// playlists from `first`, every fourth from the third marked as a favourite.
 static std::string make_playlists_body(const std::vector<std::string>& titles, size_t first, size_t count,
                                        uint32_t number) {
     const auto data = cJSON_CreateArray();
@@ -4048,6 +4099,7 @@ static std::string make_playlists_body(const std::vector<std::string>& titles, s
         const auto playlist = cJSON_CreateObject();
         cJSON_AddStringToObject(playlist, "artwork_id", ("cGxheWxpc3Qv" + std::to_string(i)).c_str());
         cJSON_AddNumberToObject(playlist, "duration_ms", double(3600000 + i * 60000));
+        add_favourite_id(playlist, i, PLAYLIST_FAVOURITES);
         cJSON_AddStringToObject(playlist, "id", ("playlist-" + std::to_string(i + 1)).c_str());
         cJSON_AddStringToObject(playlist, "title", titles[i].c_str());
         cJSON_AddNumberToObject(playlist, "track_count", double(12 + i));
@@ -4063,21 +4115,40 @@ static const char* const UNREADABLE_ITEMS[] = {
     R"({"data":[],"meta":{"page":1,"per_page":20,"total":0}})",
     R"({"data":["item-1"],"meta":{"page":1,"per_page":100,"total":1}})",
     R"({"data":[{"title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"","title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":7,"title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"item-1","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"item-1","title":null,"year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"item-1","title":"Von","year":1997},{"id":"item-2","year":1999}],)"
+    R"({"data":[{"favourite_id":null,"id":"","title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":7,"title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"item-1","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"item-1","title":null,"year":1997}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"item-1","title":"Von","year":1997},{"favourite_id":null,"id":"item-2",)"
+    R"("year":1999}],)"
     R"("meta":{"page":1,"per_page":100,"total":2}})",
 };
 
 // Albums the API's document does not allow, by their year.
 static const char* const UNREADABLE_ALBUMS[] = {
-    R"({"data":[{"id":"album-1","title":"Von"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"album-1","title":"Von","year":"1997"}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"album-1","title":"Von","year":1997.5}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"album-1","title":"Von","year":true}],"meta":{"page":1,"per_page":100,"total":1}})",
-    R"({"data":[{"id":"album-1","title":"Von","year":1e30}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"album-1","title":"Von"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"album-1","title":"Von","year":"1997"}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"album-1","title":"Von","year":1997.5}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"album-1","title":"Von","year":true}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+    R"({"data":[{"favourite_id":null,"id":"album-1","title":"Von","year":1e30}],"meta":{"page":1,"per_page":100,)"
+    R"("total":1}})",
+};
+
+// Albums or playlists the API's document does not allow, by their favourite_id.
+static const char* const UNREADABLE_FAVOURITE_IDS[] = {
+    R"({"data":[{"id":"item-1","title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":"7","id":"item-1","title":"Von","year":1997}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":7.5,"id":"item-1","title":"Von","year":1997}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":{"id":7},"id":"item-1","title":"Von","year":1997}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"favourite_id":-1e30,"id":"item-1","title":"Von","year":1997}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
 };
 
 // Every one of `bodies` is refused whole, as a 200 and as an error's body, which then gives no
@@ -4208,10 +4279,10 @@ static void albums(SimHost& host, Shell& shell) {
     Page<Album> page;
     const auto body = make_pages(ALBUMS, make_albums_body)[0];
     expect(!read_albums(200, body.c_str(), body.length(), page), "the albums fixture was not read as a page");
-    expect(page.items.size() == ALBUMS.size() &&
-               page.items[0] == Album{.id = "album-1", .title = "Átta", .year = 2023} &&
-               page.items[10] == Album{.id = "album-11", .title = "Rarities", .year = std::nullopt},
-           "the albums fixture's albums were not read as they are");
+    expect(
+        page.items.size() == ALBUMS.size() && page.items[0] == Album{.id = "album-1", .title = "Átta", .year = 2023} &&
+            page.items[10] == Album{.id = "album-11", .title = "Rarities", .year = std::nullopt, .favourite_id = 210},
+        "the albums fixture's albums were not read as they are");
 
     host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
     open_albums(host, shell);
@@ -4304,9 +4375,10 @@ static const char* check_albums_error(const SimHost&, const Shell& shell) {
 static void albums_unreadable(SimHost& host, Shell& shell) {
     std::vector<const char*> bodies(std::begin(UNREADABLE_ITEMS), std::end(UNREADABLE_ITEMS));
     bodies.insert(bodies.end(), std::begin(UNREADABLE_ALBUMS), std::end(UNREADABLE_ALBUMS));
+    bodies.insert(bodies.end(), std::begin(UNREADABLE_FAVOURITE_IDS), std::end(UNREADABLE_FAVOURITE_IDS));
 
-    const auto allowed = R"({"data":[{"artist":7,"artwork_id":7,"id":"album-1","label":"Smekkleysa",)"
-                         R"("title":"Von","track_count":"nine","year":null}],)"
+    const auto allowed = R"({"data":[{"artist":7,"artwork_id":7,"favourite_id":null,"id":"album-1",)"
+                         R"("label":"Smekkleysa","title":"Von","track_count":"nine","year":null}],)"
                          R"("meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
     expect_refused(read_albums, allowed, bodies);
 
@@ -4628,7 +4700,7 @@ static void playlists(SimHost& host, Shell& shell) {
     const auto body = make_pages(PLAYLISTS, make_playlists_body)[0];
     expect(!read_playlists(200, body.c_str(), body.length(), page), "the playlists fixture was not read as a page");
     expect(page.items.size() == PLAYLISTS.size() &&
-               page.items[2] == Playlist{.id = "playlist-3", .title = "Kerst – rustig"},
+               page.items[2] == Playlist{.id = "playlist-3", .title = "Kerst – rustig", .favourite_id = 302},
            "the playlists fixture's playlists were not read as they are");
 
     host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
@@ -4724,12 +4796,20 @@ static const char* check_playlists_error(const SimHost&, const Shell& shell) {
     return check_says_failed();
 }
 
-// Every page of playlists the API's document does not allow is refused whole.
+// Every page of playlists the API's document does not allow is refused whole. The largest
+// favourite_id read is the largest whole number a double holds every one up to.
 static void playlists_unreadable(SimHost& host, Shell& shell) {
-    const std::vector<const char*> bodies(std::begin(UNREADABLE_ITEMS), std::end(UNREADABLE_ITEMS));
-    const auto allowed = R"({"data":[{"artwork_id":null,"duration_ms":null,"id":"playlist-1","title":"Zomer",)"
-                         R"("track_count":-1}],"meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
+    std::vector<const char*> bodies(std::begin(UNREADABLE_ITEMS), std::end(UNREADABLE_ITEMS));
+    bodies.insert(bodies.end(), std::begin(UNREADABLE_FAVOURITE_IDS), std::end(UNREADABLE_FAVOURITE_IDS));
+
+    const auto allowed = R"({"data":[{"artwork_id":null,"duration_ms":null,"favourite_id":9007199254740992,)"
+                         R"("id":"playlist-1","title":"Zomer","track_count":-1}],)"
+                         R"("meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
     expect_refused(read_playlists, allowed, bodies);
+
+    Page<Playlist> page;
+    read_playlists(200, allowed, strlen(allowed), page);
+    expect(page.items[0].favourite_id == 9007199254740992, "the largest favourite_id was not read as it is");
 
     host.playlists().serve(200, {bodies.back()});
     open_playlists(host, shell);
@@ -4917,17 +4997,34 @@ static void expect_queue_rules() {
     expect(!queueing.timed_out(LIMIT), "a request was settled twice");
 }
 
+// How many buttons end the row of an artist, an album or a playlist: Play, Shuffle, Add to queue and
+// the favourite toggle. A track's has Play and Add to queue alone.
+static constexpr uint32_t ITEM_BUTTONS = 4;
+static constexpr uint32_t TRACK_BUTTONS = 2;
+
 // The button that does `action` at the end of this row: Play first, then Shuffle where the row has
-// it, and Add to queue last.
+// it, then Add to queue, and the favourite toggle last where the row has it.
 static lv_obj_t* find_queue_button(const lv_obj_t* row, QueueAction action) {
     const auto buttons = find_queue_buttons(row);
     expect(buttons, "the row does not end in the queue's buttons");
 
-    const auto count = int32_t(lv_obj_get_child_count(buttons));
-    expect(action != QueueAction::Shuffle || count == 3, "the row has no Shuffle");
+    const auto count = lv_obj_get_child_count(buttons);
+    expect(count == ITEM_BUTTONS || count == TRACK_BUTTONS, "the row does not end in the buttons of an item");
+    expect(action != QueueAction::Shuffle || count == ITEM_BUTTONS, "the row has no Shuffle");
 
-    const auto index = action == QueueAction::Play ? 0 : action == QueueAction::Shuffle ? 1 : count - 1;
+    const auto index = action == QueueAction::Play      ? 0
+                       : action == QueueAction::Shuffle ? 1
+                       : count == ITEM_BUTTONS          ? 2
+                                                        : 1;
     return lv_obj_get_child(buttons, index);
+}
+
+// The favourite toggle at the end of this row, or nullptr for a row without one.
+static lv_obj_t* find_favourite_toggle(const lv_obj_t* row) {
+    const auto buttons = find_queue_buttons(row);
+    expect(buttons, "the row does not end in the queue's buttons");
+
+    return lv_obj_get_child_count(buttons) == ITEM_BUTTONS ? lv_obj_get_child(buttons, -1) : nullptr;
 }
 
 // Touches the button that does `action` at the end of the row whose title is this, scrolled into
@@ -4952,8 +5049,9 @@ static bool shows_at_rest(const lv_obj_t* button) {
 using Presses = std::vector<std::pair<std::string, std::vector<QueueAction>>>;
 
 // Of the queue's buttons of the list on screen, exactly those of `presses` show their press on its
-// way, and every other one is at rest.
-static const char* check_presses(const Presses& presses) {
+// way, and of the favourite toggles exactly those of the rows titled in `toggles`; every other one
+// is at rest.
+static const char* check_presses(const Presses& presses, const std::vector<std::string>& toggles = {}) {
     const auto list = find_list();
     if (!list) {
         return "the items are not listed";
@@ -4968,8 +5066,20 @@ static const char* check_presses(const Presses& presses) {
             found++;
         }
 
+        if (const auto toggle = find_favourite_toggle(row)) {
+            const auto on_its_way = std::any_of(toggles.begin(), toggles.end(), [row](const std::string& title) {
+                return shows_title(get_row_title(row), title);
+            });
+            if (on_its_way && !shows_on_its_way(toggle)) {
+                return "a change of a favourite on its way does not show on its toggle";
+            }
+            if (!on_its_way && !shows_at_rest(toggle)) {
+                return "a toggle whose change is not on its way is not at rest";
+            }
+        }
+
         for (const auto action : {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add}) {
-            if (action == QueueAction::Shuffle && lv_obj_get_child_count(find_queue_buttons(row)) != 3) {
+            if (action == QueueAction::Shuffle && !find_favourite_toggle(row)) {
                 continue;
             }
 
@@ -5009,13 +5119,13 @@ static const char* check_added(const SimHost& host) {
     return says(MSG_ADDED_TO_QUEUE) ? nullptr : "the bar does not say that the add went";
 }
 
-// Every row of the list on screen ends in the queue's buttons, three, or two without Shuffle, each
-// at rest: no press is on its way.
+// Every row of the list on screen ends in the queue's buttons, three and the favourite toggle, or
+// two without Shuffle and the toggle, each at rest: no press is on its way.
 static const char* check_queue_buttons(size_t count) {
     for (const auto row : get_rows(find_list())) {
         const auto buttons = find_queue_buttons(row);
-        if (!buttons || lv_obj_get_child_count(buttons) != count) {
-            return count == 3 ? "a row does not offer Play, Shuffle and Add to queue"
+        if (!buttons || lv_obj_get_child_count(buttons) != (count == 3 ? ITEM_BUTTONS : TRACK_BUTTONS)) {
+            return count == 3 ? "a row does not offer Play, Shuffle, Add to queue and the favourite toggle"
                               : "a row does not offer Play and Add to queue alone";
         }
     }
@@ -5741,6 +5851,733 @@ static const char* check_artists_queue_page(const SimHost& host, const Shell& sh
     }
 
     return check_presses({{make_many_artists()[PAGE_SIZE - 1].first, {QueueAction::Play}}});
+}
+
+// What the backend answers a mark of a favourite: the favourite, with every key FavouriteSchema has.
+// An album's names its artist as its subtitle; an artist's has none. Átta, Sigur Rós and the many
+// artists' hundredth are the fixtures' own.
+static const char FAVOURITE_ATTA[] =
+    R"({"artwork_id":null,"available":true,"created_at":"2026-11-17T09:30:12.123456+00:00","id":42,)"
+    R"("item_id":"album-1","kind":"album","subtitle":"Sigur Rós","title":"Átta"})";
+static const char FAVOURITE_SIGUR_ROS[] =
+    R"({"artwork_id":"YXJ0aXN0LyIi28","available":true,"created_at":"2026-11-17T09:30:12.123456+00:00",)"
+    R"("id":44,"item_id":"artist-29","kind":"artist","subtitle":null,"title":"Sigur Rós"})";
+static const char FAVOURITE_HUNDREDTH[] =
+    R"({"artwork_id":null,"available":true,"created_at":"2026-11-17T09:30:12.123456+00:00","id":45,)"
+    R"("item_id":"artist-100","kind":"artist","subtitle":null,"title":"K Artist 100"})";
+
+// An unmark of a favourite the backend no longer holds: another client unmarked it.
+static const char ERROR_RECORD_NOT_FOUND[] =
+    R"({"code":"RECORD_NOT_FOUND","correlationId":null,"details":{"message":"The request could not be completed"},)"
+    R"("error":"No favourite has this id"})";
+
+// Answers to a mark that the API's document does not allow.
+static const char* const UNREADABLE_FAVOURITES[] = {
+    "",
+    "<html><body>502 Bad Gateway</body></html>",
+    "null",
+    "[]",
+    R"({"available":true,"item_id":"album-1","kind":"album","subtitle":"Sigur Rós","title":"Átta"})",
+    R"({"available":true,"id":null,"item_id":"album-1","kind":"album","subtitle":"Sigur Rós","title":"Átta"})",
+    R"({"available":true,"id":"42","item_id":"album-1","kind":"album","subtitle":"Sigur Rós","title":"Átta"})",
+    R"({"available":true,"id":42.5,"item_id":"album-1","kind":"album","subtitle":"Sigur Rós","title":"Átta"})",
+    R"({"available":true,"id":1e30,"item_id":"album-1","kind":"album","subtitle":"Sigur Rós","title":"Átta"})",
+};
+
+// The bodies of the marks of the fixtures' first artist, album and playlist, and of Valtari, the
+// third album, as the device writes them.
+static const char MARK_ARTIST_1[] = R"({"kind":"artist","item_id":"artist-1"})";
+static const char MARK_ALBUM_1[] = R"({"kind":"album","item_id":"album-1"})";
+static const char MARK_ALBUM_3[] = R"({"kind":"album","item_id":"album-3"})";
+static const char MARK_PLAYLIST_1[] = R"({"kind":"playlist","item_id":"playlist-1"})";
+
+// A mark is taken on a 201 with the new favourite, or a 200 with the one that marked the item
+// already, and read for the favourite's id alone; any other answer, or one the document does not
+// allow, is not. An unmark is taken on a 204, or a 404 with the code RECORD_NOT_FOUND. A change
+// is on its way, by its item, from when it is sent until its answer or its time limit, on LVGL's
+// tick, which wraps; the changes taken are held for the views, the newest MAX_CHANGES. A mark
+// applies to the item pressed, an unmark to every item its favourite marked.
+static void expect_favourite_rules() {
+    int64_t favourite_id = 0;
+    std::string error = "before";
+    expect(!read_favourite_mark(201, FAVOURITE_ATTA, strlen(FAVOURITE_ATTA), favourite_id, error) &&
+               favourite_id == 42 && error.empty(),
+           "a new favourite was not read");
+    expect(!read_favourite_mark(200, FAVOURITE_SIGUR_ROS, strlen(FAVOURITE_SIGUR_ROS), favourite_id, error) &&
+               favourite_id == 44,
+           "the favourite that marked the item already was not read");
+
+    expect(read_favourite_mark(404, ERROR_ITEM_NOT_FOUND, strlen(ERROR_ITEM_NOT_FOUND), favourite_id, error) &&
+               favourite_id == 44 && error == "Plex has no album with this id",
+           "a mark of an item Plex does not have was taken, or its error not read");
+    expect(read_favourite_mark(204, "", 0, favourite_id, error) && error.empty(), "a mark answered 204 was taken");
+    for (const auto body : UNREADABLE_FAVOURITES) {
+        expect(read_favourite_mark(201, body, strlen(body), favourite_id, error) && favourite_id == 44,
+               "a favourite the document does not allow was taken");
+    }
+
+    expect(!read_favourite_unmark(204, "", 0, error) && error.empty(), "an unmark was not taken");
+    expect(!read_favourite_unmark(404, ERROR_RECORD_NOT_FOUND, strlen(ERROR_RECORD_NOT_FOUND), error) && error.empty(),
+           "an unmark of a favourite the backend no longer holds was not taken");
+    expect(read_favourite_unmark(404, ERROR_ITEM_NOT_FOUND, strlen(ERROR_ITEM_NOT_FOUND), error) &&
+               error == "Plex has no album with this id",
+           "an unmark answered 404 with another code was taken");
+    for (const auto body : {ERROR_ENVELOPE, ERROR_VALIDATION, "<html><body>404 Not Found</body></html>", ""}) {
+        expect(read_favourite_unmark(404, body, strlen(body), error),
+               "an unmark answered 404 without the code was taken");
+    }
+    expect(
+        read_favourite_unmark(200, "", 0, error) && read_favourite_unmark(502, ERROR_PLEX, strlen(ERROR_PLEX), error),
+        "an unmark answered other than 204 or 404 was taken");
+
+    Favouring favouring;
+    const auto mark = favouring.sent({.kind = ItemKind::Album, .item_id = "album-1"}, 100);
+    const auto unmark = favouring.sent({.kind = ItemKind::Album, .item_id = "album-3", .favourite_id = 202}, 200);
+    expect(favouring.is_on_its_way(ItemKind::Album, "album-1") && favouring.is_on_its_way(ItemKind::Album, "album-3") &&
+               !favouring.is_on_its_way(ItemKind::Album, "album-2") &&
+               !favouring.is_on_its_way(ItemKind::Artist, "album-1"),
+           "a change is not on its way by its item alone");
+
+    favouring.marked(mark, 42);
+    favouring.unmarked(unmark);
+    const std::vector<FavouriteChange> taken = {
+        {.kind = ItemKind::Album, .item_id = "album-1", .favourite_id = 42, .marks = true},
+        {.kind = ItemKind::Album, .item_id = "album-3", .favourite_id = 202, .marks = false},
+    };
+    expect(favouring.sending.empty() && favouring.changes_taken == 2 && !favouring.changes_not_taken &&
+               favouring.changes == taken,
+           "the changes taken were not held as the backend took them");
+
+    favouring.not_taken(favouring.sent({.kind = ItemKind::Album, .item_id = "album-1"}, 300));
+    expect(favouring.sending.empty() && favouring.changes_taken == 2 && favouring.changes_not_taken == 1,
+           "a change not taken was not settled as one");
+
+    // Sent just before LVGL's tick wraps.
+    const auto sent_at = UINT32_MAX - 1000;
+    const auto late = favouring.sent({.kind = ItemKind::Playlist, .item_id = "playlist-1"}, sent_at);
+    expect(!favouring.timed_out(sent_at + ANSWER_TIME_LIMIT_MS - 1) && favouring.is_sending(late),
+           "a change was settled before its time limit");
+    expect(favouring.timed_out(sent_at + ANSWER_TIME_LIMIT_MS) && !favouring.is_sending(late) &&
+               favouring.changes_not_taken == 2,
+           "the time limit did not settle a change as not taken");
+    expect(!favouring.timed_out(sent_at + ANSWER_TIME_LIMIT_MS), "a change was settled twice");
+
+    for (size_t i = 0; i < Favouring::MAX_CHANGES; i++) {
+        favouring.marked(favouring.sent({.kind = ItemKind::Playlist, .item_id = "playlist-" + std::to_string(i)}, 0),
+                         int64_t(i));
+    }
+    expect(favouring.changes.size() == Favouring::MAX_CHANGES && favouring.changes.front().item_id == "playlist-0" &&
+               favouring.changes_taken == 2 + Favouring::MAX_CHANGES,
+           "the changes taken were not held to MAX_CHANGES, the newest last");
+
+    const FavouriteChange marked{.kind = ItemKind::Album, .item_id = "album-1", .favourite_id = 42, .marks = true};
+    expect(marked.apply(ItemKind::Album, "album-1", std::nullopt) == 42 &&
+               marked.apply(ItemKind::Album, "album-2", std::nullopt) == std::nullopt &&
+               marked.apply(ItemKind::Album, "album-3", 202) == 202 &&
+               marked.apply(ItemKind::Artist, "album-1", std::nullopt) == std::nullopt,
+           "a mark did not mark the item pressed alone");
+    const FavouriteChange unmarked{.kind = ItemKind::Album, .item_id = "album-3", .favourite_id = 202, .marks = false};
+    expect(unmarked.apply(ItemKind::Album, "album-3", 202) == std::nullopt &&
+               unmarked.apply(ItemKind::Album, "album-12", 202) == std::nullopt &&
+               unmarked.apply(ItemKind::Album, "album-1", 42) == 42 &&
+               unmarked.apply(ItemKind::Playlist, "playlist-3", 202) == 202,
+           "an unmark did not unmark every item of its kind its favourite marked, and those alone");
+}
+
+// The titles of a list's fixture that it marks as a favourite.
+static std::vector<std::string> get_marked(const std::vector<std::string>& titles) {
+    std::vector<std::string> marked;
+    for (size_t i = 0; i < titles.size(); i++) {
+        if (is_marked(i)) {
+            marked.push_back(titles[i]);
+        }
+    }
+
+    return marked;
+}
+
+static std::vector<std::string> get_titles(const std::vector<ArtistFixture>& artists) {
+    std::vector<std::string> titles;
+    for (const auto& artist : artists) {
+        titles.push_back(artist.first);
+    }
+
+    return titles;
+}
+
+static std::vector<std::string> get_titles(const std::vector<AlbumFixture>& albums) {
+    std::vector<std::string> titles;
+    for (const auto& album : albums) {
+        titles.push_back(album.title);
+    }
+
+    return titles;
+}
+
+// `titles` with `added` and without `removed`.
+static std::vector<std::string> with(std::vector<std::string> titles, const std::vector<std::string>& added,
+                                     const std::vector<std::string>& removed = {}) {
+    std::erase_if(titles, [&removed](const std::string& title) {
+        return std::find(removed.begin(), removed.end(), title) != removed.end();
+    });
+    titles.insert(titles.end(), added.begin(), added.end());
+
+    return titles;
+}
+
+// Touches the favourite toggle at the end of the row whose title is this, scrolled into view first.
+static void tap_favourite_toggle(SimHost& host, Shell& shell, const char* title) {
+    const auto toggle = find_favourite_toggle(show_row(shell, title));
+    expect(toggle, "the row has no favourite toggle");
+
+    tap_center(host, toggle);
+}
+
+// Every row of the list on screen ends in a favourite toggle, a target of PressButton::SIZE, which
+// shows its item marked, a heart, exactly for the rows titled in `marked`, and an outline of one
+// for every other row, also under a spinner that shows a change on its way.
+static const char* check_marks(const std::vector<std::string>& marked) {
+    const auto list = find_list();
+    if (!list) {
+        return "the items are not listed";
+    }
+
+    size_t found = 0;
+    for (const auto row : get_rows(list)) {
+        const auto toggle = find_favourite_toggle(row);
+        if (!toggle) {
+            return "a row has no favourite toggle";
+        }
+        if (lv_obj_get_width(toggle) < PressButton::SIZE || lv_obj_get_height(toggle) < PressButton::SIZE) {
+            return "a favourite toggle is smaller than a target is";
+        }
+
+        const auto is_marked = std::any_of(marked.begin(), marked.end(), [row](const std::string& title) {
+            return shows_title(get_row_title(row), title);
+        });
+        if (is_marked) {
+            found++;
+        }
+
+        const auto icon = lv_label_get_text(lv_obj_get_child(toggle, 0));
+        if (strcmp(icon, is_marked ? ICON_HEART : ICON_HEART_OUTLINE)) {
+            return is_marked ? "a toggle does not show the favourite that marks its item"
+                             : "a toggle shows a favourite where none marks its item";
+        }
+    }
+
+    return found == marked.size() ? nullptr : "a row marked is not listed";
+}
+
+// The changes of a favourite the presses sent, and their bodies, as the device writes them.
+static const char* check_favourite_requests(const SimHost& host, const std::vector<FavouriteRequest>& requests,
+                                            const std::vector<std::string>& bodies) {
+    if (host.get_favourite_requests() != requests) {
+        return "the toggles did not ask for the marks and unmarks pressed, in order";
+    }
+
+    return host.get_favourite_request_bodies() == bodies ? nullptr : "a change's body is not the one the API takes";
+}
+
+// No change of a favourite is on its way or was not taken, and as many were taken as `taken`.
+static const char* check_favourites_taken(const SimHost& host, uint32_t taken) {
+    const auto& favouring = host.get_model().favouring;
+    if (!favouring.sending.empty() || favouring.changes_not_taken) {
+        return "a change of a favourite is on its way still, or was not taken";
+    }
+
+    return favouring.changes_taken == taken ? nullptr : "the changes answered were not taken";
+}
+
+// A press on the toggle of an artist no favourite marks, and on that of one a favourite marks,
+// neither answered yet: the first sends a mark, the second an unmark of its favourite, and each
+// toggle shows its change on its way, over the mark it showed. A second press on the first toggle
+// sends nothing and opens nothing, and the artist's Play still sends. Every other toggle shows
+// whether a favourite marks its artist.
+static void artists_favourite_on_its_way(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    tap_favourite_toggle(host, shell, LIBRARY[0].first.c_str());
+    tap_favourite_toggle(host, shell, LIBRARY[2].first.c_str());
+    tap_favourite_toggle(host, shell, LIBRARY[0].first.c_str());
+    tap_queue_button(host, shell, LIBRARY[0].first.c_str(), QueueAction::Play);
+}
+
+static const char* check_artists_favourite_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.albums().get_requests().empty()) {
+        return "a press on a toggle opened its artist";
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Artist, .item_id = "artist-1"},
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 102},
+                                     },
+                                     {MARK_ARTIST_1, ""})) {
+        return problem;
+    }
+    if (host.get_queue_requests().size() != 1) {
+        return "the artist's Play did not send";
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_marks(get_marked(get_titles(LIBRARY)))) {
+        return problem;
+    }
+
+    return check_presses({{LIBRARY[0].first, {QueueAction::Play}}}, {LIBRARY[0].first, LIBRARY[2].first});
+}
+
+// The same on an artist's albums: Átta is marked, and Valtari, the third, unmarked. A second press
+// on Valtari's toggle sends nothing and opens nothing.
+static void albums_favourite_on_its_way(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_favourite_toggle(host, shell, "Átta");
+    tap_favourite_toggle(host, shell, "Valtari");
+    tap_favourite_toggle(host, shell, "Valtari");
+}
+
+static const char* check_albums_favourite_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.tracks().get_requests().empty()) {
+        return "a press on a toggle opened its album";
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Album, .item_id = "album-1"},
+                                         {.kind = ItemKind::Album, .item_id = "album-3", .favourite_id = 202},
+                                     },
+                                     {MARK_ALBUM_1, ""})) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_marks(get_marked(get_titles(ALBUMS)))) {
+        return problem;
+    }
+
+    return check_presses({}, {"Átta", "Valtari"});
+}
+
+// The same on the playlists: Avondeten is marked, and Kerst – rustig, the third, unmarked.
+static void playlists_favourite_on_its_way(SimHost& host, Shell& shell) {
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_playlists(host, shell);
+
+    tap_favourite_toggle(host, shell, PLAYLISTS[0].c_str());
+    tap_favourite_toggle(host, shell, PLAYLISTS[2].c_str());
+    tap_favourite_toggle(host, shell, PLAYLISTS[0].c_str());
+}
+
+static const char* check_playlists_favourite_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Playlist, .item_id = "playlist-1"},
+                                         {.kind = ItemKind::Playlist, .item_id = "playlist-3", .favourite_id = 302},
+                                     },
+                                     {MARK_PLAYLIST_1, ""})) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_marks(get_marked(PLAYLISTS))) {
+        return problem;
+    }
+
+    return check_presses({}, {PLAYLISTS[0], PLAYLISTS[2]});
+}
+
+// When an answer to a press comes: after the touch, and before the next one.
+static constexpr uint32_t ANSWER_BEFORE_NEXT_MS = SimHost::TAP_INTERVAL_MS - 50;
+
+// A mark of Átta, answered with the new favourite: its toggle shows it marked, at rest, and
+// nothing is said.
+static void albums_favourite_marked(SimHost& host, Shell& shell) {
+    expect_favourite_rules();
+
+    open_albums_screen(host, shell);
+
+    tap_favourite_toggle(host, shell, "Átta");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(201, FAVOURITE_ATTA); });
+}
+
+static const char* check_albums_favourite_marked(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_marks(with(get_marked(get_titles(ALBUMS)), {"Átta"}))) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// A mark of Átta, answered with the favourite that marked it already, and a second press on its
+// toggle, which unmarks that favourite: it shows on its way, over the mark the answer left.
+static void albums_favourite_marked_already(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_favourite_toggle(host, shell, "Átta");
+    tap_favourite_toggle(host, shell, "Átta");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(200, FAVOURITE_ATTA); });
+}
+
+static const char* check_albums_favourite_marked_already(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Album, .item_id = "album-1"},
+                                         {.kind = ItemKind::Album, .item_id = "album-1", .favourite_id = 42},
+                                     },
+                                     {MARK_ALBUM_1, ""})) {
+        return problem;
+    }
+    if (const auto problem = check_marks(with(get_marked(get_titles(ALBUMS)), {"Átta"}))) {
+        return problem;
+    }
+
+    return check_presses({}, {"Átta"});
+}
+
+// An unmark of Valtari, answered 204: its toggle shows it unmarked, at rest, and nothing is said.
+static void albums_favourite_unmarked(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_favourite_toggle(host, shell, "Valtari");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(204, ""); });
+}
+
+static const char* check_albums_favourite_unmarked(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_marks(with(get_marked(get_titles(ALBUMS)), {}, {"Valtari"}))) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// An unmark of Valtari, whose favourite another client unmarked first: the backend answers that it
+// holds no favourite with the id, Valtari shows unmarked, and nothing is said. A second press on
+// its toggle marks it.
+static void albums_favourite_unmarked_elsewhere(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_favourite_toggle(host, shell, "Valtari");
+    tap_favourite_toggle(host, shell, "Valtari");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(404, ERROR_RECORD_NOT_FOUND); });
+}
+
+static const char* check_albums_favourite_unmarked_elsewhere(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.get_model().favouring.changes_not_taken) {
+        return "the unmark of a favourite the backend no longer holds was not taken";
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Album, .item_id = "album-3", .favourite_id = 202},
+                                         {.kind = ItemKind::Album, .item_id = "album-3"},
+                                     },
+                                     {"", MARK_ALBUM_3})) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_marks(with(get_marked(get_titles(ALBUMS)), {}, {"Valtari"}))) {
+        return problem;
+    }
+
+    return check_presses({}, {"Valtari"});
+}
+
+// A mark of Átta, an unmark of Valtari and a mark of Kveikur, answered once all three are on their
+// way: an error, an error to an unmark, and a favourite the document does not allow. Then a mark
+// of Átta again, which no answer comes to. None is taken: every toggle is at rest, as it was before
+// its press, and the bar says that a press did not go through.
+static void albums_favourite_refused(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    for (const auto title : {"Átta", "Valtari", "Kveikur", "Átta"}) {
+        tap_favourite_toggle(host, shell, title);
+    }
+
+    host.answer_after(2 * SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS, [&host]() {
+        host.answer_favourite_change(404, ERROR_ITEM_NOT_FOUND);
+        host.answer_favourite_change(502, ERROR_PLEX);
+        host.answer_favourite_change(201, R"({"id":"42","item_id":"album-2","kind":"album","title":"Kveikur"})");
+    });
+    host.answer_after(3 * SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(SimHost::UNREACHABLE, ""); });
+}
+
+// The changes pressed were all not taken: every toggle is at rest and shows the fixture's marks,
+// and the bar says that a press did not go through.
+static const char* check_favourites_not_taken(const SimHost& host, uint32_t pressed) {
+    const auto& favouring = host.get_model().favouring;
+    if (favouring.changes_not_taken != pressed || favouring.changes_taken || !favouring.sending.empty()) {
+        return "the changes were not settled as not taken";
+    }
+    if (const auto problem = check_marks(get_marked(get_titles(ALBUMS)))) {
+        return problem;
+    }
+    if (const auto problem = check_presses({})) {
+        return problem;
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) ? nullptr : "the bar does not say that it did not go through";
+}
+
+static const char* check_albums_favourite_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_favourite_changes()) {
+        return "the answers did not come";
+    }
+
+    return check_favourites_not_taken(host, 4);
+}
+
+// A mark of Átta and an unmark of Valtari, never answered: once their time limit has passed both
+// are settled as not taken, and the answers that come after it change nothing.
+static void albums_favourite_timed_out(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_favourite_toggle(host, shell, "Átta");
+    tap_favourite_toggle(host, shell, "Valtari");
+    host.answer_after(ANSWER_TIME_LIMIT_MS + 500, [&host]() {
+        host.answer_favourite_change(201, FAVOURITE_ATTA);
+        host.answer_favourite_change(204, "");
+    });
+}
+
+static const char* check_albums_favourite_timed_out(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_favourite_changes()) {
+        return "the late answers did not come";
+    }
+
+    return check_favourites_not_taken(host, 2);
+}
+
+// Two copies of a release the library holds twice, which one favourite marks, and another album.
+static const char COPIES[] =
+    R"({"data":[{"artist":"Sigur Rós","artist_id":"artist-29","artwork_id":null,"favourite_id":250,)"
+    R"("id":"album-31","title":"Ágætis byrjun – 20th anniversary","track_count":10,"year":2019},)"
+    R"({"artist":"Sigur Rós","artist_id":"artist-29","artwork_id":null,"favourite_id":250,"id":"album-9",)"
+    R"("title":"Ágætis byrjun","track_count":10,"year":1999},)"
+    R"({"artist":"Sigur Rós","artist_id":"artist-29","artwork_id":null,"favourite_id":null,"id":"album-10",)"
+    R"("title":"Von","track_count":12,"year":1997}],)"
+    R"("meta":{"page":1,"per_page":100,"sort_by":"release","sort_dir":"desc","total":3,"total_pages":1}})";
+
+// An unmark of one of two copies, answered 204: the favourite marked both, so both show unmarked.
+static void albums_favourite_copies(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+    host.albums().serve(200, {COPIES});
+    shell.push(std::make_unique<AlbumsView>(
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+
+    tap_favourite_toggle(host, shell, "Ágætis byrjun");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(204, ""); });
+}
+
+static const char* check_albums_favourite_copies(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Album, .item_id = "album-9", .favourite_id = 250}}, {""})) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+
+    return check_marks({});
+}
+
+// A mark of Sigur Rós, and a press on its row, which opens its albums. The mark is answered while
+// the albums show, and back on the artists Sigur Rós shows marked, at rest.
+static void artists_favourite_back(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_library(host, shell, LIBRARY);
+
+    const auto title = LIBRARY[SIGUR_ROS].first.c_str();
+    tap_favourite_toggle(host, shell, title);
+    tap_row(host, shell, title);
+    host.wait(2 * SimHost::TAP_INTERVAL_MS);
+    host.tap(BACK.x, BACK.y);
+
+    // Once the albums show, and before the touch on the way back.
+    host.answer_after(3 * SimHost::TAP_INTERVAL_MS + 100,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_SIGUR_ROS); });
+}
+
+static const char* check_artists_favourite_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1}) {
+        return "the artist's albums did not open";
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+    if (const auto problem = check_marks(with(get_marked(get_titles(LIBRARY)), {LIBRARY[SIGUR_ROS].first}))) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// A mark of the first page's last artist, answered, and an unmark of the one before it, not
+// answered yet, and the second page comes: the list is built again with both pages, the last artist
+// shows marked still, and the one before it its change on its way.
+static void artists_favourite_page(SimHost& host, Shell& shell) {
+    const auto artists = make_many_artists();
+    const auto pages = make_artist_pages(artists);
+    host.artists().serve(200, {pages[0]});
+    open_artists(host, shell);
+    scroll_list(shell, true);
+    expect(host.artists().get_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
+
+    tap_favourite_toggle(host, shell, artists[PAGE_SIZE - 1].first.c_str());
+    tap_favourite_toggle(host, shell, artists[PAGE_SIZE - 2].first.c_str());
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(201, FAVOURITE_HUNDREDTH); });
+    host.answer_after(after_touches_ms(2), [&host, page = pages[1]]() { host.artists().answer(200, page.c_str()); });
+}
+
+static const char* check_artists_favourite_page(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+
+    const auto artists = make_many_artists();
+    if (const auto problem = check_rows(artists, 0, 2 * PAGE_SIZE)) {
+        return problem;
+    }
+
+    const auto& favouring = host.get_model().favouring;
+    if (favouring.changes_taken != 1 || favouring.sending.size() != 1 || favouring.changes_not_taken) {
+        return "the mark was not taken alone, with the unmark on its way";
+    }
+
+    const auto titles = get_titles(artists);
+    const auto marked = get_marked(std::vector<std::string>(titles.begin(), titles.begin() + 2 * PAGE_SIZE));
+    if (const auto problem = check_marks(with(marked, {artists[PAGE_SIZE - 1].first}))) {
+        return problem;
+    }
+
+    return check_presses({}, {artists[PAGE_SIZE - 2].first});
+}
+
+// Sigur Rós's albums, opened twice, the second over the first.
+static void open_albums_twice(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    shell.push(std::make_unique<AlbumsView>(
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+}
+
+// A mark of Átta on the albums opened over Sigur Rós's albums, answered, and back: the albums under
+// them show Átta marked, without asking for the albums again.
+static void albums_favourite_under(SimHost& host, Shell& shell) {
+    open_albums_twice(host, shell);
+
+    tap_favourite_toggle(host, shell, "Átta");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(201, FAVOURITE_ATTA); });
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_albums_favourite_under(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums under were asked for again, or the albums did not open twice";
+    }
+    if (const auto problem = check_marks(with(get_marked(get_titles(ALBUMS)), {"Átta"}))) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// How many times Átta is marked and unmarked on the albums over the others: once more than the
+// changes the model holds.
+static constexpr size_t MISSED_CHANGES = Favouring::MAX_CHANGES + 1;
+
+// Átta marked and unmarked, each answered before the next press, more times than the model holds
+// the changes of, and back: the albums under them missed changes, so they ask for the albums again
+// and show what the backend answers.
+static void albums_favourite_missed(SimHost& host, Shell& shell) {
+    open_albums_twice(host, shell);
+
+    const auto toggle = find_favourite_toggle(show_row(shell, "Átta"));
+    for (size_t i = 0; i < MISSED_CHANGES; i++) {
+        tap_center(host, toggle);
+        host.answer_after(uint32_t(i) * SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS, [&host, i]() {
+            if (i % 2) {
+                host.answer_favourite_change(204, "");
+            } else {
+                host.answer_favourite_change(201, FAVOURITE_ATTA);
+            }
+        });
+    }
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_albums_favourite_missed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, MISSED_CHANGES)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1, 1}) {
+        return "the albums under did not ask for the albums again";
+    }
+    if (const auto problem = check_marks(get_marked(get_titles(ALBUMS)))) {
+        return problem;
+    }
+
+    return check_presses({});
 }
 
 // An entry of a queue's fixture: its title, and its artist.
@@ -6766,6 +7603,27 @@ const std::vector<Scene>& get_scenes() {
         {"artists-queue-back", artists_queue_back, check_artists_queue_back, after_touches_ms(6)},
         {"albums-queue-reopened", albums_queue_reopened, check_albums_queue_reopened, after_touches_ms(3)},
         {"artists-queue-page", artists_queue_page, check_artists_queue_page, after_touches_ms(1) + 300},
+        {"artists-favourite-on-its-way", artists_favourite_on_its_way, check_artists_favourite_on_its_way,
+         after_touches_ms(4)},
+        {"albums-favourite-on-its-way", albums_favourite_on_its_way, check_albums_favourite_on_its_way,
+         after_touches_ms(3)},
+        {"playlists-favourite-on-its-way", playlists_favourite_on_its_way, check_playlists_favourite_on_its_way,
+         after_touches_ms(3)},
+        {"albums-favourite-marked", albums_favourite_marked, check_albums_favourite_marked, after_touches_ms(1)},
+        {"albums-favourite-marked-already", albums_favourite_marked_already, check_albums_favourite_marked_already,
+         after_touches_ms(2)},
+        {"albums-favourite-unmarked", albums_favourite_unmarked, check_albums_favourite_unmarked, after_touches_ms(1)},
+        {"albums-favourite-unmarked-elsewhere", albums_favourite_unmarked_elsewhere,
+         check_albums_favourite_unmarked_elsewhere, after_touches_ms(2)},
+        {"albums-favourite-refused", albums_favourite_refused, check_albums_favourite_refused, after_touches_ms(4)},
+        {"albums-favourite-timed-out", albums_favourite_timed_out, check_albums_favourite_timed_out,
+         ANSWER_TIME_LIMIT_MS + 1000},
+        {"albums-favourite-copies", albums_favourite_copies, check_albums_favourite_copies, after_touches_ms(1)},
+        {"artists-favourite-back", artists_favourite_back, check_artists_favourite_back, after_touches_ms(5)},
+        {"artists-favourite-page", artists_favourite_page, check_artists_favourite_page, after_touches_ms(2) + 300},
+        {"albums-favourite-under", albums_favourite_under, check_albums_favourite_under, after_touches_ms(2)},
+        {"albums-favourite-missed", albums_favourite_missed, check_albums_favourite_missed,
+         after_touches_ms(MISSED_CHANGES + 1)},
         {"queue-screen", queue_screen, check_queue_screen_open, after_touches_ms(1)},
         {"queue-screen-mid-page", queue_screen_mid_page, check_queue_screen_mid_page},
         {"queue-screen-long", queue_screen_long, check_queue_screen_long},

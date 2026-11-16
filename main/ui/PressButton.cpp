@@ -26,6 +26,8 @@ lv_obj_t* PressButton::create(lv_obj_t* parent, const char* icon, lv_event_cb_t 
     return button;
 }
 
+void PressButton::set_icon(lv_obj_t* button, const char* icon) { lv_label_set_text(lv_obj_get_child(button, 0), icon); }
+
 // The icon is the button's first child, and the spinner, while it shows, its second. A press that
 // sends nothing does not look pressed either.
 void PressButton::show_on_its_way(lv_obj_t* button, bool on_its_way) {

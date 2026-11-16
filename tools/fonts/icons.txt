@@ -20,3 +20,5 @@ music_box_multiple F0333
 shuffle_variant F049F
 playlist_plus F0412
 playlist_play F0411
+heart F02D1
+heart_outline F02D5

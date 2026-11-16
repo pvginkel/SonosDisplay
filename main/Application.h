@@ -25,8 +25,8 @@ class Application : public ApplicationBase, public UiHost {
     uint32_t _screen_off_seconds{ScreenPower::DEFAULT_TIMEOUT_SECONDS};
     // The backend's state, fetched again on its events.
     std::unique_ptr<HttpClient> _api_client;
-    // Presses: transport commands, changes of the volume and of groups, and items queued, in the
-    // order they were made, behind no fetch.
+    // Presses: transport commands, changes of the volume and of groups, items queued and
+    // favourites marked or unmarked, in the order they were made, behind no fetch.
     std::unique_ptr<HttpClient> _press_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
@@ -49,6 +49,7 @@ public:
     void add_to_group(const std::string& speaker_id) override;
     void remove_from_group(const std::string& speaker_id) override;
     void queue_item(const QueueRequest& request) override;
+    void change_favourite(const FavouriteRequest& request) override;
     void request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) override;
     void request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
                         std::function<void(Page<Album>)> done) override;
@@ -81,6 +82,7 @@ private:
     void send_group_change(const std::string& speaker_id, bool adds);
     void group_change_answered(uint32_t change, bool adds, HttpResponse&& response);
     void queue_answered(uint32_t request, HttpResponse&& response);
+    void favourite_answered(uint32_t change, bool marks, HttpResponse&& response);
     void clear_answered(HttpResponse&& response);
     void task_event_received(const cJSON* payload);
     void fetch_artwork(ArtworkRequest&& request);

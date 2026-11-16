@@ -617,6 +617,75 @@ void Application::queue_answered(uint32_t request, HttpResponse&& response) {
     model_changed();
 }
 
+void Application::change_favourite(const FavouriteRequest& request) {
+    const auto marks = !request.favourite_id;
+    if (marks) {
+        ESP_LOGI(TAG, "Marking item %s as a favourite", request.item_id.c_str());
+    } else {
+        ESP_LOGI(TAG, "Unmarking favourite %" PRId64 " of item %s", *request.favourite_id, request.item_id.c_str());
+    }
+
+    const auto id = _model.favouring.sent(request, lv_tick_get());
+    model_changed();
+
+    HttpRequest http;
+    if (marks) {
+        auto body = write_favourite_mark(request);
+
+        // A body the heap cannot hold is a change not taken, as HttpClient answers a request it
+        // cannot take.
+        if (!body) {
+            ESP_LOGE(TAG, "Cannot build the body of the mark of %s", request.item_id.c_str());
+            favourite_answered(id, marks, HttpResponse{.err = ESP_ERR_NO_MEM});
+            return;
+        }
+
+        http = HttpRequest{.method = HTTP_METHOD_POST, .path = "/api/favourites", .body = std::move(*body)};
+    } else {
+        http = HttpRequest{.method = HTTP_METHOD_DELETE,
+                           .path = "/api/favourites/" + std::to_string(*request.favourite_id)};
+    }
+
+    _press_client->send(std::move(http), _scope, [this, id, marks](HttpResponse&& response) {
+        favourite_answered(id, marks, std::move(response));
+    });
+}
+
+void Application::favourite_answered(uint32_t change, bool marks, HttpResponse&& response) {
+    auto& favouring = _model.favouring;
+    int64_t favourite_id = 0;
+    std::string error;
+
+    // The time limit settled the change.
+    if (!favouring.is_sending(change)) {
+        ESP_LOGW(TAG, "Ignoring the answer to a change of a favourite that is settled");
+        return;
+    }
+
+    const auto body = (const char*)response.body.get();
+    const auto problem = response.err != ESP_OK ? nullptr
+                         : marks ? read_favourite_mark(response.status, body, response.length, favourite_id, error)
+                                 : read_favourite_unmark(response.status, body, response.length, error);
+
+    if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        favouring.not_taken(change);
+    } else if (problem) {
+        ESP_LOGW(TAG, "%s favourites answered %d, %s: %s", marks ? "POST" : "DELETE", response.status, problem,
+                 error.c_str());
+
+        favouring.not_taken(change);
+    } else if (marks) {
+        ESP_LOGI(TAG, "Favourite %" PRId64 " marks the item", favourite_id);
+
+        favouring.marked(change, favourite_id);
+    } else {
+        favouring.unmarked(change);
+    }
+
+    model_changed();
+}
+
 // Reads a page of a list the backend gives in pages, a Page or one that holds more of the answer,
 // as `read` reads its body.
 template <typename PageOf>
@@ -886,6 +955,12 @@ void Application::do_process() {
 
     if (_model.queueing.timed_out(now)) {
         ESP_LOGW(TAG, "A queueing had no answer within %d s", int(ANSWER_TIME_LIMIT_MS / 1000));
+
+        model_changed();
+    }
+
+    if (_model.favouring.timed_out(now)) {
+        ESP_LOGW(TAG, "A change of a favourite had no answer within %d s", int(ANSWER_TIME_LIMIT_MS / 1000));
 
         model_changed();
     }

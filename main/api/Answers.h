@@ -9,6 +9,7 @@
 // scenes come from bodies as the backend sends them.
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -68,6 +69,17 @@ const char* read_queue(int status, const char* body, size_t length, QueuePage& p
 // task that queues the item when the backend took it, into `task_id`. `error` is what the backend
 // said went wrong, where it said so.
 const char* read_queue_answer(int status, const char* body, size_t length, std::string& task_id, std::string& error);
+
+// Reads the answer to POST /api/favourites, which is a 201 with the new favourite, or a 200 with
+// the favourite that marked the item already, into `favourite_id`: the favourite's id. `error` is
+// what the backend said went wrong, where it said so.
+const char* read_favourite_mark(int status, const char* body, size_t length, int64_t& favourite_id, std::string& error);
+
+// Reads the answer to DELETE /api/favourites/{favourite_id}, which is a 204 when the backend
+// removed the mark, or a 404 with the code RECORD_NOT_FOUND when it holds no favourite with the
+// id, which another client removed: the item is unmarked either way. `error` is what the backend
+// said went wrong, where it said so.
+const char* read_favourite_unmark(int status, const char* body, size_t length, std::string& error);
 
 // Reads the payload of an event that names a speaker into `speaker_id`.
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id);

@@ -23,5 +23,11 @@ void PlaylistsView::build_row(lv_obj_t* row, size_t index) {
     const auto& playlist = _playlists.items[index];
 
     create_row_title(row, playlist.title);
-    create_queue_buttons(row, ItemKind::Playlist, playlist.id);
+    create_queue_buttons(row, ItemKind::Playlist, playlist.id, playlist.favourite_id);
+}
+
+void PlaylistsView::apply_favourite(const FavouriteChange& change) {
+    for (auto& playlist : _playlists.items) {
+        playlist.favourite_id = change.apply(ItemKind::Playlist, playlist.id, playlist.favourite_id);
+    }
 }

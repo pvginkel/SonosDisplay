@@ -2,7 +2,8 @@
 
 // A screen of a list the backend gives in pages: a heading with a way back, and under it a row
 // for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
-// item's row, which it may give the queue's buttons, and opens an item whose row it made openable;
+// item's row, which it may give the queue's buttons and the favourite toggle, applies to its items
+// the changes of a favourite the backend took, and opens an item whose row it made openable;
 // it may end the heading with its own, and say a line under it. While the Shell's "Reconnecting"
 // marker shows at the top right, the heading ends before it.
 //
@@ -16,6 +17,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -24,11 +26,14 @@
 class Shell;
 
 class ListView : public View {
-    // The item of a row that ends in the queue's buttons, and the row of those buttons.
+    // The item of a row that ends in the queue's buttons, the row of those buttons, and the
+    // favourite that marks the item, which the favourite toggle after them shows: none for a
+    // track, whose row has no toggle.
     struct QueueItem {
         ItemKind kind;
         std::string id;
         lv_obj_t* buttons;
+        std::optional<int64_t> favourite_id;
     };
 
     std::string _title;
@@ -46,9 +51,12 @@ class ListView : public View {
     bool _changed{};
     // The item of each row built with the queue's buttons, in the rows' order.
     std::vector<QueueItem> _queue_items;
-    // The ids of the requests to queue an item that were on their way when the queue's buttons
-    // last showed them.
+    // The ids of the requests to queue an item, and of the changes of a favourite, that were on
+    // their way when the buttons last showed them.
     std::vector<uint32_t> _shown_presses;
+    std::vector<uint32_t> _shown_changes;
+    // How many changes of a favourite the backend had taken when the view last applied them.
+    uint32_t _changes_applied;
 
 protected:
     Shell* _shell;
@@ -86,11 +94,21 @@ protected:
     static lv_obj_t* create_row_title(lv_obj_t* row, const std::string& title);
 
     // Ends this row, which build_row() was handed, with PressButtons that play its item, of this
-    // kind and with this id, shuffle it unless it is a track, and add it to the queue. A press on
-    // one asks the host for its request, unless that request is on its way: the button then shows
-    // so, on every row of the item, built before the press or after it. A drag that starts on one
-    // still scrolls the list. Every row of a list has them, or none does.
-    void create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id);
+    // kind and with this id, shuffle it unless it is a track, and add it to the queue, and, unless
+    // it is a track, the favourite toggle, which shows whether a favourite marks it: the one with
+    // `favourite_id`, or none. A press on one asks the host for its request, unless that request is
+    // on its way: the button then shows so, on every row of the item, built before the press or
+    // after it. A press on the toggle marks the item, or unmarks it, unless a change of it is on
+    // its way, and the toggle shows what the backend took. A drag that starts on one still scrolls
+    // the list. Every row of a list has them, or none does.
+    void create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id,
+                              std::optional<int64_t> favourite_id);
+
+    // Applies a change of a favourite the backend took to the items held, of the kind the change
+    // names (FavouriteChange::apply()), so that a row built from them shows it. Called for every
+    // change taken while the view lives, in order, each before the rows show it, unless the view
+    // missed more of them than the model holds: it then asks for its items again instead.
+    virtual void apply_favourite(const FavouriteChange& change) {}
 
     // What the screen says while the first page is on its way, and when the list is empty.
     virtual const char* get_loading_message() const = 0;
@@ -133,11 +151,13 @@ private:
     void build_list();
     void build_page_state(uint32_t page);
     void ask_near_ends();
+    void apply_favourites();
     void show_presses();
     size_t find_item(const lv_obj_t* row);
     static void back_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
     static void row_clicked(lv_event_t* event);
     static void queue_clicked(lv_event_t* event);
+    static void favourite_clicked(lv_event_t* event);
     static void scrolled(lv_event_t* event);
 };

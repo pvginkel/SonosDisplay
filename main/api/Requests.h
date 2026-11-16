@@ -19,3 +19,7 @@ std::string write_volume_change(const VolumeChange& change);
 // names its albums' order, newest first by release date: what the speaker plays for an artist
 // from the Sonos app. Nothing when the heap cannot hold it.
 std::optional<std::string> write_queue_request(const QueueRequest& request);
+
+// The body of POST /api/favourites, which marks the item of `request`. Nothing when the heap
+// cannot hold it.
+std::optional<std::string> write_favourite_mark(const FavouriteRequest& request);

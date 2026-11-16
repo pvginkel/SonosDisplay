@@ -144,6 +144,12 @@ private:
         bool adds;
     };
 
+    // A change of a favourite sent to the backend and not answered yet.
+    struct UnansweredFavouriteChange {
+        uint32_t id;
+        bool marks;
+    };
+
     struct ArtworkAnswer {
         int status;
         std::vector<uint8_t> body;
@@ -169,6 +175,10 @@ private:
     std::vector<std::string> _queue_request_bodies;
     std::vector<uint32_t> _unanswered_queue_requests;
     std::optional<Answer> _queue_answer;
+    std::vector<FavouriteRequest> _favourite_requests;
+    std::vector<std::string> _favourite_request_bodies;
+    std::vector<UnansweredFavouriteChange> _unanswered_favourite_changes;
+    std::optional<Answer> _favourite_answer;
     ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
     std::vector<ArtworkFetch> _artwork_fetches;
     std::optional<ArtworkAnswer> _artwork_answer;
@@ -202,6 +212,7 @@ public:
     void add_to_group(const std::string& speaker_id) override;
     void remove_from_group(const std::string& speaker_id) override;
     void queue_item(const QueueRequest& request) override;
+    void change_favourite(const FavouriteRequest& request) override;
     void request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) override;
     void request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
                         std::function<void(Page<Album>)> done) override;
@@ -217,7 +228,8 @@ public:
 
     // What the device does on every turn of its loop: the answers due by now come, a change of a
     // group or of the volume past its time limit is settled and the speakers or the volume are
-    // asked for again, and a request to queue an item past its time limit is settled.
+    // asked for again, and a request to queue an item or a change of a favourite past its time
+    // limit is settled.
     void process();
 
     // Runs `answer` in process() once LVGL's clock has moved on by `ms` from now, as an answer that
@@ -303,6 +315,23 @@ public:
     // writes them.
     const std::vector<QueueRequest>& get_queue_requests() const { return _queue_requests; }
     const std::vector<std::string>& get_queue_request_bodies() const { return _queue_request_bodies; }
+
+    // What the backend answers every change of a favourite from here on, read as the device reads
+    // it. Without it a change stays on its way.
+    void answer_favourite_changes(int status, const char* body) { _favourite_answer = Answer{status, body}; }
+
+    // The backend's answer to the oldest change of a favourite that answer_favourite_changes() did
+    // not answer, read as the device reads it: an answer to a change that is settled by now
+    // changes nothing.
+    void answer_favourite_change(int status, const char* body);
+
+    // How many changes of a favourite are not answered yet, settled ones among them.
+    size_t count_unanswered_favourite_changes() const { return _unanswered_favourite_changes.size(); }
+
+    // The changes of a favourite the views have sent, in order, and their bodies, as the device
+    // writes them: an unmark, a DELETE, has none.
+    const std::vector<FavouriteRequest>& get_favourite_requests() const { return _favourite_requests; }
+    const std::vector<std::string>& get_favourite_request_bodies() const { return _favourite_request_bodies; }
 
     // The event task_event with this payload, which the event stream brings, read as the device
     // reads it.
@@ -398,6 +427,7 @@ private:
     void send_group_change(const std::string& speaker_id, bool adds);
     void group_change_answered(const UnansweredGroupChange& change, int status, const char* body);
     void queue_answered(uint32_t request, int status, const char* body);
+    void favourite_answered(const UnansweredFavouriteChange& change, int status, const char* body);
     void fetch_artwork(ArtworkRequest&& request);
     void answer_artwork(const ArtworkRequest& request);
 };

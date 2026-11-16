@@ -1,5 +1,6 @@
 #include "TracksView.h"
 
+#include <optional>
 #include <utility>
 
 #include "Messages.h"
@@ -24,5 +25,5 @@ void TracksView::build_row(lv_obj_t* row, size_t index) {
     const auto& track = _tracks.items[index];
 
     create_row_title(row, track.title);
-    create_queue_buttons(row, ItemKind::Track, track.id);
+    create_queue_buttons(row, ItemKind::Track, track.id, std::nullopt);
 }

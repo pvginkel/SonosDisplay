@@ -31,7 +31,10 @@ static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
 ListView::ListView(UiHost* host, Shell* shell, std::string title)
-    : View(host), _title(std::move(title)), _shell(shell) {}
+    : View(host),
+      _title(std::move(title)),
+      _changes_applied(host->get_model().favouring.changes_taken),
+      _shell(shell) {}
 
 void ListView::do_render(lv_obj_t* parent) {
     auto column = lv_container_create(parent);
@@ -104,6 +107,7 @@ void ListView::do_render(lv_obj_t* parent) {
 
 void ListView::do_update() {
     fit_heading();
+    apply_favourites();
 
     // Not under a finger that scrolls the list: its rows would go, and the scroll with them.
     if (_changed && !(_list && lv_obj_is_scrolling(_list))) {
@@ -190,6 +194,7 @@ void ListView::build() {
     _row_count = 0;
     _queue_items.clear();
     _shown_presses.clear();
+    _shown_changes.clear();
 
     if (!pages.is_held()) {
         switch (pages.state) {
@@ -433,7 +438,14 @@ static const char* get_queue_icon(QueueAction action) {
     return ICON_PLAY;
 }
 
-void ListView::create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id) {
+static const char* get_favourite_icon(std::optional<int64_t> favourite_id) {
+    return favourite_id ? ICON_HEART : ICON_HEART_OUTLINE;
+}
+
+// The favourite toggle comes after the queue's buttons, so a queue's button's place among the
+// buttons is its action's among get_queue_actions().
+void ListView::create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id,
+                                    std::optional<int64_t> favourite_id) {
     lv_obj_set_style_pad_right(row, QUEUE_BUTTONS_END, LV_PART_MAIN);
 
     auto buttons = lv_container_create(row);
@@ -444,22 +456,72 @@ void ListView::create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::str
         PressButton::create(buttons, get_queue_icon(action), queue_clicked, this);
     }
 
-    _queue_items.push_back(QueueItem{.kind = kind, .id = item_id, .buttons = buttons});
+    if (kind != ItemKind::Track) {
+        PressButton::create(buttons, get_favourite_icon(favourite_id), favourite_clicked, this);
+    }
+
+    _queue_items.push_back(QueueItem{.kind = kind, .id = item_id, .buttons = buttons, .favourite_id = favourite_id});
 }
 
-// Each queue's button built shows whether a request for its item and action is on its way, once
-// the requests on their way changed since the buttons last showed them.
-void ListView::show_presses() {
-    const auto& queueing = _host->get_model().queueing;
-    const auto& sending = queueing.sending;
-    if (std::equal(sending.begin(), sending.end(), _shown_presses.begin(), _shown_presses.end(),
-                   [](const Queueing::Sent& sent, uint32_t id) { return sent.id == id; })) {
+// The changes the backend took since the view last applied them go to the subclass's items, and
+// each toggle built shows what they leave of its item's favourite. A view that missed more of them
+// than are held asks for its items again, which show what the backend holds.
+void ListView::apply_favourites() {
+    const auto& favouring = _host->get_model().favouring;
+    const auto count = favouring.changes_taken - _changes_applied;
+    if (!count) {
         return;
     }
 
-    _shown_presses.clear();
+    _changes_applied = favouring.changes_taken;
+
+    if (count > favouring.changes.size()) {
+        refresh();
+        return;
+    }
+
+    for (auto change = favouring.changes.end() - ptrdiff_t(count); change != favouring.changes.end(); change++) {
+        apply_favourite(*change);
+
+        for (auto& item : _queue_items) {
+            const auto favourite_id = change->apply(item.kind, item.id, item.favourite_id);
+            if (favourite_id == item.favourite_id) {
+                continue;
+            }
+
+            item.favourite_id = favourite_id;
+            PressButton::set_icon(lv_obj_get_child(item.buttons, -1), get_favourite_icon(favourite_id));
+        }
+    }
+}
+
+// Whether the ids of `sending`, of the requests or the changes on their way, are those of `shown`.
+// Makes them so.
+template <typename Sent>
+static bool update_shown(const std::vector<Sent>& sending, std::vector<uint32_t>& shown) {
+    if (std::equal(sending.begin(), sending.end(), shown.begin(), shown.end(),
+                   [](const Sent& sent, uint32_t id) { return sent.id == id; })) {
+        return true;
+    }
+
+    shown.clear();
     for (const auto& sent : sending) {
-        _shown_presses.push_back(sent.id);
+        shown.push_back(sent.id);
+    }
+
+    return false;
+}
+
+// Each queue's button built shows whether a request for its item and action is on its way, and
+// each favourite toggle whether a change of its item is, once the requests or the changes on their
+// way changed since the buttons last showed them.
+void ListView::show_presses() {
+    const auto& model = _host->get_model();
+    const auto& queueing = model.queueing;
+    const auto& favouring = model.favouring;
+    const auto presses_shown = update_shown(queueing.sending, _shown_presses);
+    if (update_shown(favouring.sending, _shown_changes) && presses_shown) {
+        return;
     }
 
     for (const auto& item : _queue_items) {
@@ -470,6 +532,11 @@ void ListView::show_presses() {
                 queueing.is_on_its_way(QueueRequest{.kind = item.kind, .item_id = item.id, .action = actions[i]});
 
             PressButton::show_on_its_way(lv_obj_get_child(item.buttons, int32_t(i)), on_its_way);
+        }
+
+        if (item.kind != ItemKind::Track) {
+            PressButton::show_on_its_way(lv_obj_get_child(item.buttons, -1),
+                                         favouring.is_on_its_way(item.kind, item.id));
         }
     }
 }
@@ -575,6 +642,19 @@ void ListView::queue_clicked(lv_event_t* event) {
 
     if (!self->_host->get_model().queueing.is_on_its_way(request)) {
         self->_host->queue_item(request);
+    }
+}
+
+// As queue_clicked() finds the item. A press while a change of the item is on its way sends
+// nothing.
+void ListView::favourite_clicked(lv_event_t* event) {
+    auto self = (ListView*)lv_event_get_user_data(event);
+    const auto row = lv_obj_get_parent(lv_obj_get_parent(lv_event_get_current_target_obj(event)));
+    const auto& item = self->_queue_items[size_t(lv_obj_get_index(row)) - self->_first_row_child];
+
+    if (!self->_host->get_model().favouring.is_on_its_way(item.kind, item.id)) {
+        self->_host->change_favourite(
+            FavouriteRequest{.kind = item.kind, .item_id = item.id, .favourite_id = item.favourite_id});
     }
 }
 

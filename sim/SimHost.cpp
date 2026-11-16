@@ -223,6 +223,71 @@ void SimHost::queue_answered(uint32_t request, int status, const char* body) {
     _model.revision++;
 }
 
+void SimHost::change_favourite(const FavouriteRequest& request) {
+    _favourite_requests.push_back(request);
+
+    const auto marks = !request.favourite_id;
+    std::string body;
+    if (marks) {
+        const auto written = write_favourite_mark(request);
+        if (!written) {
+            fprintf(stderr, "render: the body of a mark of a favourite could not be written\n");
+            exit(1);
+        }
+        body = *written;
+    }
+    _favourite_request_bodies.push_back(body);
+
+    const UnansweredFavouriteChange change{.id = _model.favouring.sent(request, lv_tick_get()), .marks = marks};
+    _model.revision++;
+
+    if (_favourite_answer) {
+        favourite_answered(change, _favourite_answer->status, _favourite_answer->body.c_str());
+    } else {
+        _unanswered_favourite_changes.push_back(change);
+    }
+}
+
+void SimHost::answer_favourite_change(int status, const char* body) {
+    if (_unanswered_favourite_changes.empty()) {
+        fprintf(stderr, "render: a change of a favourite was answered, and none was sent\n");
+        exit(1);
+    }
+
+    const auto change = _unanswered_favourite_changes.front();
+    _unanswered_favourite_changes.erase(_unanswered_favourite_changes.begin());
+
+    favourite_answered(change, status, body);
+}
+
+void SimHost::favourite_answered(const UnansweredFavouriteChange& change, int status, const char* body) {
+    auto& favouring = _model.favouring;
+    if (!favouring.is_sending(change.id)) {
+        return;
+    }
+
+    int64_t favourite_id = 0;
+    std::string error;
+    const auto problem = status == UNREACHABLE ? nullptr
+                         : change.marks        ? read_favourite_mark(status, body, strlen(body), favourite_id, error)
+                                               : read_favourite_unmark(status, body, strlen(body), error);
+
+    if (status == UNREACHABLE) {
+        favouring.not_taken(change.id);
+    } else if (problem) {
+        printf("W (SimHost) %s favourites answered %d, %s: %s\n", change.marks ? "POST" : "DELETE", status, problem,
+               error.c_str());
+
+        favouring.not_taken(change.id);
+    } else if (change.marks) {
+        favouring.marked(change.id, favourite_id);
+    } else {
+        favouring.unmarked(change.id);
+    }
+
+    _model.revision++;
+}
+
 void SimHost::send_task_event(const char* payload) {
     const auto json = cJSON_Parse(payload);
     if (!json) {
@@ -298,6 +363,10 @@ void SimHost::process() {
     }
 
     if (_model.queueing.timed_out(now)) {
+        _model.revision++;
+    }
+
+    if (_model.favouring.timed_out(now)) {
         _model.revision++;
     }
 }

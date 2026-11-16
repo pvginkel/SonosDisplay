@@ -62,6 +62,11 @@ public:
     // from here on.
     virtual void queue_item(const QueueRequest& request) = 0;
 
+    // Marks an artist, an album or a playlist of the library as a favourite, or unmarks the
+    // favourite that marks it. A view asks only while no change of the same item is on its way
+    // (Favouring::is_on_its_way()). The change is on its way in the model from here on.
+    virtual void change_favourite(const FavouriteRequest& request) = 0;
+
     // Asks the backend for page `number` of the library's artists, from 1, PAGE_SIZE to a page.
     // `done` runs with the page, or with why it did not come, and not at all once `scope`, which
     // the asker owns, has expired.

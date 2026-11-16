@@ -41,6 +41,19 @@ static const char* action_name(QueueAction action) {
     return "";
 }
 
+// The JSON `root` holds, unformatted. Nothing when the heap cannot hold it.
+static std::optional<std::string> print(const cJSON* root) {
+    const auto text = cJSON_PrintUnformatted(root);
+    if (!text) {
+        return std::nullopt;
+    }
+
+    std::string body(text);
+    cJSON_free(text);
+
+    return body;
+}
+
 // The id is the backend's own text, so cJSON writes it as a JSON string.
 std::optional<std::string> write_queue_request(const QueueRequest& request) {
     const auto root = std::unique_ptr<cJSON, void (*)(cJSON*)>(cJSON_CreateObject(), cJSON_Delete);
@@ -55,13 +68,17 @@ std::optional<std::string> write_queue_request(const QueueRequest& request) {
         return std::nullopt;
     }
 
-    const auto text = cJSON_PrintUnformatted(root.get());
-    if (!text) {
+    return print(root.get());
+}
+
+// The API takes no other field.
+std::optional<std::string> write_favourite_mark(const FavouriteRequest& request) {
+    const auto root = std::unique_ptr<cJSON, void (*)(cJSON*)>(cJSON_CreateObject(), cJSON_Delete);
+
+    if (!root || !cJSON_AddStringToObject(root.get(), "kind", kind_name(request.kind)) ||
+        !cJSON_AddStringToObject(root.get(), "item_id", request.item_id.c_str())) {
         return std::nullopt;
     }
 
-    std::string body(text);
-    cJSON_free(text);
-
-    return body;
+    return print(root.get());
 }

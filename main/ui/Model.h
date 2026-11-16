@@ -619,6 +619,9 @@ struct Artist {
     // The backend lists a letter's artists together, those under '#' first.
     char index_letter{};
 
+    // The id of the favourite that marks the artist; none while no favourite does.
+    std::optional<int64_t> favourite_id;
+
     bool operator==(const Artist&) const = default;
 };
 
@@ -630,6 +633,10 @@ struct Album {
 
     // The year the album was released; none for an album without a date.
     std::optional<int32_t> year;
+
+    // The id of the favourite that marks the album; none while no favourite does. The two copies
+    // of a release the library holds twice carry the one favourite.
+    std::optional<int64_t> favourite_id;
 
     bool operator==(const Album&) const = default;
 };
@@ -648,6 +655,9 @@ struct Playlist {
     // The playlist's id as the API gives it.
     std::string id;
     std::string title;
+
+    // The id of the favourite that marks the playlist; none while no favourite does.
+    std::optional<int64_t> favourite_id;
 
     bool operator==(const Playlist&) const = default;
 };
@@ -858,6 +868,146 @@ private:
     }
 };
 
+// A press on the favourite toggle of an artist, an album or a playlist of the library: marks the
+// item, or unmarks the favourite that marks it.
+struct FavouriteRequest {
+    ItemKind kind{};
+
+    // The item's id as the API gives it.
+    std::string item_id;
+
+    // The favourite that marks the item, which the press unmarks; none for a press that marks it.
+    std::optional<int64_t> favourite_id;
+
+    bool operator==(const FavouriteRequest&) const = default;
+};
+
+// A change of a favourite the backend took: it marked an item with the favourite with this id, or
+// it holds no favourite with this id any longer.
+struct FavouriteChange {
+    ItemKind kind{};
+
+    // The item the press was on.
+    std::string item_id;
+
+    int64_t favourite_id{};
+    bool marks{};
+
+    // The favourite that marks the item of this kind and id after the change, which the favourite
+    // `favourite_id_before` marked before it, or none. A mark marks the item pressed; an unmark
+    // unmarks every item the favourite marked, as the two copies of a release share one.
+    std::optional<int64_t> apply(ItemKind item_kind, const std::string& id,
+                                 std::optional<int64_t> favourite_id_before) const {
+        if (item_kind != kind) {
+            return favourite_id_before;
+        }
+        if (marks) {
+            return id == item_id ? std::optional<int64_t>(favourite_id) : favourite_id_before;
+        }
+
+        return favourite_id_before == favourite_id ? std::nullopt : favourite_id_before;
+    }
+
+    bool operator==(const FavouriteChange&) const = default;
+};
+
+// The items the display asked the backend to mark or unmark as a favourite, and how that went. A
+// change is on its way until its answer, or until ANSWER_TIME_LIMIT_MS after it was sent; an
+// answer to a change that is no longer on its way changes nothing: the host reads one only while
+// is_sending() says so.
+struct Favouring {
+    // The most changes taken that are held for a view to apply.
+    static constexpr size_t MAX_CHANGES = 8;
+
+    // A change on its way to the backend.
+    struct Sent {
+        // What tells this change's answer from another's.
+        uint32_t id{};
+
+        FavouriteRequest request;
+
+        // LVGL's tick when the change was sent.
+        uint32_t sent_at{};
+    };
+
+    std::vector<Sent> sending;
+
+    // The changes the backend took, the newest last, the oldest giving way past MAX_CHANGES, and
+    // how many it took in all. A view applies those taken since it last looked to the items it
+    // holds; one that missed more than are held fetches its items again.
+    std::vector<FavouriteChange> changes;
+    uint32_t changes_taken{};
+
+    // How many changes were not taken: the backend answered an error, or did not answer. A view
+    // says so once for each.
+    uint32_t changes_not_taken{};
+
+    // Whether the change with this id is on its way.
+    bool is_sending(uint32_t id) const {
+        return std::any_of(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
+    }
+
+    // Whether a change of the item of this kind and id is on its way. A view shows its toggle so,
+    // and a press on that toggle sends no second one.
+    bool is_on_its_way(ItemKind kind, const std::string& item_id) const {
+        return std::any_of(sending.begin(), sending.end(), [kind, &item_id](const Sent& sent) {
+            return sent.request.kind == kind && sent.request.item_id == item_id;
+        });
+    }
+
+    // A change is on its way from `now`, LVGL's tick. Returns its id, which its answer is told by.
+    uint32_t sent(const FavouriteRequest& request, uint32_t now) {
+        const auto id = ++_last_id;
+        sending.push_back(Sent{.id = id, .request = request, .sent_at = now});
+
+        return id;
+    }
+
+    // The backend took the mark with this id: the favourite with `favourite_id` marks the item.
+    void marked(uint32_t id, int64_t favourite_id) { taken(id, favourite_id); }
+
+    // The backend took the unmark with this id, or holds no favourite with its id: the item is
+    // unmarked either way.
+    void unmarked(uint32_t id) { taken(id, 0); }
+
+    // The backend answered the change with an error, or did not answer.
+    void not_taken(uint32_t id) {
+        std::erase_if(sending, [id](const Sent& sent) { return sent.id == id; });
+        changes_not_taken++;
+    }
+
+    // Settles the changes sent ANSWER_TIME_LIMIT_MS or longer before `now`, LVGL's tick, as not
+    // taken, and returns whether there was one.
+    bool timed_out(uint32_t now) {
+        const auto settled =
+            std::erase_if(sending, [now](const Sent& sent) { return now - sent.sent_at >= ANSWER_TIME_LIMIT_MS; });
+        changes_not_taken += uint32_t(settled);
+
+        return settled > 0;
+    }
+
+private:
+    uint32_t _last_id{};
+
+    // An unmark's change names the favourite it unmarked; `favourite_id` is a mark's.
+    void taken(uint32_t id, int64_t favourite_id) {
+        const auto found =
+            std::find_if(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
+        const auto& request = found->request;
+
+        changes.push_back(FavouriteChange{.kind = request.kind,
+                                          .item_id = request.item_id,
+                                          .favourite_id = request.favourite_id.value_or(favourite_id),
+                                          .marks = !request.favourite_id});
+        if (changes.size() > MAX_CHANGES) {
+            changes.erase(changes.begin());
+        }
+        changes_taken++;
+
+        sending.erase(found);
+    }
+};
+
 struct Model {
     // Bumped by the host on every change, so a view redraws only when something changed.
     uint32_t revision{};
@@ -891,6 +1041,9 @@ struct Model {
     // The items asked to be played, shuffled or added.
     Queueing queueing;
 
+    // The items asked to be marked or unmarked as a favourite.
+    Favouring favouring;
+
     // How many times the event stream said that the queue of the chosen speaker's group changed, or
     // the track it has loaded. A view that shows the queue fetches it again when this moves.
     uint32_t queue_changes{};
@@ -899,11 +1052,11 @@ struct Model {
     // not be reached. A view says so once for each.
     uint32_t clears_not_taken{};
 
-    // How many commands, volume changes, group changes, requests to queue an item and requests to
-    // clear the queue were not taken.
+    // How many commands, volume changes, group changes, requests to queue an item, requests to
+    // clear the queue and changes of a favourite were not taken.
     uint32_t not_taken() const {
         return playback.commands_not_taken + volume.changes_not_taken + grouping.changes_not_taken +
-               queueing.requests_not_taken + clears_not_taken;
+               queueing.requests_not_taken + clears_not_taken + favouring.changes_not_taken;
     }
 
     // Whether the display is held on the speaker picker: no speaker is chosen, or the last list
