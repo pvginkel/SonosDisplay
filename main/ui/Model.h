@@ -1048,6 +1048,12 @@ struct Model {
     // the track it has loaded. A view that shows the queue fetches it again when this moves.
     uint32_t queue_changes{};
 
+    // How many times the favourites may have changed unseen: the event stream said that a favourite
+    // was marked or unmarked, on any display, this one's own marks among them, or it is back after
+    // it was away, and the events sent meanwhile are gone. A view that shows which items a favourite
+    // marks fetches them again when this moves.
+    uint32_t favourites_changes{};
+
     // How many requests to clear the queue were not taken: the backend answered an error, or could
     // not be reached. A view says so once for each.
     uint32_t clears_not_taken{};

@@ -6597,6 +6597,318 @@ static const char* check_albums_favourite_missed(const SimHost& host, const Shel
     return check_presses({});
 }
 
+// The favourite another display marks an item with.
+static constexpr int MARKED_ELSEWHERE = 7;
+
+// `pages`, a list's pages as the backend answers each, with the item at `index` of the list marked
+// by the favourite with this id, or, with none, unmarked.
+static std::vector<std::string> with_mark(std::vector<std::string> pages, size_t index,
+                                          std::optional<int> favourite_id) {
+    auto& page = pages[index / PAGE_SIZE];
+    const auto root = cJSON_Parse(page.c_str());
+    const auto item = cJSON_GetArrayItem(cJSON_GetObjectItem(root, "data"), int(index % PAGE_SIZE));
+    expect(item, "the item to mark is not in the pages");
+    cJSON_ReplaceItemInObject(item, "favourite_id",
+                              favourite_id ? cJSON_CreateNumber(double(*favourite_id)) : cJSON_CreateNull());
+
+    const auto text = cJSON_PrintUnformatted(root);
+    page = text;
+    cJSON_free(text);
+    cJSON_Delete(root);
+
+    return pages;
+}
+
+// When the scenes of a mark made elsewhere have the event stream say so: after the screen opens,
+// and before the touch that follows.
+static constexpr uint32_t ELSEWHERE_MS = SimHost::TAP_INTERVAL_MS / 2;
+
+// The artists of LIBRARY as the backend holds them once another display marked Sigur Rós and
+// unmarked Portishead.
+static std::vector<std::string> make_artist_pages_marked_elsewhere() {
+    return with_mark(with_mark(make_artist_pages(LIBRARY), SIGUR_ROS, MARKED_ELSEWHERE), PORTISHEAD, std::nullopt);
+}
+
+static std::vector<std::string> get_artists_marked_elsewhere() {
+    return with(get_marked(get_titles(LIBRARY)), {LIBRARY[SIGUR_ROS].first}, {LIBRARY[PORTISHEAD].first});
+}
+
+// Another display marks Sigur Rós and unmarks Portishead while the artists show, and the event
+// stream says so: the artists are asked for again, and each toggle shows what the backend holds. A
+// press on Sigur Rós's toggle then unmarks the favourite the other display marked it with.
+static void artists_favourites_changed(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.artists().serve(200, make_artist_pages_marked_elsewhere());
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_favourite_toggle(host, shell, LIBRARY[SIGUR_ROS].first.c_str());
+}
+
+static const char* check_artists_favourites_changed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the artists were not asked for again, once";
+    }
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Artist, .item_id = "artist-29", .favourite_id = MARKED_ELSEWHERE}}, {""})) {
+        return problem;
+    }
+    if (const auto problem = check_marks(get_artists_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({}, {LIBRARY[SIGUR_ROS].first});
+}
+
+// The event stream is lost while the artists show, and another display marks Sigur Rós and unmarks
+// Portishead before it is back: those events are gone, and the artists, asked for again once it is
+// back, and not before, show what the backend holds.
+static void artists_favourites_reconnected(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() { host.lose_stream(); });
+    host.answer_after(2 * SimHost::TAP_INTERVAL_MS, [&host]() {
+        host.artists().serve(200, make_artist_pages_marked_elsewhere());
+        host.connect_stream();
+    });
+}
+
+static const char* check_artists_favourites_reconnected(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the artists were not asked for again, once, when the stream was back";
+    }
+    if (const auto problem = check_marks(get_artists_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// Sigur Rós's albums as the backend holds them once another display marked Átta and unmarked
+// Valtari.
+static std::vector<std::string> make_album_pages_marked_elsewhere() {
+    return with_mark(with_mark(make_pages(ALBUMS, make_albums_body), 0, MARKED_ELSEWHERE), 2, std::nullopt);
+}
+
+static std::vector<std::string> get_albums_marked_elsewhere() {
+    return with(get_marked(get_titles(ALBUMS)), {"Átta"}, {"Valtari"});
+}
+
+// Another display marks Átta and unmarks Valtari while Sigur Rós's albums show, and the event
+// stream says so: the albums are asked for again, and each toggle shows what the backend holds. A
+// press on Átta's toggle then unmarks the favourite the other display marked it with.
+static void albums_favourites_changed(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.albums().serve(200, make_album_pages_marked_elsewhere());
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_favourite_toggle(host, shell, "Átta");
+}
+
+static const char* check_albums_favourites_changed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1} ||
+        host.albums().get_parent_ids() != std::vector<std::string>{"artist-29", "artist-29"}) {
+        return "the artist's albums were not asked for again, once";
+    }
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Album, .item_id = "album-1", .favourite_id = MARKED_ELSEWHERE}}, {""})) {
+        return problem;
+    }
+    if (const auto problem = check_marks(get_albums_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({}, {"Átta"});
+}
+
+// The event stream is lost while Sigur Rós's albums show, and another display marks Átta and
+// unmarks Valtari before it is back: the albums, asked for again once it is back, show what the
+// backend holds.
+static void albums_favourites_reconnected(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() { host.lose_stream(); });
+    host.answer_after(2 * SimHost::TAP_INTERVAL_MS, [&host]() {
+        host.albums().serve(200, make_album_pages_marked_elsewhere());
+        host.connect_stream();
+    });
+}
+
+static const char* check_albums_favourites_reconnected(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums were not asked for again, once, when the stream was back";
+    }
+    if (const auto problem = check_marks(get_albums_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// A press on Átta opens its tracks over the albums, and another display marks Átta and unmarks
+// Valtari meanwhile. The tracks, which no favourite marks, are not asked for again; back on the
+// albums, those are, and show what the backend holds.
+static void albums_favourites_changed_under(SimHost& host, Shell& shell) {
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_albums_screen(host, shell);
+
+    tap_row(host, shell, "Átta");
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ELSEWHERE_MS, [&host]() {
+        host.albums().serve(200, make_album_pages_marked_elsewhere());
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_albums_favourites_changed_under(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.tracks().get_requests() != std::vector<uint32_t>{1}) {
+        return "the album's tracks did not open, or were asked for again";
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums shown again were not asked for again, once";
+    }
+    if (const auto problem = check_marks(get_albums_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+static const char FAVOURITE_AGAETIS_BYRJUN[] =
+    R"({"artwork_id":null,"available":true,"created_at":"2026-11-17T09:30:12.123456+00:00","id":43,)"
+    R"("item_id":"album-9","kind":"album","subtitle":"Sigur Rós","title":"Ágætis byrjun"})";
+
+// A mark of one of two copies of a release that no favourite marks, answered with the new
+// favourite, which marks the pressed copy alone; the event stream then says that the favourites
+// changed, and the albums, asked for again, show the favourite on both copies, as the backend
+// holds it.
+static void albums_favourite_copies_changed(SimHost& host, Shell& shell) {
+    const std::vector<std::string> unmarked = with_mark(with_mark({COPIES}, 0, std::nullopt), 1, std::nullopt);
+    open_now_playing(host, shell, PLAYING);
+    host.albums().serve(200, unmarked);
+    shell.push(std::make_unique<AlbumsView>(
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+
+    tap_favourite_toggle(host, shell, "Ágætis byrjun");
+    host.answer_after(ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_AGAETIS_BYRJUN); });
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ELSEWHERE_MS / 2, [&host, unmarked]() {
+        expect(!check_marks({"Ágætis byrjun"}), "the mark's answer did not mark the pressed copy alone");
+
+        host.albums().serve(200, with_mark(with_mark(unmarked, 0, 43), 1, 43));
+        host.send_favourites_changed();
+    });
+}
+
+static const char* check_albums_favourite_copies_changed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums were not asked for again, once";
+    }
+    if (const auto problem = check_marks({"Ágætis byrjun – 20th anniversary", "Ágætis byrjun"})) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
+// The playlists as the backend holds them once another display marked Avondeten and unmarked
+// Kerst – rustig.
+static std::vector<std::string> make_playlist_pages_marked_elsewhere() {
+    return with_mark(with_mark(make_pages(PLAYLISTS, make_playlists_body), 0, MARKED_ELSEWHERE), 2, std::nullopt);
+}
+
+static std::vector<std::string> get_playlists_marked_elsewhere() {
+    return with(get_marked(PLAYLISTS), {PLAYLISTS[0]}, {PLAYLISTS[2]});
+}
+
+// Another display marks Avondeten and unmarks Kerst – rustig while the playlists show, and the event
+// stream says so: the playlists are asked for again, and each toggle shows what the backend holds.
+// A press on Avondeten's toggle then unmarks the favourite the other display marked it with.
+static void playlists_favourites_changed(SimHost& host, Shell& shell) {
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_playlists(host, shell);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.playlists().serve(200, make_playlist_pages_marked_elsewhere());
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_favourite_toggle(host, shell, PLAYLISTS[0].c_str());
+}
+
+static const char* check_playlists_favourites_changed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.playlists().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the playlists were not asked for again, once";
+    }
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Playlist, .item_id = "playlist-1", .favourite_id = MARKED_ELSEWHERE}}, {""})) {
+        return problem;
+    }
+    if (const auto problem = check_marks(get_playlists_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({}, {PLAYLISTS[0]});
+}
+
+// The event stream is lost while the playlists show, and another display marks Avondeten and
+// unmarks Kerst – rustig before it is back: the playlists, asked for again once it is back, show
+// what the backend holds.
+static void playlists_favourites_reconnected(SimHost& host, Shell& shell) {
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_playlists(host, shell);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() { host.lose_stream(); });
+    host.answer_after(2 * SimHost::TAP_INTERVAL_MS, [&host]() {
+        host.playlists().serve(200, make_playlist_pages_marked_elsewhere());
+        host.connect_stream();
+    });
+}
+
+static const char* check_playlists_favourites_reconnected(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.playlists().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the playlists were not asked for again, once, when the stream was back";
+    }
+    if (const auto problem = check_marks(get_playlists_marked_elsewhere())) {
+        return problem;
+    }
+
+    return check_presses({});
+}
+
 // An entry of a queue's fixture: its title, and its artist.
 using EntryFixture = std::pair<std::string, std::string>;
 
@@ -7641,6 +7953,18 @@ const std::vector<Scene>& get_scenes() {
         {"albums-favourite-under", albums_favourite_under, check_albums_favourite_under, after_touches_ms(2)},
         {"albums-favourite-missed", albums_favourite_missed, check_albums_favourite_missed,
          after_touches_ms(MISSED_CHANGES + 1)},
+        {"artists-favourites-changed", artists_favourites_changed, check_artists_favourites_changed,
+         after_touches_ms(2)},
+        {"artists-favourites-reconnected", artists_favourites_reconnected, check_artists_favourites_reconnected},
+        {"albums-favourites-changed", albums_favourites_changed, check_albums_favourites_changed, after_touches_ms(2)},
+        {"albums-favourites-reconnected", albums_favourites_reconnected, check_albums_favourites_reconnected},
+        {"albums-favourites-changed-under", albums_favourites_changed_under, check_albums_favourites_changed_under,
+         after_touches_ms(3)},
+        {"albums-favourite-copies-changed", albums_favourite_copies_changed, check_albums_favourite_copies_changed,
+         after_touches_ms(1)},
+        {"playlists-favourites-changed", playlists_favourites_changed, check_playlists_favourites_changed,
+         after_touches_ms(2)},
+        {"playlists-favourites-reconnected", playlists_favourites_reconnected, check_playlists_favourites_reconnected},
         {"queue-screen", queue_screen, check_queue_screen_open, after_touches_ms(1)},
         {"queue-screen-mid-page", queue_screen_mid_page, check_queue_screen_mid_page},
         {"queue-screen-long", queue_screen_long, check_queue_screen_long},

@@ -331,6 +331,27 @@ void SimHost::send_speaker_event(const char* type, const char* payload) {
     _model.revision++;
 }
 
+void SimHost::send_favourites_changed() {
+    _model.favourites_changes++;
+    _model.revision++;
+}
+
+void SimHost::lose_stream() {
+    _model.stream_state = StreamState::Disconnected;
+    _model.stream_down_since = lv_tick_get();
+    _model.revision++;
+}
+
+void SimHost::connect_stream() {
+    _model.stream_state = StreamState::Connected;
+    _model.favourites_changes++;
+    _model.revision++;
+
+    refresh_speakers();
+    refresh_playback();
+    refresh_volume();
+}
+
 void SimHost::answer_after(uint32_t ms, std::function<void()> answer) {
     _later.emplace_back(lv_tick_get() + ms, std::move(answer));
 }

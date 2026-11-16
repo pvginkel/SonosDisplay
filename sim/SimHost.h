@@ -341,6 +341,14 @@ public:
     // speaker it is about, read as the device reads it.
     void send_speaker_event(const char* type, const char* payload);
 
+    // The event favourites_changed, which the event stream brings, as the device takes it.
+    void send_favourites_changed();
+
+    // The event stream is lost, or is back after it was away, as the device takes each: once back,
+    // what the events sent meanwhile would have said is fetched again.
+    void lose_stream();
+    void connect_stream();
+
     // What the backend answers every request to clear the queue from here on, read as the device
     // reads it. Without it a request stays on its way.
     void answer_clears(int status, const char* body) { _clear_answer = Answer{status, body}; }

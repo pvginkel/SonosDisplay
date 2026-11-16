@@ -19,6 +19,7 @@ protected:
     PageWindow& get_pages() override { return _playlists; }
     void request_page(uint32_t page) override;
     void build_row(lv_obj_t* row, size_t index) override;
+    bool has_favourites() const override { return true; }
     void apply_favourite(const FavouriteChange& change) override;
     const char* get_loading_message() const override;
     const char* get_empty_message() const override;

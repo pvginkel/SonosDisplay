@@ -4,8 +4,9 @@
 // for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
 // item's row, which it may give the queue's buttons and the favourite toggle, applies to its items
 // the changes of a favourite the backend took, and opens an item whose row it made openable;
-// it may end the heading with its own, and say a line under it. While the Shell's "Reconnecting"
-// marker shows at the top right, the heading ends before it.
+// it may end the heading with its own, and say a line under it. A list whose items carry a
+// favourite asks for them again whenever the favourites may have changed unseen. While the Shell's
+// "Reconnecting" marker shows at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -55,8 +56,10 @@ class ListView : public View {
     // their way when the buttons last showed them.
     std::vector<uint32_t> _shown_presses;
     std::vector<uint32_t> _shown_changes;
-    // How many changes of a favourite the backend had taken when the view last applied them.
+    // How many changes of a favourite the backend had taken when the view last applied them, and
+    // the model's favourites_changes then.
     uint32_t _changes_applied;
+    uint32_t _favourites_changes;
 
 protected:
     Shell* _shell;
@@ -104,10 +107,17 @@ protected:
     void create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id,
                               std::optional<int64_t> favourite_id);
 
+    // Whether the subclass's items carry the favourite that marks each, as artists, albums and
+    // playlists do. The list then applies to them the changes of a favourite the backend took, and
+    // asks for them again whenever the favourites may have changed unseen
+    // (Model::favourites_changes): a mark or an unmark made on any display.
+    virtual bool has_favourites() const { return false; }
+
     // Applies a change of a favourite the backend took to the items held, of the kind the change
-    // names (FavouriteChange::apply()), so that a row built from them shows it. Called for every
-    // change taken while the view lives, in order, each before the rows show it, unless the view
-    // missed more of them than the model holds: it then asks for its items again instead.
+    // names (FavouriteChange::apply()), so that a row built from them shows it. Called, where the
+    // list has_favourites(), for every change taken while the view lives, in order, each before the
+    // rows show it, unless the view missed more of them than the model holds: it then asks for its
+    // items again instead.
     virtual void apply_favourite(const FavouriteChange& change) {}
 
     // What the screen says while the first page is on its way, and when the list is empty.

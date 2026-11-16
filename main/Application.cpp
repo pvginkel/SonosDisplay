@@ -851,6 +851,9 @@ void Application::event_received(const std::string& type, const cJSON* payload) 
                 model_changed();
             }
         }
+    } else if (type == "favourites_changed") {
+        _model.favourites_changes++;
+        model_changed();
     } else if (type == "task_event") {
         task_event_received(payload);
     }
@@ -899,10 +902,11 @@ void Application::begin_backend() {
     _event_stream = std::make_unique<EventStream>(&get_queue());
 
     _event_stream->on_connected([this]() {
+        // Events sent while the stream was away are gone, so what the views show is fetched again.
         _model.stream_state = StreamState::Connected;
+        _model.favourites_changes++;
         model_changed();
 
-        // Events sent while the stream was away are gone, so what the views show is fetched again.
         refresh_speakers();
         refresh_playback();
         refresh_volume();

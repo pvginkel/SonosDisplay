@@ -34,6 +34,7 @@ ListView::ListView(UiHost* host, Shell* shell, std::string title)
     : View(host),
       _title(std::move(title)),
       _changes_applied(host->get_model().favouring.changes_taken),
+      _favourites_changes(host->get_model().favourites_changes),
       _shell(shell) {}
 
 void ListView::do_render(lv_obj_t* parent) {
@@ -107,7 +108,9 @@ void ListView::do_render(lv_obj_t* parent) {
 
 void ListView::do_update() {
     fit_heading();
-    apply_favourites();
+    if (has_favourites()) {
+        apply_favourites();
+    }
 
     // Not under a finger that scrolls the list: its rows would go, and the scroll with them.
     if (_changed && !(_list && lv_obj_is_scrolling(_list))) {
@@ -465,33 +468,36 @@ void ListView::create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::str
 
 // The changes the backend took since the view last applied them go to the subclass's items, and
 // each toggle built shows what they leave of its item's favourite. A view that missed more of them
-// than are held asks for its items again, which show what the backend holds.
+// than are held, or while the favourites may have changed unseen, asks for its items again, which
+// show what the backend holds: after the changes are applied, so that the answer takes their place.
 void ListView::apply_favourites() {
-    const auto& favouring = _host->get_model().favouring;
+    const auto& model = _host->get_model();
+    const auto& favouring = model.favouring;
     const auto count = favouring.changes_taken - _changes_applied;
-    if (!count) {
-        return;
-    }
+    const auto missed = count > favouring.changes.size();
+    const auto unseen = model.favourites_changes != _favourites_changes;
 
     _changes_applied = favouring.changes_taken;
+    _favourites_changes = model.favourites_changes;
 
-    if (count > favouring.changes.size()) {
-        refresh();
-        return;
+    if (!missed) {
+        for (auto change = favouring.changes.end() - ptrdiff_t(count); change != favouring.changes.end(); change++) {
+            apply_favourite(*change);
+
+            for (auto& item : _queue_items) {
+                const auto favourite_id = change->apply(item.kind, item.id, item.favourite_id);
+                if (favourite_id == item.favourite_id) {
+                    continue;
+                }
+
+                item.favourite_id = favourite_id;
+                PressButton::set_icon(lv_obj_get_child(item.buttons, -1), get_favourite_icon(favourite_id));
+            }
+        }
     }
 
-    for (auto change = favouring.changes.end() - ptrdiff_t(count); change != favouring.changes.end(); change++) {
-        apply_favourite(*change);
-
-        for (auto& item : _queue_items) {
-            const auto favourite_id = change->apply(item.kind, item.id, item.favourite_id);
-            if (favourite_id == item.favourite_id) {
-                continue;
-            }
-
-            item.favourite_id = favourite_id;
-            PressButton::set_icon(lv_obj_get_child(item.buttons, -1), get_favourite_icon(favourite_id));
-        }
+    if (missed || unseen) {
+        refresh();
     }
 }
 
