@@ -1,5 +1,7 @@
 #include "SpeakerPickerView.h"
 
+#include <algorithm>
+
 #include "Messages.h"
 #include "Shell.h"
 #include "Theme.h"
@@ -10,7 +12,7 @@ static constexpr int32_t ROW_HEIGHT = 88;
 static constexpr int32_t ROW_GAP = 12;
 static constexpr int32_t ROW_PADDING = 24;
 static constexpr int32_t ROW_BORDER = 3;
-static constexpr lv_style_selector_t ROW_PRESSED =
+static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 static constexpr int32_t NOTICE_WIDTH = 640;
 static constexpr int32_t NOTICE_DETAIL_LINES = 2;
@@ -18,6 +20,20 @@ static constexpr int32_t BUTTON_HEIGHT = 72;
 static constexpr int32_t BUTTON_PADDING = 40;
 static constexpr int32_t SPINNER_SIZE = 56;
 static constexpr int32_t SPINNER_ARC_WIDTH = 6;
+// A row's group control, and the chosen row's tick, which sits where the controls do. A press as
+// far above or below the control as the row reaches is the control's.
+static constexpr int32_t GROUP_CONTROL_SIZE = 64;
+static constexpr int32_t GROUP_CONTROL_TOUCH_MARGIN = (ROW_HEIGHT - GROUP_CONTROL_SIZE) / 2;
+static constexpr int32_t GROUP_CONTROL_BORDER = 4;
+
+static std::vector<std::string> get_pending_speakers(const Grouping& grouping) {
+    std::vector<std::string> speakers;
+    for (const auto& change : grouping.pending) {
+        speakers.push_back(change.speaker_id);
+    }
+
+    return speakers;
+}
 
 void SpeakerPickerView::do_render(lv_obj_t* parent) {
     auto column = lv_container_create(parent);
@@ -30,10 +46,9 @@ void SpeakerPickerView::do_render(lv_obj_t* parent) {
     lv_label_set_text(title, MSG_SPEAKERS);
     lv_obj_set_style_text_font(title, Theme::FONT_HEADLINE, LV_PART_MAIN);
 
-    auto hint = lv_label_create(column);
-    lv_label_set_text(hint, MSG_SPEAKERS_PICK);
-    lv_obj_set_style_text_font(hint, Theme::FONT_BODY, LV_PART_MAIN);
-    lv_obj_set_style_text_color(hint, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
+    _hint = lv_label_create(column);
+    lv_obj_set_style_text_font(_hint, Theme::FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_hint, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
 
     _body = lv_container_create(column);
     lv_obj_set_width(_body, LV_PCT(100));
@@ -53,7 +68,10 @@ void SpeakerPickerView::do_update() {
 
     _revision = model.revision;
 
-    if (model.speakers != _shown || model.speaker_id != _shown_choice) {
+    // Of the pending changes a row shows only whose they are. The backend's taking one changes
+    // the model and builds nothing, so the row's spinner turns on.
+    if (model.speakers != _shown || model.speaker_id != _shown_choice ||
+        get_pending_speakers(model.grouping) != _shown_pending) {
         build();
     }
 }
@@ -63,8 +81,18 @@ void SpeakerPickerView::build() {
     _revision = model.revision;
     _shown = model.speakers;
     _shown_choice = model.speaker_id;
+    _shown_pending = get_pending_speakers(model.grouping);
+
+    // A list built again stays where it was scrolled to: a press on a row's group control builds
+    // it again under the finger.
+    const auto scrolled = _list ? lv_obj_get_scroll_y(_list) : 0;
 
     lv_obj_clean(_body);
+    _list = nullptr;
+
+    // The group controls are on screen exactly while the list has the chosen speaker.
+    const auto groups = _shown.state == LoadState::Loaded && _shown.find(_shown_choice);
+    lv_label_set_text(_hint, groups ? MSG_SPEAKERS_PICK_OR_GROUP : MSG_SPEAKERS_PICK);
 
     switch (_shown.state) {
         case LoadState::Loading:
@@ -75,6 +103,7 @@ void SpeakerPickerView::build() {
                 build_notice(ICON_SPEAKER, MSG_SPEAKERS_EMPTY, "", false);
             } else {
                 build_list();
+                lv_obj_scroll_to_y(_list, scrolled, LV_ANIM_OFF);
             }
             break;
         case LoadState::Unreachable:
@@ -158,29 +187,33 @@ void SpeakerPickerView::build_notice(const char* icon, const char* message, cons
 }
 
 void SpeakerPickerView::build_list() {
-    auto list = lv_container_create(_body);
-    lv_obj_set_size(list, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(list, ROW_GAP, LV_PART_MAIN);
-    lv_obj_set_style_pad_bottom(list, Theme::GAP, LV_PART_MAIN);
-    lv_obj_add_flag(list, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_scroll_dir(list, LV_DIR_VER);
+    _list = lv_container_create(_body);
+    lv_obj_set_size(_list, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_flow(_list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(_list, ROW_GAP, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(_list, Theme::GAP, LV_PART_MAIN);
+    lv_obj_add_flag(_list, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(_list, LV_DIR_VER);
 
-    // One row per speaker, in the list's order: row_clicked finds the speaker by the row's index.
+    // The chosen speaker as the list has it: the others play in its group, or do not.
+    const auto chosen_speaker = _shown.find(_shown_choice);
+
+    // One row per speaker, in the list's order: row_clicked and group_clicked find the speaker by
+    // the row's index.
     for (const auto& speaker : _shown.speakers) {
         const auto chosen = speaker.id == _shown_choice;
 
-        auto row = lv_container_create(list);
+        auto row = lv_container_create(_list);
         lv_obj_set_size(row, LV_PCT(100), ROW_HEIGHT);
         lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_color(row, Theme::color(Theme::SURFACE), LV_PART_MAIN);
-        lv_obj_set_style_bg_color(row, Theme::color(Theme::SURFACE_PRESSED), ROW_PRESSED);
+        lv_obj_set_style_bg_color(row, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
         lv_obj_set_style_bg_opa(row, LV_OPA_COVER, LV_PART_MAIN);
         lv_obj_set_style_radius(row, Theme::RADIUS, LV_PART_MAIN);
         // Every row has the border, so the chosen one's content sits where the others' does.
         lv_obj_set_style_border_width(row, ROW_BORDER, LV_PART_MAIN);
         lv_obj_set_style_border_color(row, Theme::color(chosen ? Theme::ACCENT : Theme::SURFACE), LV_PART_MAIN);
-        lv_obj_set_style_border_color(row, Theme::color(chosen ? Theme::ACCENT : Theme::SURFACE_PRESSED), ROW_PRESSED);
+        lv_obj_set_style_border_color(row, Theme::color(chosen ? Theme::ACCENT : Theme::SURFACE_PRESSED), PRESSED);
         lv_obj_set_style_pad_hor(row, ROW_PADDING, LV_PART_MAIN);
         lv_obj_set_style_pad_column(row, Theme::GAP, LV_PART_MAIN);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
@@ -202,9 +235,57 @@ void SpeakerPickerView::build_list() {
         if (chosen) {
             auto check = lv_label_create(row);
             lv_label_set_text(check, ICON_CHECK);
+            lv_obj_set_width(check, GROUP_CONTROL_SIZE);
+            lv_obj_set_style_text_align(check, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
             lv_obj_set_style_text_font(check, Theme::FONT_ICON, LV_PART_MAIN);
             lv_obj_set_style_text_color(check, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+        } else if (chosen_speaker) {
+            build_group_control(row, speaker, chosen_speaker->plays_with(speaker.id));
         }
+    }
+}
+
+void SpeakerPickerView::build_group_control(lv_obj_t* row, const Speaker& speaker, bool member) {
+    // The control takes the presses on it whatever it shows, so none of them picks the speaker:
+    // LVGL sends a press to the object it is on, and not to the row under it.
+    auto control = lv_container_create(row);
+    lv_obj_set_size(control, GROUP_CONTROL_SIZE, GROUP_CONTROL_SIZE);
+    lv_obj_add_flag(control, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(control, GROUP_CONTROL_TOUCH_MARGIN);
+    lv_obj_set_style_radius(control, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+
+    // A pending change shows on its row, whichever group it was sent for, and its control sends
+    // nothing.
+    if (std::find(_shown_pending.begin(), _shown_pending.end(), speaker.id) != _shown_pending.end()) {
+        auto spinner = lv_spinner_create(control);
+        lv_obj_set_size(spinner, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_style_arc_width(spinner, SPINNER_ARC_WIDTH, LV_PART_MAIN);
+        lv_obj_set_style_arc_width(spinner, SPINNER_ARC_WIDTH, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_color(spinner, Theme::color(Theme::SURFACE_PRESSED), LV_PART_MAIN);
+        lv_obj_set_style_arc_color(spinner, Theme::color(Theme::ACCENT), LV_PART_INDICATOR);
+
+        return;
+    }
+
+    lv_obj_add_event_cb(control, group_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_set_style_border_width(control, GROUP_CONTROL_BORDER, LV_PART_MAIN);
+
+    if (member) {
+        lv_obj_set_style_bg_color(control, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(control, Theme::color(Theme::ACCENT_PRESSED), PRESSED);
+        lv_obj_set_style_bg_opa(control, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_border_color(control, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+        lv_obj_set_style_border_color(control, Theme::color(Theme::ACCENT_PRESSED), PRESSED);
+
+        auto check = lv_label_create(control);
+        lv_label_set_text(check, ICON_CHECK);
+        lv_obj_set_style_text_font(check, Theme::FONT_ICON, LV_PART_MAIN);
+        lv_obj_set_style_text_color(check, Theme::color(Theme::BACKGROUND), LV_PART_MAIN);
+        lv_obj_center(check);
+    } else {
+        lv_obj_set_style_bg_color(control, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+        lv_obj_set_style_bg_opa(control, LV_OPA_COVER, PRESSED);
+        lv_obj_set_style_border_color(control, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
     }
 }
 
@@ -216,6 +297,20 @@ void SpeakerPickerView::row_clicked(lv_event_t* event) {
     // the row's own event. A pick of the chosen speaker changes nothing, and goes back as well.
     self->_host->choose_speaker(self->_shown.speakers[size_t(index)].id);
     self->_shell->back();
+}
+
+void SpeakerPickerView::group_clicked(lv_event_t* event) {
+    auto self = (SpeakerPickerView*)lv_event_get_user_data(event);
+    const auto row = lv_obj_get_parent(lv_event_get_current_target_obj(event));
+    const auto& speaker_id = self->_shown.speakers[size_t(lv_obj_get_index(row))].id;
+
+    // The speaker leaves the group when the list has it there, and joins it otherwise. The host
+    // makes the change pending, and the next do_update() builds the list again.
+    if (self->_shown.find(self->_shown_choice)->plays_with(speaker_id)) {
+        self->_host->remove_from_group(speaker_id);
+    } else {
+        self->_host->add_to_group(speaker_id);
+    }
 }
 
 void SpeakerPickerView::retry_clicked(lv_event_t* event) {

@@ -16,6 +16,7 @@
 
 #define MSG_SPEAKERS "Speakers"
 #define MSG_SPEAKERS_PICK "Pick the speaker this display controls"
+#define MSG_SPEAKERS_PICK_OR_GROUP "Touch a speaker to control it, or its circle to group it"
 #define MSG_SPEAKERS_LOADING "Looking for speakers"
 #define MSG_SPEAKERS_EMPTY "No speaker answers the backend"
 

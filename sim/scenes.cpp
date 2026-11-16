@@ -17,6 +17,7 @@
 #include "api/Answers.h"
 #include "api/Artwork.h"
 #include "cJSON.h"
+#include "fonts/icons.h"
 
 // The backend's answers, in the shape the deployed backend gives them. The ids are made up: a
 // real one names its speaker's hardware address.
@@ -38,6 +39,26 @@ static const char SPEAKERS_REGROUPED[] = R"({"data":[
  "id":"speaker-library","model":"Playbase","muted":false,"name":"Bibliothèque","volume":35},
 {"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage","speaker-bathroom"],"muted":false,
  "volume":25},"id":"speaker-bathroom","model":"Play:1","muted":true,"name":"Żółta łazienka","volume":27}
+]})";
+
+// The same speakers, each playing alone.
+static const char SPEAKERS_ALONE[] = R"({"data":[
+{"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"muted":false,"volume":24},
+ "id":"speaker-garage","model":"Play:3","muted":false,"name":"Garage","volume":24},
+{"group":{"coordinator_id":"speaker-library","member_ids":["speaker-library"],"muted":false,"volume":35},
+ "id":"speaker-library","model":"Playbase","muted":false,"name":"Bibliothèque","volume":35},
+{"group":{"coordinator_id":"speaker-bathroom","member_ids":["speaker-bathroom"],"muted":true,"volume":27},
+ "id":"speaker-bathroom","model":"Play:1","muted":true,"name":"Żółta łazienka","volume":27}
+]})";
+
+// The same speakers with the library's in the garage's group, which the garage's leads.
+static const char SPEAKERS_GARAGE_LEADS[] = R"({"data":[
+{"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage","speaker-library"],"muted":false,
+ "volume":29},"id":"speaker-garage","model":"Play:3","muted":false,"name":"Garage","volume":24},
+{"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage","speaker-library"],"muted":false,
+ "volume":29},"id":"speaker-library","model":"Playbase","muted":false,"name":"Bibliothèque","volume":35},
+{"group":{"coordinator_id":"speaker-bathroom","member_ids":["speaker-bathroom"],"muted":true,"volume":27},
+ "id":"speaker-bathroom","model":"Play:1","muted":true,"name":"Żółta łazienka","volume":27}
 ]})";
 
 static const char SPEAKERS_MANY[] = R"({"data":[
@@ -260,6 +281,12 @@ static constexpr lv_point_t BAR_VOLUME_UP = {748, 433};
 static constexpr lv_point_t FIRST_SPEAKER = {400, 163};
 static constexpr lv_point_t SECOND_SPEAKER = {400, 263};
 
+// Where the group controls of those rows are, and a point of the second row beside its control's
+// circle: under it, as near as the row's edge.
+static constexpr lv_point_t FIRST_GROUP_CONTROL = {709, 163};
+static constexpr lv_point_t SECOND_GROUP_CONTROL = {709, 263};
+static constexpr lv_point_t BESIDE_SECOND_GROUP_CONTROL = {709, 302};
+
 // A fixture that does not read as its scene says fails the render.
 static void expect(bool condition, const char* what) {
     if (!condition) {
@@ -292,6 +319,34 @@ static bool says(const lv_obj_t* obj, const char* text) {
 }
 
 static bool says(const char* text) { return says(lv_screen_active(), text); }
+
+// The labels on screen that say this.
+static void find_labels(lv_obj_t* obj, const char* text, std::vector<lv_obj_t*>& found) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
+    if (lv_obj_check_type(obj, &lv_label_class) && !strcmp(lv_label_get_text(obj), text)) {
+        found.push_back(obj);
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        find_labels(lv_obj_get_child(obj, int32_t(i)), text, found);
+    }
+}
+
+// How many spinners are on screen.
+static int count_spinners(const lv_obj_t* obj) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return 0;
+    }
+
+    int count = lv_obj_check_type(obj, &lv_spinner_class);
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        count += count_spinners(lv_obj_get_child(obj, int32_t(i)));
+    }
+
+    return count;
+}
 
 // Whether a button that is on screen is drawn in part only: an object it is in ends before it.
 static bool cuts_button(const lv_obj_t* obj) {
@@ -534,6 +589,9 @@ static const char* check_held(const SimHost& host, const Shell& shell) {
     if (!shows<SpeakerPickerView>(shell)) {
         return "the display is not held on the speaker picker";
     }
+    if (!says(MSG_SPEAKERS_PICK)) {
+        return "the picker the display is held on does not say to pick a speaker";
+    }
 
     return check_no_bar(host, shell);
 }
@@ -740,6 +798,201 @@ static const char* check_group_time_limit(const SimHost& host, const Shell&) {
     }
 
     return model.in_group("speaker-bathroom") ? nullptr : "the speakers were not fetched again after the time limit";
+}
+
+// The picker over a list that has the chosen speaker: every other row carries a group control.
+static void open_groups(SimHost& host, Shell& shell, const char* speakers, const char* chosen) {
+    host.model().speaker_id = chosen;
+    host.answer_speakers(200, speakers);
+    expect(host.get_model().speakers.state == LoadState::Loaded && host.get_model().speakers.speakers.size() == 3,
+           "the speakers fixture was not read as a list of three");
+
+    shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+}
+
+// What the picker shows of the groups and what its group controls did: the speaker still chosen,
+// how many rows are ticked, the chosen speaker's among them, how many show a change pending, and
+// the changes sent.
+static const char* check_groups(const SimHost& host, const Shell& shell, const char* chosen, size_t ticked, int pending,
+                                const std::vector<GroupChangeRequest>& sent) {
+    if (!shows<SpeakerPickerView>(shell)) {
+        return "the display is not on the speaker picker";
+    }
+    if (host.get_model().speaker_id != chosen) {
+        return "a press on a group control picked a speaker";
+    }
+    if (!says(MSG_SPEAKERS_PICK_OR_GROUP)) {
+        return "the picker does not say what its group controls do";
+    }
+
+    std::vector<lv_obj_t*> ticks;
+    find_labels(lv_screen_active(), ICON_CHECK, ticks);
+    if (ticks.size() != ticked) {
+        return "the rows do not tick the speakers of the chosen speaker's group, and no other";
+    }
+    if (count_spinners(lv_screen_active()) != pending) {
+        return "the rows do not show the changes that are pending, and no other";
+    }
+
+    return host.get_group_changes() == sent ? nullptr : "the group controls did not send what was pressed, and no more";
+}
+
+// Every speaker plays alone: each row but the chosen speaker's offers to add its speaker. The
+// chosen speaker's row carries no control: a touch where one would be sends nothing.
+static void speakers_group_alone(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_ALONE, "speaker-garage");
+
+    host.tap(FIRST_GROUP_CONTROL.x, FIRST_GROUP_CONTROL.y);
+}
+
+static const char* check_group_alone(const SimHost& host, const Shell& shell) {
+    return check_groups(host, shell, "speaker-garage", 1, 0, {});
+}
+
+// A group of two that the chosen speaker leads: the other speaker's row is ticked.
+static void speakers_group_led(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_GARAGE_LEADS, "speaker-garage");
+}
+
+static const char* check_group_led(const SimHost& host, const Shell& shell) {
+    return check_groups(host, shell, "speaker-garage", 2, 0, {});
+}
+
+// A group of two that the other speaker leads: its row is ticked all the same.
+static void speakers_group_follows(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_GARAGE_LEADS, "speaker-library");
+}
+
+static const char* check_group_follows(const SimHost& host, const Shell& shell) {
+    return check_groups(host, shell, "speaker-library", 2, 0, {});
+}
+
+// A touch on the control of a speaker outside the group adds it, and picks nothing. The change is
+// on its way: the row shows it pending, and a second touch, beside the spinner, sends nothing and
+// picks nothing.
+static void speakers_group_add(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_ALONE, "speaker-garage");
+
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+    host.tap(BESIDE_SECOND_GROUP_CONTROL.x, BESIDE_SECOND_GROUP_CONTROL.y);
+}
+
+static const char* check_group_add(const SimHost& host, const Shell& shell) {
+    return check_groups(host, shell, "speaker-garage", 1, 1, {{"speaker-library", "speaker-garage", true}});
+}
+
+// A touch on the control of a speaker of the group removes it. The backend took the change and no
+// list shows it yet: the row shows it pending, and a second touch sends nothing.
+static void speakers_group_remove(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_GARAGE_LEADS, "speaker-garage");
+    host.answer_group_changes(204, "");
+
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+    host.tap(BESIDE_SECOND_GROUP_CONTROL.x, BESIDE_SECOND_GROUP_CONTROL.y);
+}
+
+static const char* check_group_remove(const SimHost& host, const Shell& shell) {
+    const auto change = host.get_model().grouping.find("speaker-library");
+    if (!change || !change->taken_at) {
+        return "a remove the backend took is not pending";
+    }
+
+    return check_groups(host, shell, "speaker-garage", 1, 1, {{"speaker-library", "speaker-garage", false}});
+}
+
+// The speaker that leads the group is removed as any other: the change goes to it.
+static void speakers_group_remove_leader(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_GARAGE_LEADS, "speaker-library");
+
+    host.tap(FIRST_GROUP_CONTROL.x, FIRST_GROUP_CONTROL.y);
+}
+
+static const char* check_group_remove_leader(const SimHost& host, const Shell& shell) {
+    return check_groups(host, shell, "speaker-library", 1, 1, {{"speaker-garage", "speaker-library", false}});
+}
+
+// A change sent for the group of the speaker that was chosen then, pending still under another
+// choice: its row shows it pending and takes no press.
+static void speakers_group_pending_elsewhere(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-bathroom";
+    host.answer_speakers(200, SPEAKERS_ALONE);
+    host.add_to_group("speaker-garage");
+    host.choose_speaker("speaker-library");
+
+    shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+
+    host.tap(FIRST_GROUP_CONTROL.x, FIRST_GROUP_CONTROL.y);
+}
+
+static const char* check_group_pending_elsewhere(const SimHost& host, const Shell& shell) {
+    return check_groups(host, shell, "speaker-library", 1, 1, {{"speaker-garage", "speaker-bathroom", true}});
+}
+
+// The list of the picker, which its rows are in: found by a speaker's name.
+static lv_obj_t* find_speaker_list(const char* name) {
+    std::vector<lv_obj_t*> names;
+    find_labels(lv_screen_active(), name, names);
+    expect(names.size() == 1, "the picker does not list the speaker once");
+
+    return lv_obj_get_parent(lv_obj_get_parent(names[0]));
+}
+
+static constexpr int32_t ONE_ROW = 100;
+
+// A list scrolled one row down, so its second row is where the first was: a touch on that row's
+// control adds its speaker, and the list stays where it was scrolled to.
+static void speakers_group_scrolled(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-attic";
+    host.answer_speakers(200, SPEAKERS_MANY);
+
+    shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+
+    lv_obj_scroll_to_y(find_speaker_list("Attic"), ONE_ROW, LV_ANIM_OFF);
+
+    host.tap(FIRST_GROUP_CONTROL.x, FIRST_GROUP_CONTROL.y);
+}
+
+static const char* check_group_scrolled(const SimHost& host, const Shell& shell) {
+    if (lv_obj_get_scroll_y(find_speaker_list("Attic")) != ONE_ROW) {
+        return "the list did not stay where it was scrolled to";
+    }
+
+    return check_groups(host, shell, "speaker-attic", 1, 1, {{"speaker-garage", "speaker-attic", true}});
+}
+
+// While no speaker is chosen no row carries a group control: a touch where one would be picks
+// the row's speaker.
+static void speakers_none_pick(SimHost& host, Shell& shell) {
+    answer_speakers(host);
+
+    shell.open();
+
+    host.tap(FIRST_GROUP_CONTROL.x, FIRST_GROUP_CONTROL.y);
+}
+
+static const char* check_none_pick(const SimHost& host, const Shell&) {
+    if (!host.get_group_changes().empty()) {
+        return "a row carries a group control while no speaker is chosen";
+    }
+
+    return host.get_model().speaker_id == "speaker-garage" ? nullptr : "the touch did not pick the first speaker";
+}
+
+// The same while the list lacks the chosen speaker.
+static void speakers_missing_pick(SimHost& host, Shell& shell) {
+    open_before_list(host, shell, "speaker-shed");
+
+    answer_speakers(host);
+
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+}
+
+static const char* check_missing_pick(const SimHost& host, const Shell&) {
+    if (!host.get_group_changes().empty()) {
+        return "a row carries a group control while the list lacks the chosen speaker";
+    }
+
+    return host.get_model().speaker_id == "speaker-library" ? nullptr : "the touch did not pick the second speaker";
 }
 
 // The now-playing screen as the app opens it: a speaker chosen that the list has, and a playback
@@ -2014,6 +2267,53 @@ static const char* check_bar_cover_change(const SimHost& host, const Shell& shel
     return check_bar(host, shell);
 }
 
+// A change of a group that the backend refuses: the bar says it was not taken, and the row is
+// pending no longer and shows the list as it is.
+static void speakers_group_not_taken(SimHost& host, Shell& shell) {
+    open_bar(host, shell, PLAYING);
+    host.answer_group_changes(502, ERROR_SPEAKER);
+    host.answer_next_speakers(200, SPEAKERS);
+
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+}
+
+static const char* check_group_refused(const SimHost& host, const Shell& shell) {
+    if (host.get_model().not_taken() != 1) {
+        return "the refused change does not count as one not taken";
+    }
+    if (!host.get_model().grouping.allows("speaker-library")) {
+        return "the refused change is still pending";
+    }
+
+    return check_groups(host, shell, "speaker-garage", 1, 0, {{"speaker-library", "speaker-garage", true}});
+}
+
+static const char* check_group_not_taken(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_group_refused(host, shell)) {
+        return problem;
+    }
+    if (!says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar does not say that the change was not taken";
+    }
+
+    return check_bar(host, shell);
+}
+
+// Once it has said so for a while, the bar says what plays again.
+static const char* check_group_not_taken_later(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_group_refused(host, shell)) {
+        return problem;
+    }
+    if (says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar still says that the change was not taken";
+    }
+    if (!says("Svefn-g-englar")) {
+        return "the bar does not say what plays again";
+    }
+
+    return check_bar(host, shell);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -2032,6 +2332,18 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-unreadable", speakers_unreadable},
         {"speakers-retry", speakers_retry, check_retry},
         {"speakers-reconnecting", speakers_reconnecting},
+        {"speakers-none-pick", speakers_none_pick, check_none_pick},
+        {"speakers-missing-pick", speakers_missing_pick, check_missing_pick},
+        {"speakers-group-alone", speakers_group_alone, check_group_alone},
+        {"speakers-group-led", speakers_group_led, check_group_led},
+        {"speakers-group-follows", speakers_group_follows, check_group_follows},
+        {"speakers-group-add", speakers_group_add, check_group_add},
+        {"speakers-group-remove", speakers_group_remove, check_group_remove},
+        {"speakers-group-remove-leader", speakers_group_remove_leader, check_group_remove_leader},
+        {"speakers-group-pending-elsewhere", speakers_group_pending_elsewhere, check_group_pending_elsewhere},
+        {"speakers-group-scrolled", speakers_group_scrolled, check_group_scrolled},
+        {"speakers-group-not-taken", speakers_group_not_taken, check_group_not_taken},
+        {"speakers-group-not-taken-later", speakers_group_not_taken, check_group_not_taken_later, AFTER_NOTICE_MS},
         {"speakers-group-time-limit", speakers_group_time_limit, check_group_time_limit,
          Grouping::TIME_LIMIT_MS + 1000},
         {"now-playing", now_playing, check_now_playing},
