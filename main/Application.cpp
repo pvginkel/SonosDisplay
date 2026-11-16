@@ -574,12 +574,12 @@ using PageReader = const char* (*)(int status, const char* body, size_t length, 
 // `done` the page as `read` reads it, or why it did not come. The request goes as one with one
 // for the same page that still waits, a press on Try again among them.
 template <typename Item>
-static void request_page(HttpClient& client, const char* path, uint32_t number, std::weak_ptr<void> scope,
+static void request_page(HttpClient& client, std::string path, uint32_t number, std::weak_ptr<void> scope,
                          std::function<void(Page<Item>)> done, PageReader<Item> read) {
-    const auto query = std::string(path) + "?page=" + std::to_string(number) + "&per_page=" + std::to_string(PAGE_SIZE);
+    const auto query = path + "?page=" + std::to_string(number) + "&per_page=" + std::to_string(PAGE_SIZE);
 
     client.send(HttpRequest{.path = query, .merges = true}, std::move(scope),
-                [path, number, done = std::move(done), read](HttpResponse&& response) {
+                [path = std::move(path), number, done = std::move(done), read](HttpResponse&& response) {
                     Page<Item> page;
 
                     if (response.err == ESP_ERR_INVALID_SIZE) {
@@ -590,11 +590,11 @@ static void request_page(HttpClient& client, const char* path, uint32_t number, 
                         page.state = LoadState::Unreachable;
                     } else if (const auto problem =
                                    read(response.status, (const char*)response.body.get(), response.length, page)) {
-                        ESP_LOGW(TAG, "GET %s page %" PRIu32 " answered %d, %s: %s", path, number, response.status,
-                                 problem, page.error.c_str());
+                        ESP_LOGW(TAG, "GET %s page %" PRIu32 " answered %d, %s: %s", path.c_str(), number,
+                                 response.status, problem, page.error.c_str());
                     } else {
-                        ESP_LOGI(TAG, "GET %s page %" PRIu32 ": %zu of %" PRIu32, path, number, page.items.size(),
-                                 page.total);
+                        ESP_LOGI(TAG, "GET %s page %" PRIu32 ": %zu of %" PRIu32, path.c_str(), number,
+                                 page.items.size(), page.total);
                     }
 
                     done(std::move(page));
@@ -603,6 +603,24 @@ static void request_page(HttpClient& client, const char* path, uint32_t number, 
 
 void Application::request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) {
     request_page(*_api_client, "/api/library/artists", number, std::move(scope), std::move(done), read_artists);
+}
+
+// Without `sort_by` and `sort_dir`: newest first, by release date.
+void Application::request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
+                                 std::function<void(Page<Album>)> done) {
+    request_page(*_api_client, "/api/library/artists/" + encode_segment(artist_id) + "/albums", number,
+                 std::move(scope), std::move(done), read_albums);
+}
+
+void Application::request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
+                                 std::function<void(Page<AlbumTrack>)> done) {
+    request_page(*_api_client, "/api/library/albums/" + encode_segment(album_id) + "/tracks", number, std::move(scope),
+                 std::move(done), read_tracks);
+}
+
+void Application::request_playlists(uint32_t number, std::weak_ptr<void> scope,
+                                    std::function<void(Page<Playlist>)> done) {
+    request_page(*_api_client, "/api/library/playlists", number, std::move(scope), std::move(done), read_playlists);
 }
 
 void Application::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,

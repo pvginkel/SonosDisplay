@@ -1,11 +1,16 @@
 #include "ArtistsView.h"
 
+#include <memory>
+
+#include "AlbumsView.h"
 #include "Messages.h"
+#include "PlaylistsView.h"
+#include "Shell.h"
 #include "Theme.h"
 #include "lv_support.h"
 
-// The button that opens the letters, beside the list.
-static constexpr int32_t JUMP_SIZE = 80;
+// The buttons beside the list: the one that opens the letters, and the playlists'.
+static constexpr int32_t RAIL_BUTTON_SIZE = 80;
 
 // '#' and 'A' to 'Z': every letter an artist files under fits the grid.
 static constexpr uint8_t GRID_COLUMNS = 9;
@@ -31,12 +36,12 @@ const char* ArtistsView::get_loading_message() const { return MSG_ARTISTS_LOADIN
 const char* ArtistsView::get_empty_message() const { return MSG_ARTISTS_EMPTY; }
 
 void ArtistsView::build_row(lv_obj_t* row, size_t index) {
-    auto title = lv_label_create(row);
-    lv_obj_set_flex_grow(title, 1);
-    lv_obj_set_height(title, lv_font_get_line_height(Theme::FONT_BODY_LARGE));
-    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
-    lv_obj_set_style_text_font(title, Theme::FONT_BODY_LARGE, LV_PART_MAIN);
-    lv_label_set_text(title, _artists.items[index].title.c_str());
+    create_row_title(row, _artists.items[index].title);
+    make_openable(row);
+}
+
+void ArtistsView::open_row(size_t index) {
+    _shell->push(std::make_unique<AlbumsView>(_host, _shell, _artists.items[index]));
 }
 
 void ArtistsView::do_render_beside(lv_obj_t* body, lv_obj_t* area) {
@@ -45,7 +50,7 @@ void ArtistsView::do_render_beside(lv_obj_t* body, lv_obj_t* area) {
     lv_obj_set_style_pad_left(rail, Theme::GAP, LV_PART_MAIN);
 
     _jump = lv_container_create(rail);
-    lv_obj_set_size(_jump, JUMP_SIZE, JUMP_SIZE);
+    lv_obj_set_size(_jump, RAIL_BUTTON_SIZE, RAIL_BUTTON_SIZE);
     lv_obj_add_flag(_jump, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_opa(_jump, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(_jump, Theme::RADIUS, LV_PART_MAIN);
@@ -55,6 +60,24 @@ void ArtistsView::do_render_beside(lv_obj_t* body, lv_obj_t* area) {
     lv_label_set_text(_jump_label, MSG_JUMP_TO_LETTER);
     lv_obj_set_style_text_font(_jump_label, Theme::FONT_TITLE, LV_PART_MAIN);
     lv_obj_center(_jump_label);
+
+    // At the rail's end, where it stays whether the letters' button shows or not, level with the
+    // list's end.
+    _playlists = lv_container_create(rail);
+    lv_obj_set_size(_playlists, RAIL_BUTTON_SIZE, RAIL_BUTTON_SIZE);
+    lv_obj_align(_playlists, LV_ALIGN_BOTTOM_MID, 0, -Theme::GAP);
+    lv_obj_add_flag(_playlists, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(_playlists, Theme::color(Theme::SURFACE), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(_playlists, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_set_style_bg_opa(_playlists, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(_playlists, Theme::RADIUS, LV_PART_MAIN);
+    lv_obj_add_event_cb(_playlists, playlists_clicked, LV_EVENT_CLICKED, this);
+
+    auto playlists_icon = lv_label_create(_playlists);
+    lv_label_set_text(playlists_icon, ICON_PLAYLIST_MUSIC);
+    lv_obj_set_style_text_font(playlists_icon, Theme::FONT_ICON, LV_PART_MAIN);
+    lv_obj_set_style_text_color(playlists_icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+    lv_obj_center(playlists_icon);
 
     // Over the list, which it hides while it shows.
     static const int32_t COLUMNS[] = {LV_GRID_FR(1), LV_GRID_FR(1),        LV_GRID_FR(1), LV_GRID_FR(1),
@@ -88,7 +111,7 @@ void ArtistsView::do_list_built() {
         }
     }
 
-    lv_obj_update_flag(lv_obj_get_parent(_jump), LV_OBJ_FLAG_HIDDEN, _letters.empty());
+    lv_obj_update_flag(_jump, LV_OBJ_FLAG_HIDDEN, _letters.empty());
 
     build_letters();
 
@@ -140,4 +163,11 @@ void ArtistsView::letter_clicked(lv_event_t* event) {
 
     self->show_letters(false);
     self->scroll_to_row(self->_letters[index].second);
+}
+
+void ArtistsView::playlists_clicked(lv_event_t* event) {
+    auto self = (ArtistsView*)lv_event_get_user_data(event);
+
+    self->show_letters(false);
+    self->_shell->push(std::make_unique<PlaylistsView>(self->_host, self->_shell));
 }

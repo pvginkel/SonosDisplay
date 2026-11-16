@@ -148,13 +148,14 @@ void Shell::update() {
 
     layout();
 
+    // Before the view, which fits its heading to where the marker is.
+    update_marker();
+
     if (auto current = get_current()) {
         current->update();
     }
 
     _bar.update();
-
-    update_marker();
 }
 
 // Runs whenever the top view or the hold on the picker may have changed, so no frame is drawn
@@ -168,6 +169,16 @@ void Shell::layout() {
 
     _bar.set_shown(bar);
     lv_obj_set_height(_content, _height - (bar ? NowPlayingBar::HEIGHT : 0));
+}
+
+int32_t Shell::get_marker_reach() const {
+    if (lv_obj_has_flag(_marker, LV_OBJ_FLAG_HIDDEN) || _marker_align != LV_ALIGN_TOP_RIGHT) {
+        return 0;
+    }
+
+    lv_obj_update_layout(_marker);
+
+    return Theme::GAP + lv_obj_get_width(_marker);
 }
 
 void Shell::update_marker() {

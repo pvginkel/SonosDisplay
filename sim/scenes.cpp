@@ -13,13 +13,16 @@
 #include <utility>
 #include <vector>
 
+#include "AlbumsView.h"
 #include "ArtistsView.h"
 #include "Controls.h"
 #include "LoadingView.h"
 #include "Messages.h"
 #include "NowPlayingView.h"
+#include "PlaylistsView.h"
 #include "SpeakerPickerView.h"
 #include "Theme.h"
+#include "TracksView.h"
 #include "api/Answers.h"
 #include "api/Artwork.h"
 #include "cJSON.h"
@@ -2965,14 +2968,35 @@ static std::vector<ArtistFixture> make_many_artists(size_t count = MANY_ARTISTS)
     return artists;
 }
 
-// The answer to GET /api/library/artists for page `number` of `artists`, PAGE_SIZE to a page, its
-// data the `count` artists from `first`, in the shape the deployed backend gives it. The ids are
-// made up, and every third artist has no picture.
+// The answer to a list's GET for page `number`, PAGE_SIZE to a page, of a list of `total` items in
+// the order `sort_by` and `sort_dir` name, its data `data`, in the shape the deployed backend gives
+// it.
+static std::string make_page_body(cJSON* data, uint32_t number, size_t total, const char* sort_by,
+                                  const char* sort_dir) {
+    const auto root = cJSON_CreateObject();
+    cJSON_AddItemToObject(root, "data", data);
+
+    const auto meta = cJSON_AddObjectToObject(root, "meta");
+    cJSON_AddNumberToObject(meta, "page", number);
+    cJSON_AddNumberToObject(meta, "per_page", PAGE_SIZE);
+    cJSON_AddStringToObject(meta, "sort_by", sort_by);
+    cJSON_AddStringToObject(meta, "sort_dir", sort_dir);
+    cJSON_AddNumberToObject(meta, "total", double(total));
+    cJSON_AddNumberToObject(meta, "total_pages", double((total + PAGE_SIZE - 1) / PAGE_SIZE));
+
+    const auto text = cJSON_PrintUnformatted(root);
+    std::string body(text);
+    cJSON_free(text);
+    cJSON_Delete(root);
+
+    return body;
+}
+
+// The answer to GET /api/library/artists for page `number` of `artists`, its data the `count`
+// artists from `first`. The ids are made up, and every third artist has no picture.
 static std::string make_artists_body(const std::vector<ArtistFixture>& artists, size_t first, size_t count,
                                      uint32_t number) {
-    const auto root = cJSON_CreateObject();
-
-    const auto data = cJSON_AddArrayToObject(root, "data");
+    const auto data = cJSON_CreateArray();
     for (auto i = first; i < first + count; i++) {
         const auto artist = cJSON_CreateObject();
 
@@ -2989,31 +3013,25 @@ static std::string make_artists_body(const std::vector<ArtistFixture>& artists, 
         cJSON_AddItemToArray(data, artist);
     }
 
-    const auto meta = cJSON_AddObjectToObject(root, "meta");
-    cJSON_AddNumberToObject(meta, "page", number);
-    cJSON_AddNumberToObject(meta, "per_page", PAGE_SIZE);
-    cJSON_AddStringToObject(meta, "sort_by", "sort_title");
-    cJSON_AddStringToObject(meta, "sort_dir", "asc");
-    cJSON_AddNumberToObject(meta, "total", double(artists.size()));
-    cJSON_AddNumberToObject(meta, "total_pages", double((artists.size() + PAGE_SIZE - 1) / PAGE_SIZE));
-
-    const auto text = cJSON_PrintUnformatted(root);
-    std::string body(text);
-    cJSON_free(text);
-    cJSON_Delete(root);
-
-    return body;
+    return make_page_body(data, number, artists.size(), "sort_title", "asc");
 }
 
-// Every page of `artists`, as the backend answers each.
-static std::vector<std::string> make_artist_pages(const std::vector<ArtistFixture>& artists) {
+// Every page of `items`, as the backend answers each, its body made by `make_body`.
+template <typename Fixture>
+static std::vector<std::string> make_pages(const std::vector<Fixture>& items,
+                                           std::string (*make_body)(const std::vector<Fixture>& items, size_t first,
+                                                                    size_t count, uint32_t number)) {
     std::vector<std::string> pages;
-    for (size_t first = 0; first < artists.size() || pages.empty(); first += PAGE_SIZE) {
-        pages.push_back(make_artists_body(artists, first, std::min(PAGE_SIZE, uint32_t(artists.size() - first)),
-                                          uint32_t(pages.size() + 1)));
+    for (size_t first = 0; first < items.size() || pages.empty(); first += PAGE_SIZE) {
+        pages.push_back(
+            make_body(items, first, std::min(PAGE_SIZE, uint32_t(items.size() - first)), uint32_t(pages.size() + 1)));
     }
 
     return pages;
+}
+
+static std::vector<std::string> make_artist_pages(const std::vector<ArtistFixture>& artists) {
+    return make_pages(artists, make_artists_body);
 }
 
 static const char ERROR_PLEX[] =
@@ -3107,10 +3125,20 @@ static void tap_label(SimHost& host, Shell& shell, const char* text, bool with_h
     host.tap(center->x, center->y);
 }
 
-// Whether this object of a list is the row of an item, and not the state of a page past them.
+// Whether this object of a list is the row of an item, and not the state of a page past them: it
+// holds labels only, its title first.
 static bool is_row(const lv_obj_t* obj) {
-    return lv_obj_check_type(obj, &lv_obj_class) && lv_obj_get_child_count(obj) == 1 &&
-           lv_obj_check_type(lv_obj_get_child(obj, 0), &lv_label_class);
+    if (!lv_obj_check_type(obj, &lv_obj_class) || !lv_obj_get_child_count(obj)) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        if (!lv_obj_check_type(lv_obj_get_child(obj, int32_t(i)), &lv_label_class)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // The list on screen: what scrolls, and holds rows.
@@ -3206,7 +3234,7 @@ static void open_artists(SimHost& host, Shell& shell) {
 }
 
 static void open_library(SimHost& host, Shell& shell, const std::vector<ArtistFixture>& artists) {
-    host.serve_artists(200, make_artist_pages(artists));
+    host.artists().serve(200, make_artist_pages(artists));
 
     open_artists(host, shell);
 }
@@ -3238,31 +3266,41 @@ static bool shows_title(const char* label, const std::string& title) {
     return shown.ends_with("...") && title.starts_with(shown.substr(0, shown.length() - 3));
 }
 
-// The rows of the list are those of `artists` from `first`, `count` of them.
-static const char* check_rows(const std::vector<ArtistFixture>& artists, size_t first, size_t count) {
+// The rows of the list have the titles of `titles` from `first`, `count` of them, in order.
+static const char* check_titles(const std::vector<std::string>& titles, size_t first, size_t count) {
     const auto list = find_list();
     if (!list) {
-        return "the artists are not listed";
+        return "the items are not listed";
     }
 
     const auto rows = get_rows(list);
     if (rows.size() != count) {
-        return "the list does not have a row for every artist held";
+        return "the list does not have a row for every item held";
     }
 
     for (size_t i = 0; i < count; i++) {
         // What the fonts do not draw is left out of a title.
-        auto title = artists[first + i].first;
+        auto title = titles[first + i];
         if (const auto at = title.find("♫"); at != std::string::npos) {
             title.erase(at);
         }
 
         if (!shows_title(get_row_title(rows[i]), title)) {
-            return "the rows are not the artists, in the backend's order";
+            return "the rows are not the items, in the backend's order";
         }
     }
 
     return nullptr;
+}
+
+// The rows of the list are those of `artists` from `first`, `count` of them.
+static const char* check_rows(const std::vector<ArtistFixture>& artists, size_t first, size_t count) {
+    std::vector<std::string> titles;
+    for (const auto& artist : artists) {
+        titles.push_back(artist.first);
+    }
+
+    return check_titles(titles, first, count);
 }
 
 // The row that was at the top before the list was built again is where it was.
@@ -3273,7 +3311,7 @@ static void expect_in_place(const RowPlace& place, const char* what) {
 
 // The now-playing screen's library button opens the artists, over it, with the bar under them.
 static void library_open(SimHost& host, Shell& shell) {
-    host.serve_artists(200, make_artist_pages(LIBRARY));
+    host.artists().serve(200, make_artist_pages(LIBRARY));
     open_now_playing(host, shell, PLAYING);
 
     host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
@@ -3286,7 +3324,7 @@ static const char* check_library_open(const SimHost& host, const Shell& shell) {
     if (shell.count_views() != 2) {
         return "the artists screen did not open over the now-playing screen";
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1}) {
         return "the artists were not asked for once, from the first page";
     }
 
@@ -3312,7 +3350,7 @@ static const char* check_artists(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1}) {
         return "the artists were not asked for once, from the first page";
     }
 
@@ -3425,11 +3463,11 @@ static const char* check_artists_loading(const SimHost& host, const Shell& shell
         return "the screen does not say that the artists are on their way";
     }
 
-    return host.get_artist_requests() == std::vector<uint32_t>{1} ? nullptr : "the artists were not asked for";
+    return host.artists().get_requests() == std::vector<uint32_t>{1} ? nullptr : "the artists were not asked for";
 }
 
 static void artists_unreachable(SimHost& host, Shell& shell) {
-    host.serve_artists(SimHost::UNREACHABLE, {""});
+    host.artists().serve(SimHost::UNREACHABLE, {""});
 
     open_artists(host, shell);
 }
@@ -3445,7 +3483,7 @@ static const char* check_artists_unreachable(const SimHost&, const Shell& shell)
 
 // Plex failed: the backend's own words, cut to two lines.
 static void artists_error(SimHost& host, Shell& shell) {
-    host.serve_artists(502, {ERROR_PLEX});
+    host.artists().serve(502, {ERROR_PLEX});
 
     open_artists(host, shell);
 }
@@ -3488,7 +3526,7 @@ static void artists_unreadable(SimHost& host, Shell& shell) {
     expect(read_artists(200, long_page.c_str(), long_page.length(), page) && page.state == LoadState::Failed,
            "a page longer than PAGE_SIZE was not refused");
 
-    host.serve_artists(200, {UNREADABLE_ARTISTS[std::size(UNREADABLE_ARTISTS) - 1]});
+    host.artists().serve(200, {UNREADABLE_ARTISTS[std::size(UNREADABLE_ARTISTS) - 1]});
     open_artists(host, shell);
 }
 
@@ -3507,10 +3545,10 @@ static const char* check_artists_empty(const SimHost&, const Shell& shell) {
 
 // Try again, once the backend answers.
 static void artists_retry(SimHost& host, Shell& shell) {
-    host.serve_artists(SimHost::UNREACHABLE, {""});
+    host.artists().serve(SimHost::UNREACHABLE, {""});
     open_artists(host, shell);
 
-    host.serve_artists(200, make_artist_pages(LIBRARY));
+    host.artists().serve(200, make_artist_pages(LIBRARY));
     tap_label(host, shell, MSG_TRY_AGAIN);
 }
 
@@ -3518,7 +3556,7 @@ static const char* check_artists_retry(const SimHost& host, const Shell& shell) 
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 1}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 1}) {
         return "the first page was not asked for again";
     }
 
@@ -3542,7 +3580,7 @@ static const char* check_artists_pages(const SimHost& host, const Shell& shell) 
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3}) {
         return "the pages were not asked for one by one as the list was scrolled";
     }
 
@@ -3560,7 +3598,7 @@ static const char* check_artists_pages_back(const SimHost& host, const Shell& sh
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 1}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3, 1}) {
         return "the first page was not asked for again at the start";
     }
 
@@ -3570,13 +3608,13 @@ static const char* check_artists_pages_back(const SimHost& host, const Shell& sh
 // The next page does not come: the list says so at its end, with a way to ask again.
 static void artists_page_failed(SimHost& host, Shell& shell) {
     const auto artists = make_many_artists();
-    host.serve_artists(200, {make_artist_pages(artists)[0]});
+    host.artists().serve(200, {make_artist_pages(artists)[0]});
     open_artists(host, shell);
 
     scroll_list(shell, true);
-    expect(host.get_artist_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
+    expect(host.artists().get_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
 
-    host.answer_artists(SimHost::UNREACHABLE, "");
+    host.artists().answer(SimHost::UNREACHABLE, "");
 }
 
 static const char* check_artists_page_failed(const SimHost& host, const Shell& shell) {
@@ -3589,7 +3627,7 @@ static const char* check_artists_page_failed(const SimHost& host, const Shell& s
     if (lv_obj_get_scroll_bottom(find_list()) != 0) {
         return "the list is not at its end";
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2}) {
         return "a page that did not come was asked for again without a touch";
     }
 
@@ -3600,7 +3638,7 @@ static const char* check_artists_page_failed(const SimHost& host, const Shell& s
 static void artists_page_retry(SimHost& host, Shell& shell) {
     artists_page_failed(host, shell);
 
-    host.serve_artists(200, make_artist_pages(make_many_artists()));
+    host.artists().serve(200, make_artist_pages(make_many_artists()));
     tap_label(host, shell, MSG_TRY_AGAIN);
 }
 
@@ -3608,7 +3646,7 @@ static const char* check_artists_page_retry(const SimHost& host, const Shell& sh
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 2}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 2}) {
         return "the second page was not asked for again";
     }
 
@@ -3622,21 +3660,21 @@ static constexpr uint32_t LATE_PAGE_MS = after_touches_ms(2);
 // before it does. The page that comes would drop the rows on screen, so it goes instead.
 static void artists_page_late(SimHost& host, Shell& shell) {
     const auto pages = make_artist_pages(make_many_artists());
-    host.serve_artists(200, {pages[0], pages[1]});
+    host.artists().serve(200, {pages[0], pages[1]});
     open_artists(host, shell);
     scroll_list(shell, true);
     scroll_list(shell, true);
 
     host.tap(JUMP.x, JUMP.y);
     tap_label(host, shell, "A", true);
-    host.answer_after(LATE_PAGE_MS, [&host, page = pages[2]]() { host.answer_artists(200, page.c_str()); });
+    host.answer_after(LATE_PAGE_MS, [&host, page = pages[2]]() { host.artists().answer(200, page.c_str()); });
 }
 
 static const char* check_artists_page_late(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3}) {
         return "the third page was not asked for at the end";
     }
 
@@ -3653,17 +3691,17 @@ static const char* check_artists_page_late(const SimHost& host, const Shell& she
 static void artists_page_late_again(SimHost& host, Shell& shell) {
     const auto artists = make_many_artists();
     const auto pages = make_artist_pages(artists);
-    host.serve_artists(200, {pages[0], pages[1]});
+    host.artists().serve(200, {pages[0], pages[1]});
     open_artists(host, shell);
     scroll_list(shell, true);
     scroll_list(shell, true);
 
     scroll_list(shell, false);
-    host.answer_artists(200, pages[2].c_str());
+    host.artists().answer(200, pages[2].c_str());
     shell.update();
     expect(!check_rows(artists, 0, 200), "the third page took the place of the first, which is on screen");
 
-    host.serve_artists(200, pages);
+    host.artists().serve(200, pages);
     scroll_list(shell, true);
 }
 
@@ -3671,7 +3709,7 @@ static const char* check_artists_page_late_again(const SimHost& host, const Shel
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 3}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3, 3}) {
         return "the third page was not asked for again at the end";
     }
 
@@ -3696,7 +3734,7 @@ static constexpr const char* ROW_BEFORE_THIRD_PAGE = "U Artist 199";
 // them, so it goes instead.
 static void artists_page_late_start(SimHost& host, Shell& shell) {
     artists_pages(host, shell);
-    host.serve_artists(200, {});
+    host.artists().serve(200, {});
 
     scroll_list(shell, false);
     lv_obj_update_layout(lv_screen_active());
@@ -3704,7 +3742,7 @@ static void artists_page_late_start(SimHost& host, Shell& shell) {
     expect(row, "the row before the third page is not listed");
     lv_obj_scroll_to_y(find_list(), lv_obj_get_y(row), LV_ANIM_OFF);
 
-    host.answer_artists(200, make_artist_pages(make_many_artists())[0].c_str());
+    host.artists().answer(200, make_artist_pages(make_many_artists())[0].c_str());
     shell.update();
 }
 
@@ -3712,7 +3750,7 @@ static const char* check_artists_page_late_start(const SimHost& host, const Shel
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 1}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3, 1}) {
         return "the first page was not asked for again at the start";
     }
 
@@ -3729,14 +3767,14 @@ static const char* check_artists_page_late_start(const SimHost& host, const Shel
 static void artists_page_late_ask(SimHost& host, Shell& shell) {
     const auto artists = make_many_artists(FOUR_PAGES_OF_ARTISTS);
     const auto pages = make_artist_pages(artists);
-    host.serve_artists(200, {pages[0], pages[1], pages[2]});
+    host.artists().serve(200, {pages[0], pages[1], pages[2]});
     open_artists(host, shell);
     scroll_list(shell, true);
     scroll_list(shell, true);
     scroll_list(shell, true);
 
     const auto top = scroll_list(shell, false);
-    host.answer_artists(200, pages[3].c_str());
+    host.artists().answer(200, pages[3].c_str());
     shell.update();
     shell.update();
     lv_obj_update_layout(lv_screen_active());
@@ -3748,7 +3786,7 @@ static const char* check_artists_page_late_ask(const SimHost& host, const Shell&
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 4, 1}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3, 4, 1}) {
         return "the first page was not asked for at the start once the fourth went";
     }
 
@@ -3759,13 +3797,13 @@ static const char* check_artists_page_late_ask(const SimHost& host, const Shell&
 // the third is not asked for until it is, so no more than two pages are built.
 static void artists_page_unbuilt(SimHost& host, Shell& shell) {
     const auto pages = make_artist_pages(make_many_artists(FOUR_PAGES_OF_ARTISTS));
-    host.serve_artists(200, {pages[0], pages[1]});
+    host.artists().serve(200, {pages[0], pages[1]});
     open_artists(host, shell);
     scroll_list(shell, true);
     scroll_list(shell, true);
 
-    host.answer_artists(200, pages[2].c_str());
-    host.serve_artists(200, pages);
+    host.artists().answer(200, pages[2].c_str());
+    host.artists().serve(200, pages);
     drag_list(false);
     drag_list(true);
     shell.update();
@@ -3775,7 +3813,7 @@ static const char* check_artists_page_unbuilt(const SimHost& host, const Shell& 
     if (const auto problem = check_artists_screen(shell)) {
         return problem;
     }
-    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3}) {
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 2, 3}) {
         return "a page was asked for past one the list was not built with";
     }
 
@@ -3831,7 +3869,7 @@ static const char* check_artists_reconnecting(const SimHost& host, const Shell& 
 static void library_open_reconnecting(SimHost& host, Shell& shell) {
     host.model().stream_state = StreamState::Disconnected;
     host.model().stream_down_since = lv_tick_get() - 10 * 1000;
-    host.serve_artists(200, make_artist_pages(LIBRARY));
+    host.artists().serve(200, make_artist_pages(LIBRARY));
     open_now_playing(host, shell, PLAYING);
 
     shell.update();
@@ -3846,6 +3884,827 @@ static const char* check_library_open_reconnecting(const SimHost& host, const Sh
     }
 
     return check_marker(true);
+}
+
+// An album of a fixture: its title, and the year it was released; 0 for an album without a date.
+struct AlbumFixture {
+    std::string title;
+    int year;
+};
+
+// Where Sigur Rós is in LIBRARY.
+static constexpr size_t SIGUR_ROS = 28;
+
+// Sigur Rós's albums as the backend gives them without a sort: newest first, by release date, the
+// albums without a date last. A U+2010 hyphen, a U+2026 ellipsis, and a title longer than its row.
+static const std::vector<AlbumFixture> ALBUMS = {
+    {"Átta", 2023},
+    {"Kveikur", 2013},
+    {"Valtari", 2012},
+    {"Inni", 2011},
+    {"Með suð í eyrum við spilum endalaust", 2008},
+    {"Hvarf‐Heim", 2007},
+    {"Takk…", 2005},
+    {"( )", 2002},
+    {"Ágætis byrjun", 1999},
+    {"Von", 1997},
+    {"Rarities", 0},
+};
+
+// The answer to GET /api/library/artists/{artist_id}/albums for page `number` of `albums`, of the
+// artist "artist-29", its data the `count` albums from `first`. Every third album has no picture.
+static std::string make_albums_body(const std::vector<AlbumFixture>& albums, size_t first, size_t count,
+                                    uint32_t number) {
+    const auto data = cJSON_CreateArray();
+    for (auto i = first; i < first + count; i++) {
+        const auto album = cJSON_CreateObject();
+        cJSON_AddStringToObject(album, "artist", LIBRARY[SIGUR_ROS].first.c_str());
+        cJSON_AddStringToObject(album, "artist_id", "artist-29");
+
+        if (i % 3) {
+            cJSON_AddStringToObject(album, "artwork_id", ("YWxidW0vIi" + std::to_string(i)).c_str());
+        } else {
+            cJSON_AddNullToObject(album, "artwork_id");
+        }
+
+        cJSON_AddStringToObject(album, "id", ("album-" + std::to_string(i + 1)).c_str());
+        cJSON_AddStringToObject(album, "title", albums[i].title.c_str());
+        cJSON_AddNumberToObject(album, "track_count", 9);
+
+        if (albums[i].year) {
+            cJSON_AddNumberToObject(album, "year", albums[i].year);
+        } else {
+            cJSON_AddNullToObject(album, "year");
+        }
+
+        cJSON_AddItemToArray(data, album);
+    }
+
+    return make_page_body(data, number, albums.size(), "release", "desc");
+}
+
+// The tracks of Kveikur, ALBUMS' second, in disc and track order.
+static const std::vector<std::string> KVEIKUR = {
+    "Yfirborð", "Brennisteinn", "Hrafntinna", "Ísjaki", "Stormur", "Kveikur", "Rafstraumur", "Bláþráður", "Var",
+};
+
+// How many tracks a disc of a fixture holds.
+static constexpr size_t TRACKS_TO_A_DISC = 74;
+
+// The answer to GET /api/library/albums/{album_id}/tracks for page `number` of `titles`, its data
+// the `count` tracks from `first`, TRACKS_TO_A_DISC to a disc.
+static std::string make_tracks_body(const std::vector<std::string>& titles, size_t first, size_t count,
+                                    uint32_t number) {
+    const auto data = cJSON_CreateArray();
+    for (auto i = first; i < first + count; i++) {
+        const auto track = cJSON_CreateObject();
+        cJSON_AddStringToObject(track, "artist", LIBRARY[SIGUR_ROS].first.c_str());
+        cJSON_AddStringToObject(track, "artwork_id", "YWxidW0vIi1");
+        cJSON_AddNumberToObject(track, "disc", double(i / TRACKS_TO_A_DISC + 1));
+        cJSON_AddNumberToObject(track, "duration_ms", double(240000 + i * 1000));
+        cJSON_AddStringToObject(track, "id", ("track-" + std::to_string(i + 1)).c_str());
+        cJSON_AddNumberToObject(track, "number", double(i % TRACKS_TO_A_DISC + 1));
+        cJSON_AddStringToObject(track, "title", titles[i].c_str());
+        cJSON_AddItemToArray(data, track);
+    }
+
+    return make_page_body(data, number, titles.size(), "position", "asc");
+}
+
+// The tracks of an album of two discs and two pages, as large as the largest album the library
+// has.
+static std::vector<std::string> make_many_tracks() {
+    std::vector<std::string> titles;
+    for (size_t i = 0; i < 2 * TRACKS_TO_A_DISC; i++) {
+        char title[32];
+        snprintf(title, sizeof(title), "Track %zu.%02zu", i / TRACKS_TO_A_DISC + 1, i % TRACKS_TO_A_DISC + 1);
+        titles.emplace_back(title);
+    }
+
+    return titles;
+}
+
+// The library's playlists, by title without accents and in one case: an en dash, a U+2010 hyphen,
+// and a title longer than its row.
+static const std::vector<std::string> PLAYLISTS = {
+    "Avondeten",
+    "Friday in the workshop",
+    "Kerst – rustig",
+    "Loud‐ish",
+    "Sunday morning, slow and quiet, with coffee and the paper on the table",
+    "Zomer",
+};
+
+// The answer to GET /api/library/playlists for page `number` of `titles`, its data the `count`
+// playlists from `first`.
+static std::string make_playlists_body(const std::vector<std::string>& titles, size_t first, size_t count,
+                                       uint32_t number) {
+    const auto data = cJSON_CreateArray();
+    for (auto i = first; i < first + count; i++) {
+        const auto playlist = cJSON_CreateObject();
+        cJSON_AddStringToObject(playlist, "artwork_id", ("cGxheWxpc3Qv" + std::to_string(i)).c_str());
+        cJSON_AddNumberToObject(playlist, "duration_ms", double(3600000 + i * 60000));
+        cJSON_AddStringToObject(playlist, "id", ("playlist-" + std::to_string(i + 1)).c_str());
+        cJSON_AddStringToObject(playlist, "title", titles[i].c_str());
+        cJSON_AddNumberToObject(playlist, "track_count", double(12 + i));
+        cJSON_AddItemToArray(data, playlist);
+    }
+
+    return make_page_body(data, number, titles.size(), "title", "asc");
+}
+
+// Pages of albums, tracks or playlists the API's document does not allow, by what is wrong with
+// an item; the page itself is read as an artists' page is, which UNREADABLE_ARTISTS proves.
+static const char* const UNREADABLE_ITEMS[] = {
+    R"({"data":[],"meta":{"page":1,"per_page":20,"total":0}})",
+    R"({"data":["item-1"],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"","title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":7,"title":"Von","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"item-1","year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"item-1","title":null,"year":1997}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"item-1","title":"Von","year":1997},{"id":"item-2","year":1999}],)"
+    R"("meta":{"page":1,"per_page":100,"total":2}})",
+};
+
+// Albums the API's document does not allow, by their year.
+static const char* const UNREADABLE_ALBUMS[] = {
+    R"({"data":[{"id":"album-1","title":"Von"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"album-1","title":"Von","year":"1997"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"album-1","title":"Von","year":1997.5}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"album-1","title":"Von","year":true}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"album-1","title":"Von","year":1e30}],"meta":{"page":1,"per_page":100,"total":1}})",
+};
+
+// Every one of `bodies` is refused whole, as a 200 and as an error's body, which then gives no
+// message; `allowed`, a page of one item, is taken whatever the display does not show holds.
+template <typename Item>
+static void expect_refused(const char* (*read)(int status, const char* body, size_t length, Page<Item>& page),
+                           const char* allowed, const std::vector<const char*>& bodies) {
+    Page<Item> page;
+    expect(!read(200, allowed, strlen(allowed), page) && page.items.size() == 1,
+           "a page was refused for what the display does not show");
+
+    for (const auto body : bodies) {
+        page = {};
+        expect(read(200, body, strlen(body), page) && page.state == LoadState::Failed && page.items.empty() &&
+                   page.error.empty(),
+               "an unreadable page was not refused");
+
+        page = {};
+        expect(read(502, body, strlen(body), page) && page.state == LoadState::Failed && page.error.empty(),
+               "an unreadable error body gave a message");
+    }
+}
+
+// Where the artists screen's playlists button is, and the second and third rows of a list.
+static constexpr lv_point_t PLAYLISTS_BUTTON = {728, 328};
+static constexpr lv_point_t SECOND_ROW = {344, 212};
+static constexpr lv_point_t THIRD_ROW = {344, 292};
+
+// Touches the row of the list on screen whose title is this, scrolled into view first.
+static void tap_row(SimHost& host, Shell& shell, const char* title) {
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+
+    const auto list = find_list();
+    expect(list, "no list is on screen");
+
+    std::vector<lv_obj_t*> found;
+    find_labels(list, title, found);
+    expect(found.size() == 1, "the row to touch is not listed");
+
+    const auto row = lv_obj_get_parent(found[0]);
+    lv_obj_scroll_to_view(row, LV_ANIM_OFF);
+    lv_obj_update_layout(lv_screen_active());
+
+    lv_area_t area;
+    lv_obj_get_coords(row, &area);
+    host.tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
+}
+
+// The label of the heading of the screen on top, which the headline's font draws.
+static lv_obj_t* find_heading(lv_obj_t* obj) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return nullptr;
+    }
+    if (lv_obj_check_type(obj, &lv_label_class) &&
+        lv_obj_get_style_text_font(obj, LV_PART_MAIN) == Theme::FONT_HEADLINE) {
+        return obj;
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        if (const auto found = find_heading(lv_obj_get_child(obj, int32_t(i)))) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+static const char* check_heading(const char* title) {
+    const auto heading = find_heading(lv_screen_active());
+
+    return heading && !strcmp(lv_label_get_text(heading), title) ? nullptr : "the heading is not the item's title";
+}
+
+// The screen of type T is on top of `views` views, with the bar under it.
+template <typename T>
+static const char* check_screen(const Shell& shell, size_t views) {
+    if (!shows<T>(shell)) {
+        return "the display is not on the screen the scene opens";
+    }
+    if (!shell.shows_bar()) {
+        return "the screen does not show the bar";
+    }
+
+    return shell.count_views() == views ? nullptr : "the screen is not over the screens it was opened from";
+}
+
+static const char* check_says_unreachable() {
+    return says(MSG_BACKEND_UNREACHABLE) && says(MSG_TRY_AGAIN) ? nullptr
+                                                                : "the screen does not say why, with a way to retry";
+}
+
+static const char* check_says_failed() {
+    return says(MSG_BACKEND_FAILED) && says(MSG_TRY_AGAIN) ? nullptr
+                                                           : "the screen does not say why, with a way to retry";
+}
+
+static std::vector<std::string> get_album_titles() {
+    std::vector<std::string> titles;
+    for (const auto& album : ALBUMS) {
+        titles.push_back(album.title);
+    }
+
+    return titles;
+}
+
+// The library open, and a press on Sigur Rós.
+static void open_albums(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    tap_row(host, shell, LIBRARY[SIGUR_ROS].first.c_str());
+}
+
+// A press on an artist opens its albums, newest first, each with its year, over the artists.
+static void albums(SimHost& host, Shell& shell) {
+    Page<Album> page;
+    const auto body = make_pages(ALBUMS, make_albums_body)[0];
+    expect(!read_albums(200, body.c_str(), body.length(), page), "the albums fixture was not read as a page");
+    expect(page.items.size() == ALBUMS.size() &&
+               page.items[0] == Album{.id = "album-1", .title = "Átta", .year = 2023} &&
+               page.items[10] == Album{.id = "album-11", .title = "Rarities", .year = std::nullopt},
+           "the albums fixture's albums were not read as they are");
+
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_albums(host, shell);
+}
+
+// The rows are the albums, in the backend's order, each with its year where it has one.
+static const char* check_album_rows() {
+    if (const auto problem = check_titles(get_album_titles(), 0, ALBUMS.size())) {
+        return problem;
+    }
+
+    const auto rows = get_rows(find_list());
+    for (size_t i = 0; i < ALBUMS.size(); i++) {
+        const auto year = ALBUMS[i].year;
+        const auto shown = lv_obj_get_child_count(rows[i]) == 2 ? lv_label_get_text(lv_obj_get_child(rows[i], 1)) : "";
+        if (year ? shown != std::to_string(year) : lv_obj_get_child_count(rows[i]) != 1) {
+            return "an album's row does not show its year, or shows one it has not";
+        }
+    }
+
+    return nullptr;
+}
+
+static const char* check_albums_asked(const SimHost& host, const char* artist_id) {
+    if (host.albums().get_requests() != std::vector<uint32_t>{1} ||
+        host.albums().get_parent_ids() != std::vector<std::string>{artist_id}) {
+        return "the artist's albums were not asked for once, from the first page";
+    }
+
+    return nullptr;
+}
+
+static const char* check_albums(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (const auto problem = check_albums_asked(host, "artist-29")) {
+        return problem;
+    }
+    if (const auto problem = check_heading(LIBRARY[SIGUR_ROS].first.c_str())) {
+        return problem;
+    }
+
+    return check_album_rows();
+}
+
+static void albums_loading(SimHost& host, Shell& shell) { open_albums(host, shell); }
+
+static const char* check_albums_loading(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (!says(MSG_ALBUMS_LOADING)) {
+        return "the screen does not say that the albums are on their way";
+    }
+
+    return check_albums_asked(host, "artist-29");
+}
+
+static void albums_unreachable(SimHost& host, Shell& shell) {
+    host.albums().serve(SimHost::UNREACHABLE, {""});
+
+    open_albums(host, shell);
+}
+
+static const char* check_albums_unreachable(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+
+    return check_says_unreachable();
+}
+
+static void albums_error(SimHost& host, Shell& shell) {
+    host.albums().serve(502, {ERROR_PLEX});
+
+    open_albums(host, shell);
+}
+
+static const char* check_albums_error(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+
+    return check_says_failed();
+}
+
+// Every page of albums the API's document does not allow is refused whole.
+static void albums_unreadable(SimHost& host, Shell& shell) {
+    std::vector<const char*> bodies(std::begin(UNREADABLE_ITEMS), std::end(UNREADABLE_ITEMS));
+    bodies.insert(bodies.end(), std::begin(UNREADABLE_ALBUMS), std::end(UNREADABLE_ALBUMS));
+
+    const auto allowed = R"({"data":[{"artist":7,"artwork_id":7,"id":"album-1","label":"Smekkleysa",)"
+                         R"("title":"Von","track_count":"nine","year":null}],)"
+                         R"("meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
+    expect_refused(read_albums, allowed, bodies);
+
+    Page<Album> page;
+    read_albums(200, allowed, strlen(allowed), page);
+    expect(page.items[0] == Album{.id = "album-1", .title = "Von", .year = std::nullopt},
+           "an album without a date was not read as one");
+
+    host.albums().serve(200, {bodies.back()});
+    open_albums(host, shell);
+}
+
+static void albums_empty(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(std::vector<AlbumFixture>{}, make_albums_body));
+
+    open_albums(host, shell);
+}
+
+static const char* check_albums_empty(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+
+    return says(MSG_ALBUMS_EMPTY) ? nullptr : "the screen does not say that the artist has no albums";
+}
+
+// The albums' end: the album without a date shows no year.
+static void albums_end(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_now_playing(host, shell, PLAYING);
+    shell.push(std::make_unique<AlbumsView>(&host, &shell, Artist{.id = "artist-29", .title = "Sigur Rós"}));
+
+    scroll_list(shell, true);
+}
+
+static const char* check_albums_end(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_albums_asked(host, "artist-29")) {
+        return problem;
+    }
+    if (lv_obj_get_scroll_bottom(find_list()) != 0) {
+        return "the list is not at its end";
+    }
+
+    return check_album_rows();
+}
+
+// The back button closes the albums, and the artists are as they were.
+static void albums_back(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_albums(host, shell);
+
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_albums_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_rows(LIBRARY, 0, LIBRARY.size());
+}
+
+// The albums of the artist with the longest name, on their way: its name is the heading, cut where
+// the heading ends.
+static void albums_long_name(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(THIRD_ROW.x, THIRD_ROW.y);
+}
+
+// The heading's title is cut with dots, and runs to the heading's end, or, while the marker shows,
+// ends a gap before it.
+static const char* check_long_heading(bool marker) {
+    lv_obj_update_layout(lv_screen_active());
+
+    const auto heading = find_heading(lv_screen_active());
+    if (!heading || !std::string(lv_label_get_text(heading)).ends_with("...")) {
+        return "the long heading is not cut with dots";
+    }
+
+    lv_area_t area;
+    lv_obj_get_coords(heading, &area);
+    if (!marker) {
+        return area.x2 == 800 - Theme::PADDING - 1 ? nullptr : "the heading does not run to its row's end";
+    }
+
+    std::vector<lv_obj_t*> found;
+    find_labels(lv_screen_active(), MSG_RECONNECTING, found);
+    if (found.size() != 1) {
+        return "the marker does not show";
+    }
+
+    lv_area_t marker_area;
+    lv_obj_get_coords(lv_obj_get_parent(found[0]), &marker_area);
+
+    return area.x2 + 1 + Theme::GAP <= marker_area.x1 ? nullptr : "the heading runs under the marker";
+}
+
+static const char* check_albums_long_name(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (const auto problem = check_albums_asked(host, "artist-3")) {
+        return problem;
+    }
+
+    return check_long_heading(false);
+}
+
+static void albums_reconnecting(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+
+    albums_long_name(host, shell);
+}
+
+static const char* check_albums_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (const auto problem = check_marker(true)) {
+        return problem;
+    }
+
+    return check_long_heading(true);
+}
+
+// The marker goes, and the heading takes its room again.
+static void albums_reconnected(SimHost& host, Shell& shell) {
+    albums_reconnecting(host, shell);
+
+    host.answer_after(SimHost::TAP_INTERVAL_MS, [&host] {
+        host.model().stream_state = StreamState::Connected;
+        host.model().revision++;
+    });
+}
+
+static const char* check_albums_reconnected(const SimHost& host, const Shell& shell) {
+    if (says(MSG_RECONNECTING)) {
+        return "the marker still shows";
+    }
+
+    return check_albums_long_name(host, shell);
+}
+
+// A press on a row of a list built from the second and third pages of the artists, past the state
+// of the first: the row's own artist opens.
+static void artists_pages_open(SimHost& host, Shell& shell) {
+    artists_pages(host, shell);
+
+    tap_row(host, shell, "Z Artist 250");
+}
+
+static const char* check_artists_pages_open(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (const auto problem = check_heading("Z Artist 250")) {
+        return problem;
+    }
+
+    return check_albums_asked(host, "artist-250");
+}
+
+// A press on an album opens its tracks, in disc and track order, over its artist's albums.
+static void tracks(SimHost& host, Shell& shell) {
+    Page<AlbumTrack> page;
+    const auto body = make_pages(KVEIKUR, make_tracks_body)[0];
+    expect(!read_tracks(200, body.c_str(), body.length(), page), "the tracks fixture was not read as a page");
+    expect(page.items.size() == KVEIKUR.size() && page.items[3] == AlbumTrack{.id = "track-4", .title = "Ísjaki"},
+           "the tracks fixture's tracks were not read as they are");
+
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_albums(host, shell);
+
+    host.tap(SECOND_ROW.x, SECOND_ROW.y);
+}
+
+static const char* check_tracks(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 4)) {
+        return problem;
+    }
+    if (host.tracks().get_requests() != std::vector<uint32_t>{1} ||
+        host.tracks().get_parent_ids() != std::vector<std::string>{"album-2"}) {
+        return "the album's tracks were not asked for once, from the first page";
+    }
+    if (const auto problem = check_heading("Kveikur")) {
+        return problem;
+    }
+
+    return check_titles(KVEIKUR, 0, KVEIKUR.size());
+}
+
+// The tracks screen of an album the scene's host answers for, over the now-playing screen.
+static void open_tracks(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+
+    shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-12", .title = "Complete Recordings"}));
+}
+
+// An album of 148 tracks: the first page, and scrolled to its end, the second, after the first.
+static void tracks_pages(SimHost& host, Shell& shell) {
+    const auto many = make_many_tracks();
+    host.tracks().serve(200, make_pages(many, make_tracks_body));
+    open_tracks(host, shell);
+
+    shell.update();
+    expect(!check_titles(many, 0, PAGE_SIZE), "the first page of the tracks is not listed");
+
+    expect_in_place(scroll_list(shell, true), "the row at the top moved as the second page came");
+}
+
+static const char* check_tracks_pages(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+    if (host.tracks().get_requests() != std::vector<uint32_t>{1, 2} ||
+        host.tracks().get_parent_ids() != std::vector<std::string>{"album-12", "album-12"}) {
+        return "the album's two pages were not asked for one by one";
+    }
+
+    const auto many = make_many_tracks();
+
+    return check_titles(many, 0, many.size());
+}
+
+static void tracks_loading(SimHost& host, Shell& shell) { open_tracks(host, shell); }
+
+static const char* check_tracks_loading(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+
+    return says(MSG_TRACKS_LOADING) ? nullptr : "the screen does not say that the tracks are on their way";
+}
+
+static void tracks_unreachable(SimHost& host, Shell& shell) {
+    host.tracks().serve(SimHost::UNREACHABLE, {""});
+
+    open_tracks(host, shell);
+}
+
+static const char* check_tracks_unreachable(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_says_unreachable();
+}
+
+static void tracks_error(SimHost& host, Shell& shell) {
+    host.tracks().serve(502, {ERROR_PLEX});
+
+    open_tracks(host, shell);
+}
+
+static const char* check_tracks_error(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_says_failed();
+}
+
+// Every page of tracks the API's document does not allow is refused whole.
+static void tracks_unreadable(SimHost& host, Shell& shell) {
+    const std::vector<const char*> bodies(std::begin(UNREADABLE_ITEMS), std::end(UNREADABLE_ITEMS));
+    const auto allowed = R"({"data":[{"artist":null,"disc":"one","duration_ms":-1,"id":"track-1","number":null,)"
+                         R"("title":"Von"}],"meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
+    expect_refused(read_tracks, allowed, bodies);
+
+    host.tracks().serve(200, {bodies.back()});
+    open_tracks(host, shell);
+}
+
+static void tracks_empty(SimHost& host, Shell& shell) {
+    host.tracks().serve(200, make_pages(std::vector<std::string>{}, make_tracks_body));
+
+    open_tracks(host, shell);
+}
+
+static const char* check_tracks_empty(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+
+    return says(MSG_TRACKS_EMPTY) ? nullptr : "the screen does not say that the album has no tracks";
+}
+
+// The back button closes the tracks, and the albums are as they were.
+static void tracks_back(SimHost& host, Shell& shell) {
+    tracks(host, shell);
+
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_tracks_back(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+
+    return check_album_rows();
+}
+
+// A touch on the bar's texts, from the tracks, three screens over the now-playing screen.
+static void tracks_bar_texts(SimHost& host, Shell& shell) {
+    tracks(host, shell);
+
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+// The button under the artists' letters opens the playlists, over the artists.
+static void playlists(SimHost& host, Shell& shell) {
+    Page<Playlist> page;
+    const auto body = make_pages(PLAYLISTS, make_playlists_body)[0];
+    expect(!read_playlists(200, body.c_str(), body.length(), page), "the playlists fixture was not read as a page");
+    expect(page.items.size() == PLAYLISTS.size() &&
+               page.items[2] == Playlist{.id = "playlist-3", .title = "Kerst – rustig"},
+           "the playlists fixture's playlists were not read as they are");
+
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_library(host, shell, LIBRARY);
+
+    host.tap(PLAYLISTS_BUTTON.x, PLAYLISTS_BUTTON.y);
+}
+
+static const char* check_playlists(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 3)) {
+        return problem;
+    }
+    if (host.playlists().get_requests() != std::vector<uint32_t>{1}) {
+        return "the playlists were not asked for once, from the first page";
+    }
+    if (const auto problem = check_heading(MSG_PLAYLISTS)) {
+        return problem;
+    }
+
+    return check_titles(PLAYLISTS, 0, PLAYLISTS.size());
+}
+
+// A playlist is never opened: the backend does not list its tracks.
+static void playlists_row(SimHost& host, Shell& shell) {
+    playlists(host, shell);
+
+    host.tap(SECOND_ROW.x, SECOND_ROW.y);
+}
+
+static const char* check_playlists_row(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_playlists(host, shell)) {
+        return problem;
+    }
+
+    return host.tracks().get_requests().empty() && host.albums().get_requests().empty()
+               ? nullptr
+               : "a press on a playlist asked for a list";
+}
+
+// The playlists are reached whatever came of the artists.
+static void playlists_artists_failed(SimHost& host, Shell& shell) {
+    host.artists().serve(SimHost::UNREACHABLE, {""});
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_artists(host, shell);
+    shell.update();
+    expect(!check_says_unreachable(), "the artists screen does not say that the artists did not come");
+
+    host.tap(PLAYLISTS_BUTTON.x, PLAYLISTS_BUTTON.y);
+}
+
+// The playlists screen over the now-playing screen.
+static void open_playlists(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+
+    shell.push(std::make_unique<PlaylistsView>(&host, &shell));
+}
+
+static void playlists_loading(SimHost& host, Shell& shell) { open_playlists(host, shell); }
+
+static const char* check_playlists_loading(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+
+    return says(MSG_PLAYLISTS_LOADING) ? nullptr : "the screen does not say that the playlists are on their way";
+}
+
+static void playlists_unreachable(SimHost& host, Shell& shell) {
+    host.playlists().serve(SimHost::UNREACHABLE, {""});
+
+    open_playlists(host, shell);
+}
+
+static const char* check_playlists_unreachable(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_says_unreachable();
+}
+
+static void playlists_error(SimHost& host, Shell& shell) {
+    host.playlists().serve(502, {ERROR_PLEX});
+
+    open_playlists(host, shell);
+}
+
+static const char* check_playlists_error(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_says_failed();
+}
+
+// Every page of playlists the API's document does not allow is refused whole.
+static void playlists_unreadable(SimHost& host, Shell& shell) {
+    const std::vector<const char*> bodies(std::begin(UNREADABLE_ITEMS), std::end(UNREADABLE_ITEMS));
+    const auto allowed = R"({"data":[{"artwork_id":null,"duration_ms":null,"id":"playlist-1","title":"Zomer",)"
+                         R"("track_count":-1}],"meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
+    expect_refused(read_playlists, allowed, bodies);
+
+    host.playlists().serve(200, {bodies.back()});
+    open_playlists(host, shell);
+}
+
+static void playlists_empty(SimHost& host, Shell& shell) {
+    host.playlists().serve(200, make_pages(std::vector<std::string>{}, make_playlists_body));
+
+    open_playlists(host, shell);
+}
+
+static const char* check_playlists_empty(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+
+    return says(MSG_PLAYLISTS_EMPTY) ? nullptr : "the screen does not say that the library has no playlists";
+}
+
+// The back button closes the playlists, back to the artists.
+static void playlists_back(SimHost& host, Shell& shell) {
+    playlists(host, shell);
+
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_playlists_back(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_rows(LIBRARY, 0, LIBRARY.size());
 }
 
 const std::vector<Scene>& get_scenes() {
@@ -3971,6 +4830,36 @@ const std::vector<Scene>& get_scenes() {
         {"artists-bar-texts", artists_bar_texts, check_bar_opened},
         {"artists-reconnecting", artists_reconnecting, check_artists_reconnecting},
         {"library-open-reconnecting", library_open_reconnecting, check_library_open_reconnecting},
+        {"artists-pages-open", artists_pages_open, check_artists_pages_open},
+        {"albums", albums, check_albums},
+        {"albums-loading", albums_loading, check_albums_loading},
+        {"albums-unreachable", albums_unreachable, check_albums_unreachable},
+        {"albums-error", albums_error, check_albums_error},
+        {"albums-unreadable", albums_unreadable, check_albums_error},
+        {"albums-empty", albums_empty, check_albums_empty},
+        {"albums-end", albums_end, check_albums_end},
+        {"albums-back", albums_back, check_albums_back, after_touches_ms(2)},
+        {"albums-long-name", albums_long_name, check_albums_long_name},
+        {"albums-reconnecting", albums_reconnecting, check_albums_reconnecting},
+        {"albums-reconnected", albums_reconnected, check_albums_reconnected, after_touches_ms(2)},
+        {"tracks", tracks, check_tracks, after_touches_ms(2)},
+        {"tracks-pages", tracks_pages, check_tracks_pages},
+        {"tracks-loading", tracks_loading, check_tracks_loading},
+        {"tracks-unreachable", tracks_unreachable, check_tracks_unreachable},
+        {"tracks-error", tracks_error, check_tracks_error},
+        {"tracks-unreadable", tracks_unreadable, check_tracks_error},
+        {"tracks-empty", tracks_empty, check_tracks_empty},
+        {"tracks-back", tracks_back, check_tracks_back, after_touches_ms(3)},
+        {"tracks-bar-texts", tracks_bar_texts, check_bar_opened, after_touches_ms(3)},
+        {"playlists", playlists, check_playlists},
+        {"playlists-row", playlists_row, check_playlists_row, after_touches_ms(2)},
+        {"playlists-artists-failed", playlists_artists_failed, check_playlists},
+        {"playlists-loading", playlists_loading, check_playlists_loading},
+        {"playlists-unreachable", playlists_unreachable, check_playlists_unreachable},
+        {"playlists-error", playlists_error, check_playlists_error},
+        {"playlists-unreadable", playlists_unreadable, check_playlists_error},
+        {"playlists-empty", playlists_empty, check_playlists_empty},
+        {"playlists-back", playlists_back, check_playlists_back, after_touches_ms(2)},
     };
 
     return scenes;

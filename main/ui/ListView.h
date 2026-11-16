@@ -1,8 +1,9 @@
 #pragma once
 
 // A screen of a list the backend gives in pages: a heading with a way back, and under it a row
-// for every item held. A subclass holds the pages (PagedList), asks the host for one, and builds an
-// item's row.
+// for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
+// item's row, and opens an item whose row it made openable. While the Shell's "Reconnecting"
+// marker shows at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -22,6 +23,7 @@ class Shell;
 
 class ListView : public View {
     std::string _title;
+    lv_obj_t* _heading{};
     // Where the list, or what is said instead, is built.
     lv_obj_t* _content{};
     lv_obj_t* _list{};
@@ -57,6 +59,16 @@ protected:
     // Builds the row of the item held at `index` in `row`, a flex row the list made.
     virtual void build_row(lv_obj_t* row, size_t index) = 0;
 
+    // Opens the item held at `index`, on a press on its row, which build_row() made openable.
+    virtual void open_row(size_t index) {}
+
+    // Has a press on this row, which build_row() was handed, call open_row(). The list still
+    // scrolls with a drag that starts on it.
+    void make_openable(lv_obj_t* row);
+
+    // A row's title, which takes the room the row has left and is cut where it ends.
+    static void create_row_title(lv_obj_t* row, const std::string& title);
+
     // What the screen says while the first page is on its way, and when the list is empty.
     virtual const char* get_loading_message() const = 0;
     virtual const char* get_empty_message() const = 0;
@@ -79,6 +91,7 @@ protected:
     void scroll_to_row(size_t index);
 
 private:
+    void fit_heading();
     void ask(uint32_t page);
     void build();
     void build_loading();
@@ -88,5 +101,6 @@ private:
     void ask_near_ends();
     static void back_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
+    static void row_clicked(lv_event_t* event);
     static void scrolled(lv_event_t* event);
 };

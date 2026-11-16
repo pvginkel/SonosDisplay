@@ -61,6 +61,20 @@ public:
     virtual void request_artists(uint32_t number, std::weak_ptr<void> scope,
                                  std::function<void(Page<Artist>)> done) = 0;
 
+    // Asks, as request_artists() does, for a page of the albums of the artist with this id, newest
+    // first, as playing the artist queues them.
+    virtual void request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
+                                std::function<void(Page<Album>)> done) = 0;
+
+    // Asks, as request_artists() does, for a page of the tracks of the album with this id, in disc
+    // and track order.
+    virtual void request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
+                                std::function<void(Page<AlbumTrack>)> done) = 0;
+
+    // Asks, as request_artists() does, for a page of the library's playlists.
+    virtual void request_playlists(uint32_t number, std::weak_ptr<void> scope,
+                                   std::function<void(Page<Playlist>)> done) = 0;
+
     // Asks for the picture with this id, `size` by `size` pixels. `done` runs with it once the
     // host has it, which is before this returns for one it has already, and may be much later:
     // nothing is fetched while the screen is dark. It runs with nullptr when the backend did not

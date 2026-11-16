@@ -3,13 +3,17 @@
 // UiHost on fixtures: what the device gets from IoT Support and the backend, made up.
 
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "UiHost.h"
+#include "api/Answers.h"
 #include "api/Artwork.h"
 #include "lvgl.h"
 
@@ -32,6 +36,97 @@ struct GroupChangeRequest {
 };
 
 class SimHost : public UiHost {
+public:
+    // The status of an answer that did not come: the backend could not be reached.
+    static constexpr int UNREACHABLE = 0;
+
+    // A list the backend gives in pages: what the backend answers a request for one of its pages,
+    // and the requests the views made.
+    template <typename Item>
+    class ListFixture {
+    public:
+        using Reader = const char* (*)(int status, const char* body, size_t length, Page<Item>& page);
+
+    private:
+        struct Request {
+            uint32_t number;
+            std::weak_ptr<void> scope;
+            std::function<void(Page<Item>)> done;
+        };
+
+        const char* _name;
+        Reader _read;
+        std::optional<int> _status;
+        std::vector<std::string> _pages;
+        std::vector<uint32_t> _requests;
+        std::vector<std::string> _parent_ids;
+        std::vector<Request> _held;
+
+    public:
+        ListFixture(const char* name, Reader read) : _name(name), _read(read) {}
+
+        // What the backend answers a request for page n from here on: the nth of `pages`, with
+        // `status`, read as the device reads it. A request for a page past them stays on its way
+        // until answer(); without this, every request does.
+        void serve(int status, std::vector<std::string> pages) {
+            _status = status;
+            _pages = std::move(pages);
+        }
+
+        // The backend's answer to the oldest request on its way, read as the device reads it. As
+        // on the device, the answer to a view that is gone is dropped.
+        void answer(int status, const char* body) {
+            if (_held.empty()) {
+                fprintf(stderr, "render: the %s were answered, and none were asked for\n", _name);
+                exit(1);
+            }
+
+            const auto request = std::move(_held.front());
+            _held.erase(_held.begin());
+
+            answer(request, status, body);
+        }
+
+        // The pages the views asked for, in order.
+        const std::vector<uint32_t>& get_requests() const { return _requests; }
+
+        // The id of the artist or the album whose list each request was for, in order: empty for a
+        // list of the library's.
+        const std::vector<std::string>& get_parent_ids() const { return _parent_ids; }
+
+        // A view asks for page `number` of the list of the artist or album with this id.
+        void request(std::string parent_id, uint32_t number, std::weak_ptr<void> scope,
+                     std::function<void(Page<Item>)> done) {
+            _requests.push_back(number);
+            _parent_ids.push_back(std::move(parent_id));
+
+            Request request{number, std::move(scope), std::move(done)};
+            if (_status && number >= 1 && number <= _pages.size()) {
+                answer(request, *_status, _pages[number - 1].c_str());
+            } else {
+                _held.push_back(std::move(request));
+            }
+        }
+
+    private:
+        void answer(const Request& request, int status, const char* body) const {
+            if (request.scope.expired()) {
+                return;
+            }
+
+            Page<Item> page;
+            if (status == UNREACHABLE) {
+                page.state = LoadState::Unreachable;
+            } else if (const auto problem = _read(status, body, strlen(body), page)) {
+                printf("W (SimHost) GET %s page %u answered %d, %s: %s\n", _name, unsigned(request.number), status,
+                       problem, page.error.c_str());
+            }
+
+            request.done(std::move(page));
+        }
+    };
+
+private:
     struct Answer {
         int status;
         std::string body;
@@ -46,13 +141,6 @@ class SimHost : public UiHost {
     struct ArtworkAnswer {
         int status;
         std::vector<uint8_t> body;
-    };
-
-    // A request for a page of the artists, on its way.
-    struct ArtistRequest {
-        uint32_t number;
-        std::weak_ptr<void> scope;
-        std::function<void(Page<Artist>)> done;
     };
 
     Model _model;
@@ -77,17 +165,14 @@ class SimHost : public UiHost {
     bool _artwork_held{};
     bool _artwork_reachable{true};
     std::vector<ArtworkRequest> _held_artwork;
-    std::optional<int> _artists_status;
-    std::vector<std::string> _artist_pages;
-    std::vector<uint32_t> _artist_requests;
-    std::vector<ArtistRequest> _held_artists;
+    ListFixture<Artist> _artists{"artists", read_artists};
+    ListFixture<Album> _albums{"albums", read_albums};
+    ListFixture<AlbumTrack> _tracks{"tracks", read_tracks};
+    ListFixture<Playlist> _playlists{"playlists", read_playlists};
 
 public:
     // From one of a scene's touches to the next: what the first one changed is on screen by then.
     static constexpr uint32_t TAP_INTERVAL_MS = 200;
-
-    // The status of an answer that did not come: the backend could not be reached.
-    static constexpr int UNREACHABLE = 0;
 
     SimHost();
 
@@ -102,6 +187,12 @@ public:
     void add_to_group(const std::string& speaker_id) override;
     void remove_from_group(const std::string& speaker_id) override;
     void request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) override;
+    void request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
+                        std::function<void(Page<Album>)> done) override;
+    void request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
+                        std::function<void(Page<AlbumTrack>)> done) override;
+    void request_playlists(uint32_t number, std::weak_ptr<void> scope,
+                           std::function<void(Page<Playlist>)> done) override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
@@ -177,20 +268,15 @@ public:
     // them.
     const std::vector<std::string>& get_volume_change_bodies() const { return _volume_change_bodies; }
 
-    // What the backend answers a request for page n of the artists from here on: the nth of
-    // `pages`, with `status`, read as the device reads it. A request for a page past them stays on
-    // its way until answer_artists(); without this, every request does.
-    void serve_artists(int status, std::vector<std::string> pages) {
-        _artists_status = status;
-        _artist_pages = std::move(pages);
-    }
-
-    // The backend's answer to the oldest request for the artists on its way, read as the device
-    // reads it. As on the device, the answer to a view that is gone is dropped.
-    void answer_artists(int status, const char* body);
-
-    // The pages of the artists the views asked for, in order.
-    const std::vector<uint32_t>& get_artist_requests() const { return _artist_requests; }
+    // The library's lists.
+    ListFixture<Artist>& artists() { return _artists; }
+    const ListFixture<Artist>& artists() const { return _artists; }
+    ListFixture<Album>& albums() { return _albums; }
+    const ListFixture<Album>& albums() const { return _albums; }
+    ListFixture<AlbumTrack>& tracks() { return _tracks; }
+    const ListFixture<AlbumTrack>& tracks() const { return _tracks; }
+    ListFixture<Playlist>& playlists() { return _playlists; }
+    const ListFixture<Playlist>& playlists() const { return _playlists; }
 
     // What the backend answers a request for artwork with: LVGL 9's binary image, a deterministic
     // pattern of two colours that the id decides, `size` by `size` pixels.
@@ -247,5 +333,4 @@ private:
     void group_change_answered(const UnansweredGroupChange& change, int status, const char* body);
     void fetch_artwork(ArtworkRequest&& request);
     void answer_artwork(const ArtworkRequest& request);
-    static void answer_artist_request(const ArtistRequest& request, int status, const char* body);
 };

@@ -35,13 +35,14 @@ void ListView::do_render(lv_obj_t* parent) {
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
 
     // The heading at the left: the Shell's "Reconnecting" marker shows at the right of this row.
-    auto header = lv_container_create(column);
-    lv_obj_set_size(header, LV_PCT(100), HEADER_HEIGHT);
-    lv_obj_set_style_pad_column(header, Theme::GAP, LV_PART_MAIN);
-    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    _heading = lv_container_create(column);
+    lv_obj_set_size(_heading, LV_PCT(100), HEADER_HEIGHT);
+    lv_obj_set_style_pad_column(_heading, Theme::GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(_heading, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(_heading, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    fit_heading();
 
-    auto back = lv_container_create(header);
+    auto back = lv_container_create(_heading);
     lv_obj_set_size(back, BACK_SIZE, BACK_SIZE);
     lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(back, Theme::color(Theme::SURFACE), LV_PART_MAIN);
@@ -56,7 +57,7 @@ void ListView::do_render(lv_obj_t* parent) {
     lv_obj_set_style_text_color(back_icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
     lv_obj_center(back_icon);
 
-    auto title = lv_label_create(header);
+    auto title = lv_label_create(_heading);
     lv_obj_set_flex_grow(title, 1);
     lv_obj_set_height(title, lv_font_get_line_height(Theme::FONT_HEADLINE));
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
@@ -85,12 +86,25 @@ void ListView::do_render(lv_obj_t* parent) {
 }
 
 void ListView::do_update() {
+    fit_heading();
+
     // Not under a finger that scrolls the list: its rows would go, and the scroll with them.
     if (!_changed || (_list && lv_obj_is_scrolling(_list))) {
         return;
     }
 
     build();
+}
+
+// The heading ends a gap before the marker, whose reach is from the screen's edge, where the
+// heading's is from the view's padding.
+void ListView::fit_heading() {
+    const auto reach = _shell->get_marker_reach();
+    const auto room = reach ? reach + Theme::GAP - Theme::PADDING : 0;
+
+    if (room != lv_obj_get_style_pad_right(_heading, LV_PART_MAIN)) {
+        lv_obj_set_style_pad_right(_heading, room, LV_PART_MAIN);
+    }
 }
 
 // With pages held, the spinner past them shows already, unless the page did not come before. The
@@ -349,6 +363,21 @@ void ListView::build_page_state(uint32_t page) {
     create_retry(state, retry_clicked, this);
 }
 
+void ListView::make_openable(lv_obj_t* row) {
+    lv_obj_add_flag(row, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(row, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_add_event_cb(row, row_clicked, LV_EVENT_CLICKED, this);
+}
+
+void ListView::create_row_title(lv_obj_t* row, const std::string& title) {
+    auto label = lv_label_create(row);
+    lv_obj_set_flex_grow(label, 1);
+    lv_obj_set_height(label, lv_font_get_line_height(Theme::FONT_BODY_LARGE));
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(label, Theme::FONT_BODY_LARGE, LV_PART_MAIN);
+    lv_label_set_text(label, title.c_str());
+}
+
 void ListView::scroll_to_row(size_t index) {
     const auto row = lv_obj_get_child(_list, int32_t(_first_row_child + index));
 
@@ -388,6 +417,17 @@ void ListView::retry_clicked(lv_event_t* event) {
     auto self = (ListView*)lv_event_get_user_data(event);
 
     self->ask(self->get_pages().asked);
+}
+
+// A page that came beside the rows may have moved the items held since the list was built, so the
+// row's place in the whole list finds its item. No page is dropped but as the list is built, so
+// the item of every row built is held.
+void ListView::row_clicked(lv_event_t* event) {
+    auto self = (ListView*)lv_event_get_user_data(event);
+    const auto row = lv_event_get_current_target_obj(event);
+    const auto place = self->_first_index + uint32_t(lv_obj_get_index(row)) - self->_first_row_child;
+
+    self->open_row(place - self->get_pages().first_index());
 }
 
 void ListView::scrolled(lv_event_t* event) {

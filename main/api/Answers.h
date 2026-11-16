@@ -45,5 +45,18 @@ const char* read_volume_change(int status, const char* body, size_t length, Volu
 // the backend said went wrong, where it said so.
 const char* read_artists(int status, const char* body, size_t length, Page<Artist>& page);
 
+// Reads the answer to GET /api/library/artists/{artist_id}/albums, asked for with `per_page`
+// PAGE_SIZE and no sort, as read_artists() reads the artists: the albums newest first, by release
+// date, as playing the artist queues them.
+const char* read_albums(int status, const char* body, size_t length, Page<Album>& page);
+
+// Reads the answer to GET /api/library/albums/{album_id}/tracks, asked for with `per_page`
+// PAGE_SIZE, as read_artists() reads the artists: the tracks in disc and track order.
+const char* read_tracks(int status, const char* body, size_t length, Page<AlbumTrack>& page);
+
+// Reads the answer to GET /api/library/playlists, asked for with `per_page` PAGE_SIZE, as
+// read_artists() reads the artists.
+const char* read_playlists(int status, const char* body, size_t length, Page<Playlist>& page);
+
 // Reads the payload of an event that names a speaker into `speaker_id`.
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id);

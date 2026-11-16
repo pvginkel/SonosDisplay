@@ -498,20 +498,34 @@ static const char* read_page(int status, const char* body, size_t length, Page<I
     return nullptr;
 }
 
+// The `id` and `title` of an item of the library. The id is opaque, and goes back to the backend as
+// it came: it is never cut.
+static const char* read_item_names(const cJSON* item, std::string& id, std::string& title) {
+    if (!cJSON_IsObject(item)) {
+        return "an item is not an object";
+    }
+
+    const auto read_id = get_string(item, "id");
+    if (!read_id || !*read_id) {
+        return "an item has no id";
+    }
+
+    const auto read_title = get_string(item, "title");
+    if (!read_title) {
+        return "an item has no title";
+    }
+
+    id = read_id;
+    title = read_text(read_title);
+
+    return nullptr;
+}
+
 // An artist's `artwork_id` is not shown, so it is not read.
 static const char* read_artist(const cJSON* item, Artist& artist) {
-    if (!cJSON_IsObject(item)) {
-        return "an artist is not an object";
-    }
-
-    const auto id = get_string(item, "id");
-    if (!id || !*id) {
-        return "an artist has no id";
-    }
-
-    const auto title = get_string(item, "title");
-    if (!title) {
-        return "an artist has no title";
+    Artist read;
+    if (const auto problem = read_item_names(item, read.id, read.title)) {
+        return problem;
     }
 
     const auto letter = get_string(item, "index_letter");
@@ -519,8 +533,8 @@ static const char* read_artist(const cJSON* item, Artist& artist) {
         return "an artist's index_letter is not a letter from A to Z or #";
     }
 
-    // The id is opaque, and goes back to the backend as it came: it is never cut.
-    artist = Artist{.id = id, .title = read_text(title), .index_letter = *letter};
+    read.index_letter = *letter;
+    artist = std::move(read);
 
     return nullptr;
 }
@@ -541,6 +555,49 @@ const char* read_artists(int status, const char* body, size_t length, Page<Artis
     }
 
     return nullptr;
+}
+
+// An album's `artist_id`, `artist`, `track_count` and `artwork_id` are not shown, so they are not
+// read.
+static const char* read_album(const cJSON* item, Album& album) {
+    Album read;
+    if (const auto problem = read_item_names(item, read.id, read.title)) {
+        return problem;
+    }
+
+    const auto year = cJSON_GetObjectItemCaseSensitive(item, "year");
+    if (cJSON_IsNumber(year) && year->valuedouble == year->valueint) {
+        read.year = year->valueint;
+    } else if (!cJSON_IsNull(year)) {
+        return "an album's year is not a whole number or null";
+    }
+
+    album = std::move(read);
+
+    return nullptr;
+}
+
+const char* read_albums(int status, const char* body, size_t length, Page<Album>& page) {
+    return read_page(status, body, length, page, read_album);
+}
+
+// A track's `artist`, `disc`, `number`, `duration_ms` and `artwork_id` are not shown, so they are not
+// read: the backend gives the tracks in disc and track order.
+static const char* read_track(const cJSON* item, AlbumTrack& track) {
+    return read_item_names(item, track.id, track.title);
+}
+
+const char* read_tracks(int status, const char* body, size_t length, Page<AlbumTrack>& page) {
+    return read_page(status, body, length, page, read_track);
+}
+
+// A playlist's `track_count`, `duration_ms` and `artwork_id` are not shown, so they are not read.
+static const char* read_playlist(const cJSON* item, Playlist& playlist) {
+    return read_item_names(item, playlist.id, playlist.title);
+}
+
+const char* read_playlists(int status, const char* body, size_t length, Page<Playlist>& page) {
+    return read_page(status, body, length, page, read_playlist);
 }
 
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id) {

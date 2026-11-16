@@ -613,6 +613,36 @@ struct Artist {
     bool operator==(const Artist&) const = default;
 };
 
+// An album of the library.
+struct Album {
+    // The album's id as the API gives it.
+    std::string id;
+    std::string title;
+
+    // The year the album was released; none for an album without a date.
+    std::optional<int32_t> year;
+
+    bool operator==(const Album&) const = default;
+};
+
+// A track of an album, as the library lists it.
+struct AlbumTrack {
+    // The track's id as the API gives it.
+    std::string id;
+    std::string title;
+
+    bool operator==(const AlbumTrack&) const = default;
+};
+
+// A playlist of the library.
+struct Playlist {
+    // The playlist's id as the API gives it.
+    std::string id;
+    std::string title;
+
+    bool operator==(const Playlist&) const = default;
+};
+
 struct Model {
     // Bumped by the host on every change, so a view redraws only when something changed.
     uint32_t revision{};

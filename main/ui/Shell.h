@@ -77,6 +77,10 @@ public:
 
     bool shows_bar() const { return _bar.is_shown(); }
 
+    // How far from the screen's right edge the "Reconnecting" marker reaches while it shows at the
+    // top right, which a view's heading ends before; 0 while it shows elsewhere or not at all.
+    int32_t get_marker_reach() const;
+
     // Called from the UI loop.
     void update();
 

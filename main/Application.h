@@ -49,6 +49,12 @@ public:
     void add_to_group(const std::string& speaker_id) override;
     void remove_from_group(const std::string& speaker_id) override;
     void request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) override;
+    void request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
+                        std::function<void(Page<Album>)> done) override;
+    void request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
+                        std::function<void(Page<AlbumTrack>)> done) override;
+    void request_playlists(uint32_t number, std::weak_ptr<void> scope,
+                           std::function<void(Page<Playlist>)> done) override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 

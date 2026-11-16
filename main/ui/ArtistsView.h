@@ -4,7 +4,8 @@
 // jump to a letter. The button beside the list opens the letters its artists file under, as a
 // grid over the list, each letter as large a target as the grid allows; a press on one brings
 // its first artist to the top, and closes the grid. The letters are those of the rows built,
-// which are the whole library while it has 200 artists or fewer.
+// which are the whole library while it has 200 artists or fewer. A press on an artist opens its
+// albums. The button under it opens the playlists, whatever came of the artists.
 
 #include <cstddef>
 #include <utility>
@@ -18,6 +19,7 @@ class ArtistsView : public ListView {
     std::vector<std::pair<char, size_t>> _letters;
     lv_obj_t* _jump{};
     lv_obj_t* _jump_label{};
+    lv_obj_t* _playlists{};
     lv_obj_t* _grid{};
 
 public:
@@ -27,6 +29,7 @@ protected:
     PageWindow& get_pages() override { return _artists; }
     void request_page(uint32_t page) override;
     void build_row(lv_obj_t* row, size_t index) override;
+    void open_row(size_t index) override;
     const char* get_loading_message() const override;
     const char* get_empty_message() const override;
     void do_render_beside(lv_obj_t* body, lv_obj_t* area) override;
@@ -37,4 +40,5 @@ private:
     void show_letters(bool shown);
     static void jump_clicked(lv_event_t* event);
     static void letter_clicked(lv_event_t* event);
+    static void playlists_clicked(lv_event_t* event);
 };
