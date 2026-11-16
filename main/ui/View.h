@@ -35,6 +35,10 @@ public:
     // Whether this is the now-playing screen, which Shell::open_now_playing() brings to the top.
     virtual bool is_now_playing() const { return false; }
 
+    // Where the Shell's "Reconnecting" marker shows over this view: in a top corner its controls
+    // leave free, LV_ALIGN_TOP_RIGHT or LV_ALIGN_TOP_LEFT.
+    virtual lv_align_t get_marker_align() const { return LV_ALIGN_TOP_RIGHT; }
+
 protected:
     virtual void do_render(lv_obj_t* parent) = 0;
     virtual void do_update() {}

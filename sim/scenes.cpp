@@ -19,6 +19,7 @@
 #include "Messages.h"
 #include "NowPlayingView.h"
 #include "SpeakerPickerView.h"
+#include "Theme.h"
 #include "api/Answers.h"
 #include "api/Artwork.h"
 #include "cJSON.h"
@@ -1500,6 +1501,34 @@ static void now_playing_reconnecting(SimHost& host, Shell& shell) {
     host.model().stream_down_since = lv_tick_get() - 10 * 1000;
 
     open_now_playing(host, shell, PLAYING);
+}
+
+// Whether the "Reconnecting" marker shows in the screen's top corner at this side.
+static const char* check_marker(bool right) {
+    lv_obj_update_layout(lv_screen_active());
+
+    std::vector<lv_obj_t*> found;
+    find_labels(lv_screen_active(), MSG_RECONNECTING, found);
+    if (found.size() != 1) {
+        return "the marker does not show";
+    }
+
+    lv_area_t area;
+    lv_obj_get_coords(lv_obj_get_parent(found[0]), &area);
+    if (right ? area.x2 != 800 - 1 - Theme::GAP : area.x1 != Theme::GAP) {
+        return right ? "the marker is not at the top right" : "the marker is not at the top left";
+    }
+
+    return nullptr;
+}
+
+// Over the cover's corner, clear of the buttons at the top right.
+static const char* check_now_playing_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_now_playing(host, shell)) {
+        return problem;
+    }
+
+    return check_marker(false);
 }
 
 // A touch on the speaker button opens the picker over the now-playing screen.
@@ -3621,6 +3650,36 @@ static void artists_reconnecting(SimHost& host, Shell& shell) {
     open_library(host, shell, LIBRARY);
 }
 
+static const char* check_artists_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists(host, shell)) {
+        return problem;
+    }
+
+    return check_marker(true);
+}
+
+// The marker over the now-playing screen's cover moves to the top right as the library opens over
+// it while it shows.
+static void library_open_reconnecting(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+    host.serve_artists(200, make_artist_pages(LIBRARY));
+    open_now_playing(host, shell, PLAYING);
+
+    shell.update();
+    expect(!check_marker(false), "the marker does not show over the now-playing screen's cover");
+
+    host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
+}
+
+static const char* check_library_open_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_library_open(host, shell)) {
+        return problem;
+    }
+
+    return check_marker(true);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -3671,7 +3730,7 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-error", now_playing_error},
         {"now-playing-unreadable", now_playing_unreadable},
         {"now-playing-retry", now_playing_retry, check_playback_retry},
-        {"now-playing-reconnecting", now_playing_reconnecting},
+        {"now-playing-reconnecting", now_playing_reconnecting, check_now_playing_reconnecting},
         {"now-playing-speakers", now_playing_speakers, check_speakers_open},
         {"now-playing-same-speaker", now_playing_same_speaker, check_same_speaker},
         {"now-playing-other-speaker", now_playing_other_speaker, check_other_speaker},
@@ -3737,7 +3796,8 @@ const std::vector<Scene>& get_scenes() {
         {"artists-back", artists_back, check_artists_back},
         {"artists-bar-cover", artists_bar_cover, check_bar_opened},
         {"artists-bar-texts", artists_bar_texts, check_bar_opened},
-        {"artists-reconnecting", artists_reconnecting, check_artists},
+        {"artists-reconnecting", artists_reconnecting, check_artists_reconnecting},
+        {"library-open-reconnecting", library_open_reconnecting, check_library_open_reconnecting},
     };
 
     return scenes;

@@ -49,7 +49,6 @@ void Shell::create_marker() {
     lv_obj_set_style_pad_column(_marker, 12, LV_PART_MAIN);
     lv_obj_set_flex_flow(_marker, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(_marker, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_align(_marker, LV_ALIGN_TOP_RIGHT, -Theme::GAP, Theme::GAP);
 
     auto icon = lv_label_create(_marker);
     lv_label_set_text(icon, ICON_CLOUD_OFF);
@@ -177,6 +176,12 @@ void Shell::update_marker() {
     // Without a backend address there is no stream to wait for: the view says so instead.
     const auto show = !model.backend_url.empty() && model.stream_state != StreamState::Connected &&
                       lv_tick_elaps(model.stream_down_since) >= RECONNECTING_MARKER_DELAY_MS;
+
+    // In the corner the top view leaves free, which may change while it shows.
+    if (const auto current = get_current(); show && current && current->get_marker_align() != _marker_align) {
+        _marker_align = current->get_marker_align();
+        lv_obj_align(_marker, _marker_align, _marker_align == LV_ALIGN_TOP_LEFT ? Theme::GAP : -Theme::GAP, Theme::GAP);
+    }
 
     if (show == !lv_obj_has_flag(_marker, LV_OBJ_FLAG_HIDDEN)) {
         return;

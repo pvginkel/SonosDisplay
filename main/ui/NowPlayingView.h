@@ -39,6 +39,9 @@ public:
 
     bool is_now_playing() const override { return true; }
 
+    // Over the cover's corner: the top right holds the buttons.
+    lv_align_t get_marker_align() const override { return LV_ALIGN_TOP_LEFT; }
+
 protected:
     void do_render(lv_obj_t* parent) override;
     void do_update() override;

@@ -84,8 +84,6 @@ static void create_button(lv_obj_t* parent, const char* icon, lv_event_cb_t clic
 }
 
 void NowPlayingView::create_buttons(lv_obj_t* parent) {
-    // At the column's left: the Shell's "Reconnecting" marker shows over the rest of this row,
-    // the library button's place included, which takes a press under it.
     auto row = lv_container_create(parent);
     lv_obj_set_style_pad_column(row, Theme::GAP, LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);

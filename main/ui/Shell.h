@@ -1,9 +1,9 @@
 #pragma once
 
 // The one LVGL screen: a content area holding a stack of views, the now-playing bar under it, and
-// the "Reconnecting" marker. The bar is the Shell's, which is how it stays at the bottom of every
-// screen: it shows under every view that has it (View::has_bar()) while the display is not held
-// on the speaker picker, and the content area ends where it begins.
+// the "Reconnecting" marker, in the top corner the top view leaves free (View::get_marker_align()). The bar is the
+// Shell's, which is how it stays at the bottom of every screen: it shows under every view that has it (View::has_bar())
+// while the display is not held on the speaker picker, and the content area ends where it begins.
 //
 // It also decides which view the app opens on: now playing, or the speaker picker while the
 // display is held on it (Model::needs_speaker()).
@@ -24,6 +24,8 @@ class Shell {
     lv_obj_t* _content{};
     NowPlayingBar _bar;
     lv_obj_t* _marker{};
+    // Where the marker is; LV_ALIGN_DEFAULT until it first shows.
+    lv_align_t _marker_align{LV_ALIGN_DEFAULT};
     std::vector<std::unique_ptr<View>> _views;
     // Whether the app's first view is the speaker picker; empty until open().
     std::optional<bool> _held;
