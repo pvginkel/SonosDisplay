@@ -4,8 +4,8 @@
 // show, the title, artist and album, and previous, play or pause, and next, each live only while
 // the speaker allows its command. Under them the
 // volume of the speaker's group: down, the level, and up. The speaker button at the top opens the
-// speaker picker. While the playback is on its way, nothing is loaded or the backend gave none,
-// it says so instead.
+// speaker picker, and the library button beside it the library. While the playback is on its way,
+// nothing is loaded or the backend gave none, it says so instead.
 
 #include "Controls.h"
 #include "Cover.h"
@@ -46,11 +46,12 @@ protected:
 
 private:
     void create_cover(lv_obj_t* parent);
-    void create_speaker_button(lv_obj_t* parent);
+    void create_buttons(lv_obj_t* parent);
     void create_texts(lv_obj_t* parent);
     void create_retry(lv_obj_t* parent);
     void apply();
     void apply_texts(const Playback& playback);
     static void speaker_clicked(lv_event_t* event);
+    static void library_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
 };

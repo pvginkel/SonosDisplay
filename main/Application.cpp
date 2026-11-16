@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cinttypes>
 #include <cstring>
 #include <optional>
 
@@ -563,6 +564,45 @@ void Application::group_change_answered(uint32_t change, bool adds, HttpResponse
     }
 
     model_changed();
+}
+
+// Reads a page of a list the backend gives in pages, as `read` reads its body.
+template <typename Item>
+using PageReader = const char* (*)(int status, const char* body, size_t length, Page<Item>& page);
+
+// Asks for page `number` of the list at `path` on `client`, PAGE_SIZE to a page, and hands
+// `done` the page as `read` reads it, or why it did not come. The request goes as one with one
+// for the same page that still waits, a press on Try again among them.
+template <typename Item>
+static void request_page(HttpClient& client, const char* path, uint32_t number, std::weak_ptr<void> scope,
+                         std::function<void(Page<Item>)> done, PageReader<Item> read) {
+    const auto query = std::string(path) + "?page=" + std::to_string(number) + "&per_page=" + std::to_string(PAGE_SIZE);
+
+    client.send(HttpRequest{.path = query, .merges = true}, std::move(scope),
+                [path, number, done = std::move(done), read](HttpResponse&& response) {
+                    Page<Item> page;
+
+                    if (response.err == ESP_ERR_INVALID_SIZE) {
+                        // An answer over the client's limit, which HttpClient logged.
+                        page.state = LoadState::Failed;
+                    } else if (response.err != ESP_OK) {
+                        // HttpClient logged the transport error.
+                        page.state = LoadState::Unreachable;
+                    } else if (const auto problem =
+                                   read(response.status, (const char*)response.body.get(), response.length, page)) {
+                        ESP_LOGW(TAG, "GET %s page %" PRIu32 " answered %d, %s: %s", path, number, response.status,
+                                 problem, page.error.c_str());
+                    } else {
+                        ESP_LOGI(TAG, "GET %s page %" PRIu32 ": %zu of %" PRIu32, path, number, page.items.size(),
+                                 page.total);
+                    }
+
+                    done(std::move(page));
+                });
+}
+
+void Application::request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) {
+    request_page(*_api_client, "/api/library/artists", number, std::move(scope), std::move(done), read_artists);
 }
 
 void Application::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,

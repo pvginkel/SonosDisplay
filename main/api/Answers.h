@@ -40,5 +40,10 @@ const char* read_speaker_volume(int status, const char* body, size_t length, Vol
 // after the change: `volume` is Loaded with them. Any other answer leaves `volume` as it is.
 const char* read_volume_change(int status, const char* body, size_t length, Volume& volume, std::string& error);
 
+// Reads the answer to GET /api/library/artists, asked for with `per_page` PAGE_SIZE, into `page`:
+// Loaded with the page's artists, its number and how many artists there are, or Failed with what
+// the backend said went wrong, where it said so.
+const char* read_artists(int status, const char* body, size_t length, Page<Artist>& page);
+
 // Reads the payload of an event that names a speaker into `speaker_id`.
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id);

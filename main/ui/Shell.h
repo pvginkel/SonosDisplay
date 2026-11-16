@@ -58,6 +58,9 @@ public:
     // Shows the speaker picker on top of the stack.
     void open_speaker_picker();
 
+    // Shows the library's artists on top of the stack.
+    void open_library();
+
     // Goes back to the view under the top one at the next update(), so a view may ask from inside
     // one of its own events. Nothing happens when the top view is the only one.
     void back() { _back_requested = true; }

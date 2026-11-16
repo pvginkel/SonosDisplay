@@ -25,3 +25,8 @@
 #define MSG_COMMAND_NOT_TAKEN "That did not go through"
 
 #define MSG_VOLUME_UNKNOWN "–"
+
+#define MSG_ARTISTS "Artists"
+#define MSG_ARTISTS_LOADING "Looking up the artists"
+#define MSG_ARTISTS_EMPTY "The library has no artists"
+#define MSG_JUMP_TO_LETTER "A–Z"

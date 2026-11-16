@@ -48,6 +48,13 @@ class SimHost : public UiHost {
         std::vector<uint8_t> body;
     };
 
+    // A request for a page of the artists, on its way.
+    struct ArtistRequest {
+        uint32_t number;
+        std::weak_ptr<void> scope;
+        std::function<void(Page<Artist>)> done;
+    };
+
     Model _model;
     std::vector<std::optional<lv_point_t>> _taps;
     // What answers on LVGL's clock, and from when.
@@ -70,10 +77,17 @@ class SimHost : public UiHost {
     bool _artwork_held{};
     bool _artwork_reachable{true};
     std::vector<ArtworkRequest> _held_artwork;
+    std::optional<int> _artists_status;
+    std::vector<std::string> _artist_pages;
+    std::vector<uint32_t> _artist_requests;
+    std::vector<ArtistRequest> _held_artists;
 
 public:
     // From one of a scene's touches to the next: what the first one changed is on screen by then.
     static constexpr uint32_t TAP_INTERVAL_MS = 200;
+
+    // The status of an answer that did not come: the backend could not be reached.
+    static constexpr int UNREACHABLE = 0;
 
     SimHost();
 
@@ -87,6 +101,7 @@ public:
     void send_command(Command command) override;
     void add_to_group(const std::string& speaker_id) override;
     void remove_from_group(const std::string& speaker_id) override;
+    void request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
@@ -162,6 +177,21 @@ public:
     // them.
     const std::vector<std::string>& get_volume_change_bodies() const { return _volume_change_bodies; }
 
+    // What the backend answers a request for page n of the artists from here on: the nth of
+    // `pages`, with `status`, read as the device reads it. A request for a page past them stays on
+    // its way until answer_artists(); without this, every request does.
+    void serve_artists(int status, std::vector<std::string> pages) {
+        _artists_status = status;
+        _artist_pages = std::move(pages);
+    }
+
+    // The backend's answer to the oldest request for the artists on its way, read as the device
+    // reads it. As on the device, the answer to a view that is gone is dropped.
+    void answer_artists(int status, const char* body);
+
+    // The pages of the artists the views asked for, in order.
+    const std::vector<uint32_t>& get_artist_requests() const { return _artist_requests; }
+
     // What the backend answers a request for artwork with: LVGL 9's binary image, a deterministic
     // pattern of two colours that the id decides, `size` by `size` pixels.
     static std::vector<uint8_t> make_artwork(const std::string& artwork_id, int32_t size);
@@ -217,4 +247,5 @@ private:
     void group_change_answered(const UnansweredGroupChange& change, int status, const char* body);
     void fetch_artwork(ArtworkRequest&& request);
     void answer_artwork(const ArtworkRequest& request);
+    static void answer_artist_request(const ArtistRequest& request, int status, const char* body);
 };

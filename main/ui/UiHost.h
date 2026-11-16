@@ -55,6 +55,12 @@ public:
     // the same conditions, for a speaker of the chosen speaker's group.
     virtual void remove_from_group(const std::string& speaker_id) = 0;
 
+    // Asks the backend for page `number` of the library's artists, from 1, PAGE_SIZE to a page.
+    // `done` runs with the page, or with why it did not come, and not at all once `scope`, which
+    // the asker owns, has expired.
+    virtual void request_artists(uint32_t number, std::weak_ptr<void> scope,
+                                 std::function<void(Page<Artist>)> done) = 0;
+
     // Asks for the picture with this id, `size` by `size` pixels. `done` runs with it once the
     // host has it, which is before this returns for one it has already, and may be much later:
     // nothing is fetched while the screen is dark. It runs with nullptr when the backend did not

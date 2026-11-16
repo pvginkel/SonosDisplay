@@ -1,14 +1,19 @@
 #include "scenes.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "ArtistsView.h"
 #include "Controls.h"
 #include "LoadingView.h"
 #include "Messages.h"
@@ -2868,6 +2873,754 @@ static const char* check_group_not_taken_later(const SimHost& host, const Shell&
     return check_bar(host, shell);
 }
 
+// An artist of a fixture: its title, and the letter it files under.
+using ArtistFixture = std::pair<std::string, char>;
+
+// The library's artists in the order the backend gives them: by the title Plex sorts each by,
+// without an accent, a leading "The" or case, those that file under '#' first. Every letter the
+// live library has is here, 23 of them, with long and accented names, a U+2010 hyphen, and a
+// character the fonts do not draw (U+266B).
+static const std::vector<ArtistFixture> LIBRARY = {
+    {"10 000 Maniacs", '#'},
+    {"2Cellos", '#'},
+    {"Anne Sofie von Otter, Les Musiciens du Louvre, Marc Minkowski & Chœur des Musiciens du Louvre", 'A'},
+    {"Ásgeir", 'A'},
+    {"The Beatles", 'B'},
+    {"Björk", 'B'},
+    {"Bløf", 'B'},
+    {"Céline Dion", 'C'},
+    {"Chœur de l’Opéra national de Paris", 'C'},
+    {"Daft Punk", 'D'},
+    {"Eivør", 'E'},
+    {"Émilie Simon", 'E'},
+    {"Fleetwood Mac", 'F'},
+    {"Gåte", 'G'},
+    {"Hania Rani", 'H'},
+    {"Ibeyi", 'I'},
+    {"Jay‐Z", 'J'},
+    {"Jóhann Jóhannsson", 'J'},
+    {"Kraftwerk", 'K'},
+    {"Łona i Webber", 'L'},
+    {"Lykke Li", 'L'},
+    {"Mariza", 'M'},
+    {"Mø", 'M'},
+    {"Múm", 'M'},
+    {"Nils Frahm", 'N'},
+    {"Ólafur Arnalds", 'O'},
+    {"Portishead", 'P'},
+    {"Röyksopp♫", 'R'},
+    {"Sigur Rós", 'S'},
+    {"Stromae", 'S'},
+    {"Tinariwen", 'T'},
+    {"Väsen", 'V'},
+    {"Yann Tiersen", 'Y'},
+    {"Žagar", 'Z'},
+};
+
+// How many artists the library has in the scenes that page: three pages, the last one short.
+static constexpr size_t MANY_ARTISTS = 250;
+
+// Artists enough to page through, each named for its place in the list from 1, and filing under
+// the letter its name starts with.
+static std::vector<ArtistFixture> make_many_artists() {
+    std::vector<ArtistFixture> artists;
+    for (size_t i = 0; i < MANY_ARTISTS; i++) {
+        const auto letter = char('A' + i * 26 / MANY_ARTISTS);
+
+        char title[32];
+        snprintf(title, sizeof(title), "%c Artist %03zu", letter, i + 1);
+        artists.emplace_back(title, letter);
+    }
+
+    return artists;
+}
+
+// The answer to GET /api/library/artists for page `number` of `artists`, PAGE_SIZE to a page, its
+// data the `count` artists from `first`, in the shape the deployed backend gives it. The ids are
+// made up, and every third artist has no picture.
+static std::string make_artists_body(const std::vector<ArtistFixture>& artists, size_t first, size_t count,
+                                     uint32_t number) {
+    const auto root = cJSON_CreateObject();
+
+    const auto data = cJSON_AddArrayToObject(root, "data");
+    for (auto i = first; i < first + count; i++) {
+        const auto artist = cJSON_CreateObject();
+
+        if (i % 3) {
+            cJSON_AddStringToObject(artist, "artwork_id", ("YXJ0aXN0LyIi" + std::to_string(i)).c_str());
+        } else {
+            cJSON_AddNullToObject(artist, "artwork_id");
+        }
+
+        const char letter[] = {artists[i].second, 0};
+        cJSON_AddStringToObject(artist, "id", ("artist-" + std::to_string(i + 1)).c_str());
+        cJSON_AddStringToObject(artist, "index_letter", letter);
+        cJSON_AddStringToObject(artist, "title", artists[i].first.c_str());
+        cJSON_AddItemToArray(data, artist);
+    }
+
+    const auto meta = cJSON_AddObjectToObject(root, "meta");
+    cJSON_AddNumberToObject(meta, "page", number);
+    cJSON_AddNumberToObject(meta, "per_page", PAGE_SIZE);
+    cJSON_AddStringToObject(meta, "sort_by", "sort_title");
+    cJSON_AddStringToObject(meta, "sort_dir", "asc");
+    cJSON_AddNumberToObject(meta, "total", double(artists.size()));
+    cJSON_AddNumberToObject(meta, "total_pages", double((artists.size() + PAGE_SIZE - 1) / PAGE_SIZE));
+
+    const auto text = cJSON_PrintUnformatted(root);
+    std::string body(text);
+    cJSON_free(text);
+    cJSON_Delete(root);
+
+    return body;
+}
+
+// Every page of `artists`, as the backend answers each.
+static std::vector<std::string> make_artist_pages(const std::vector<ArtistFixture>& artists) {
+    std::vector<std::string> pages;
+    for (size_t first = 0; first < artists.size() || pages.empty(); first += PAGE_SIZE) {
+        pages.push_back(make_artists_body(artists, first, std::min(PAGE_SIZE, uint32_t(artists.size() - first)),
+                                          uint32_t(pages.size() + 1)));
+    }
+
+    return pages;
+}
+
+static const char ERROR_PLEX[] =
+    R"({"code":null,"correlationId":null,"details":{"message":"The request could not be completed"},)"
+    R"("error":"Plex did not answer within the time it is given, and the library could not be read"})";
+
+// Pages of artists the API's document does not allow.
+static const char* const UNREADABLE_ARTISTS[] = {
+    "",
+    "<html><body>502 Bad Gateway</body></html>",
+    R"({"data":[)",
+    "null",
+    "[]",
+    R"({"data":[]})",
+    R"({"data":[],"meta":null})",
+    R"({"data":[],"meta":{"per_page":100,"total":0}})",
+    R"({"data":[],"meta":{"page":0,"per_page":100,"total":0}})",
+    R"({"data":[],"meta":{"page":1.5,"per_page":100,"total":0}})",
+    R"({"data":[],"meta":{"page":"1","per_page":100,"total":0}})",
+    R"({"data":[],"meta":{"page":1,"total":0}})",
+    R"({"data":[],"meta":{"page":1,"per_page":20,"total":0}})",
+    R"({"data":[],"meta":{"page":1,"per_page":100}})",
+    R"({"data":[],"meta":{"page":1,"per_page":100,"total":-1}})",
+    R"({"data":[],"meta":{"page":1,"per_page":100,"total":1e30}})",
+    R"({"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"data":null,"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"data":{"id":"artist-1","index_letter":"A","title":"ABBA"},"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"data":[{"id":"artist-101","index_letter":"A","title":"ABBA"}],"meta":{"page":2,"per_page":100,)"
+    R"("total":100}})",
+    R"({"data":["artist-1"],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"","index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":7,"index_letter":"A","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"A"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"A","title":null}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":null,"title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"a","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"AB","title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"Ä","title":"ÄBBA"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"id":"artist-1","index_letter":"A","title":"ABBA"},{"id":"artist-2"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":2}})",
+    R"({"data":[{"id":"artist-2","index_letter":"B","title":"Björk"},{"id":"artist-1","index_letter":"A",)"
+    R"("title":"ABBA"}],"meta":{"page":1,"per_page":100,"total":2}})",
+    R"({"data":[{"id":"artist-2","index_letter":"A","title":"ABBA"},{"id":"artist-1","index_letter":"#",)"
+    R"("title":"10cc"}],"meta":{"page":1,"per_page":100,"total":2}})",
+};
+
+// Where the artists screen's back button and the button that opens its letters are, and the now
+// playing screen's library button.
+static constexpr lv_point_t BACK = {64, 48};
+static constexpr lv_point_t JUMP = {728, 136};
+static constexpr lv_point_t LIBRARY_BUTTON = {568, 56};
+
+// Where the list's top is, on a screen with the bar.
+static constexpr int32_t LIST_TOP = 96;
+
+// The centre of the label that says this. A hidden one counts only `with_hidden`.
+static std::optional<lv_point_t> find_label_center(lv_obj_t* obj, const char* text, bool with_hidden) {
+    if (!with_hidden && lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return std::nullopt;
+    }
+
+    if (lv_obj_check_type(obj, &lv_label_class) && !strcmp(lv_label_get_text(obj), text)) {
+        lv_area_t area;
+        lv_obj_get_coords(obj, &area);
+
+        return lv_point_t{(area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2};
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        if (const auto found = find_label_center(lv_obj_get_child(obj, int32_t(i)), text, with_hidden)) {
+            return found;
+        }
+    }
+
+    return std::nullopt;
+}
+
+// Touches the label that says this, where it is once the Shell has built the screen: one on
+// screen, or, `with_hidden`, one that a touch before this one shows.
+static void tap_label(SimHost& host, Shell& shell, const char* text, bool with_hidden = false) {
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+
+    const auto center = find_label_center(lv_screen_active(), text, with_hidden);
+    expect(center.has_value(), "a label to touch is not on the screen");
+
+    host.tap(center->x, center->y);
+}
+
+// Whether this object of a list is the row of an item, and not the state of a page past them.
+static bool is_row(const lv_obj_t* obj) {
+    return lv_obj_check_type(obj, &lv_obj_class) && lv_obj_get_child_count(obj) == 1 &&
+           lv_obj_check_type(lv_obj_get_child(obj, 0), &lv_label_class);
+}
+
+// The list on screen: what scrolls, and holds rows.
+static lv_obj_t* find_list(lv_obj_t* obj) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return nullptr;
+    }
+
+    const auto count = lv_obj_get_child_count(obj);
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE) && count && is_row(lv_obj_get_child(obj, 0))) {
+        return obj;
+    }
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE) && count > 1 && is_row(lv_obj_get_child(obj, 1))) {
+        return obj;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (const auto found = find_list(lv_obj_get_child(obj, int32_t(i)))) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+static lv_obj_t* find_list() { return find_list(lv_screen_active()); }
+
+static const char* get_row_title(const lv_obj_t* row) { return lv_label_get_text(lv_obj_get_child(row, 0)); }
+
+// The rows of the list, in order.
+static std::vector<lv_obj_t*> get_rows(lv_obj_t* list) {
+    std::vector<lv_obj_t*> rows;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(list); i++) {
+        const auto child = lv_obj_get_child(list, int32_t(i));
+        if (is_row(child)) {
+            rows.push_back(child);
+        }
+    }
+
+    return rows;
+}
+
+// The first row the list shows from its top, in part or whole.
+static lv_obj_t* get_top_row(lv_obj_t* list) {
+    lv_area_t shown;
+    lv_obj_get_coords(list, &shown);
+
+    for (const auto row : get_rows(list)) {
+        lv_area_t area;
+        lv_obj_get_coords(row, &area);
+        if (area.y2 >= shown.y1) {
+            return row;
+        }
+    }
+
+    return nullptr;
+}
+
+// Where a row is on screen: its title, and its top.
+struct RowPlace {
+    std::string title;
+    int32_t top;
+};
+
+static RowPlace get_place(const lv_obj_t* row) {
+    lv_area_t area;
+    lv_obj_get_coords(row, &area);
+
+    return RowPlace{get_row_title(row), area.y1};
+}
+
+// Scrolls the list on screen to its end, or to its start, and has the Shell build what that brings
+// of the backend's answers. Returns where the row at the top was before they came.
+static RowPlace scroll_list(Shell& shell, bool to_end) {
+    lv_obj_update_layout(lv_screen_active());
+    const auto list = find_list();
+    expect(list, "no list is on screen");
+
+    lv_obj_scroll_to_y(list, to_end ? LV_COORD_MAX : 0, LV_ANIM_OFF);
+    const auto top = get_place(get_top_row(list));
+
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+
+    return top;
+}
+
+static void open_artists(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+
+    shell.open_library();
+    expect(shell.shows_bar(), "the artists screen does not show the bar");
+}
+
+static void open_library(SimHost& host, Shell& shell, const std::vector<ArtistFixture>& artists) {
+    host.serve_artists(200, make_artist_pages(artists));
+
+    open_artists(host, shell);
+}
+
+static const char* check_artists_screen(const Shell& shell) {
+    if (!shows<ArtistsView>(shell)) {
+        return "the display is not on the artists screen";
+    }
+
+    return shell.shows_bar() ? nullptr : "the artists screen does not show the bar";
+}
+
+// The row of the artist with this title, on screen.
+static lv_obj_t* find_row(const char* title) {
+    std::vector<lv_obj_t*> found;
+    find_labels(lv_screen_active(), title, found);
+
+    return found.size() == 1 ? lv_obj_get_parent(found[0]) : nullptr;
+}
+
+// Whether a row's label shows this title: whole, or, where it is longer than the row, its start
+// and the dots LVGL writes over its end.
+static bool shows_title(const char* label, const std::string& title) {
+    const std::string shown = label;
+    if (shown == title) {
+        return true;
+    }
+
+    return shown.ends_with("...") && title.starts_with(shown.substr(0, shown.length() - 3));
+}
+
+// The rows of the list are those of `artists` from `first`, `count` of them.
+static const char* check_rows(const std::vector<ArtistFixture>& artists, size_t first, size_t count) {
+    const auto list = find_list();
+    if (!list) {
+        return "the artists are not listed";
+    }
+
+    const auto rows = get_rows(list);
+    if (rows.size() != count) {
+        return "the list does not have a row for every artist held";
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        // What the fonts do not draw is left out of a title.
+        auto title = artists[first + i].first;
+        if (const auto at = title.find("♫"); at != std::string::npos) {
+            title.erase(at);
+        }
+
+        if (!shows_title(get_row_title(rows[i]), title)) {
+            return "the rows are not the artists, in the backend's order";
+        }
+    }
+
+    return nullptr;
+}
+
+// The row that was at the top before the list was built again is where it was.
+static void expect_in_place(const RowPlace& place, const char* what) {
+    const auto row = find_row(place.title.c_str());
+    expect(row && get_place(row).top == place.top, what);
+}
+
+// The now-playing screen's library button opens the artists, over it, with the bar under them.
+static void library_open(SimHost& host, Shell& shell) {
+    host.serve_artists(200, make_artist_pages(LIBRARY));
+    open_now_playing(host, shell, PLAYING);
+
+    host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
+}
+
+static const char* check_library_open(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (shell.count_views() != 2) {
+        return "the artists screen did not open over the now-playing screen";
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1}) {
+        return "the artists were not asked for once, from the first page";
+    }
+
+    return check_rows(LIBRARY, 0, LIBRARY.size());
+}
+
+// The artists as the backend sorts them, '#' first, with long and accented names.
+static void artists(SimHost& host, Shell& shell) {
+    Page<Artist> page;
+    const auto body = make_artist_pages(LIBRARY)[0];
+    expect(!read_artists(200, body.c_str(), body.length(), page), "the artists fixture was not read as a page");
+    expect(page.state == LoadState::Loaded && page.number == 1 && page.total == LIBRARY.size() &&
+               page.items.size() == LIBRARY.size(),
+           "the artists fixture's page was not read as it is");
+    expect(page.items[0] == Artist{.id = "artist-1", .title = "10 000 Maniacs", .index_letter = '#'} &&
+               page.items[27] == Artist{.id = "artist-28", .title = "Röyksopp", .index_letter = 'R'},
+           "the artists fixture's artists were not read as they are");
+
+    open_library(host, shell, LIBRARY);
+}
+
+static const char* check_artists(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1}) {
+        return "the artists were not asked for once, from the first page";
+    }
+
+    return check_rows(LIBRARY, 0, LIBRARY.size());
+}
+
+// The button beside the list opens the letters the artists file under, in order.
+static void artists_letters(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(JUMP.x, JUMP.y);
+}
+
+static const char* check_artists_letters(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists(host, shell)) {
+        return problem;
+    }
+
+    std::vector<lv_obj_t*> found;
+    find_labels(lv_screen_active(), "#", found);
+    if (found.size() != 1) {
+        return "the letters do not show";
+    }
+
+    const auto grid = lv_obj_get_parent(lv_obj_get_parent(found[0]));
+    const std::string letters = "#ABCDEFGHIJKLMNOPRSTVYZ";
+    if (lv_obj_get_child_count(grid) != letters.size()) {
+        return "the letters are not those the artists file under";
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(grid); i++) {
+        const auto button = lv_obj_get_child(grid, int32_t(i));
+        if (lv_label_get_text(lv_obj_get_child(button, 0)) != letters.substr(i, 1)) {
+            return "the letters are not in order";
+        }
+        if (lv_obj_get_width(button) < 64 || lv_obj_get_height(button) < 64) {
+            return "a letter is smaller than 64 px";
+        }
+    }
+
+    return nullptr;
+}
+
+// A press on a letter brings its first artist to the top of the list.
+static void artists_jump(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(JUMP.x, JUMP.y);
+    tap_label(host, shell, "M", true);
+}
+
+static const char* check_artists_jump(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists(host, shell)) {
+        return problem;
+    }
+
+    const auto row = find_row("Mariza");
+    if (!row) {
+        return "the letter's first artist is not listed";
+    }
+
+    lv_area_t area;
+    lv_obj_get_coords(row, &area);
+    if (area.y1 != LIST_TOP) {
+        return "the letter's first artist is not at the top of the list";
+    }
+
+    return says("#") ? "the letters still show" : nullptr;
+}
+
+// A letter near the end, whose artists fill less than a screen: the list scrolls to its end, with
+// the letter's first artist in view.
+static void artists_jump_end(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(JUMP.x, JUMP.y);
+    tap_label(host, shell, "Y", true);
+}
+
+static const char* check_artists_jump_end(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists(host, shell)) {
+        return problem;
+    }
+
+    const auto list = find_list();
+    if (lv_obj_get_scroll_bottom(list) != 0) {
+        return "the list is not at its end";
+    }
+
+    const auto row = find_row("Yann Tiersen");
+    lv_area_t area;
+    lv_area_t shown;
+    lv_obj_get_coords(row, &area);
+    lv_obj_get_coords(list, &shown);
+    if (area.y1 < shown.y1 || area.y2 > shown.y2) {
+        return "the letter's first artist is not in view";
+    }
+
+    return says("#") ? "the letters still show" : nullptr;
+}
+
+// The artists are on their way.
+static void artists_loading(SimHost& host, Shell& shell) { open_artists(host, shell); }
+
+static const char* check_artists_loading(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (!says(MSG_ARTISTS_LOADING) || says(MSG_JUMP_TO_LETTER)) {
+        return "the screen does not say that the artists are on their way";
+    }
+
+    return host.get_artist_requests() == std::vector<uint32_t>{1} ? nullptr : "the artists were not asked for";
+}
+
+static void artists_unreachable(SimHost& host, Shell& shell) {
+    host.serve_artists(SimHost::UNREACHABLE, {""});
+
+    open_artists(host, shell);
+}
+
+static const char* check_artists_unreachable(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+
+    return says(MSG_BACKEND_UNREACHABLE) && says(MSG_TRY_AGAIN) ? nullptr
+                                                                : "the screen does not say why, with a way to retry";
+}
+
+// Plex failed: the backend's own words, cut to two lines.
+static void artists_error(SimHost& host, Shell& shell) {
+    host.serve_artists(502, {ERROR_PLEX});
+
+    open_artists(host, shell);
+}
+
+static const char* check_artists_error(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+
+    return says(MSG_BACKEND_FAILED) && says(MSG_TRY_AGAIN) ? nullptr
+                                                           : "the screen does not say why, with a way to retry";
+}
+
+// Every page the API's document does not allow is refused whole; what it allows is taken whatever
+// the display does not show holds.
+static void artists_unreadable(SimHost& host, Shell& shell) {
+    Page<Artist> page;
+
+    const auto allowed =
+        R"({"data":[{"artwork_id":7,"id":"artist-1","index_letter":"A","title":"ABBA","country":"SE"}],)"
+        R"("meta":{"page":1,"per_page":100,"sort_by":null,"total":1}})";
+    expect(!read_artists(200, allowed, strlen(allowed), page) && page.items.size() == 1,
+           "a page was refused for what the display does not show");
+
+    for (const auto body : UNREADABLE_ARTISTS) {
+        page = {};
+        expect(read_artists(200, body, strlen(body), page) && page.state == LoadState::Failed && page.items.empty() &&
+                   page.error.empty(),
+               "an unreadable page was not refused");
+
+        page = {};
+        expect(read_artists(502, body, strlen(body), page) && page.state == LoadState::Failed && page.error.empty(),
+               "an unreadable error body gave a message");
+    }
+
+    // A page of more items than PAGE_SIZE.
+    const auto many = make_many_artists();
+    const auto long_page = make_artists_body(many, 0, PAGE_SIZE + 1, 1);
+    page = {};
+    expect(read_artists(200, long_page.c_str(), long_page.length(), page) && page.state == LoadState::Failed,
+           "a page longer than PAGE_SIZE was not refused");
+
+    host.serve_artists(200, {UNREADABLE_ARTISTS[std::size(UNREADABLE_ARTISTS) - 1]});
+    open_artists(host, shell);
+}
+
+static void artists_empty(SimHost& host, Shell& shell) { open_library(host, shell, {}); }
+
+static const char* check_artists_empty(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (says(MSG_JUMP_TO_LETTER)) {
+        return "the screen offers letters of an empty library";
+    }
+
+    return says(MSG_ARTISTS_EMPTY) ? nullptr : "the screen does not say that the library has no artists";
+}
+
+// Try again, once the backend answers.
+static void artists_retry(SimHost& host, Shell& shell) {
+    host.serve_artists(SimHost::UNREACHABLE, {""});
+    open_artists(host, shell);
+
+    host.serve_artists(200, make_artist_pages(LIBRARY));
+    tap_label(host, shell, MSG_TRY_AGAIN);
+}
+
+static const char* check_artists_retry(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the first page was not asked for again";
+    }
+
+    return check_rows(LIBRARY, 0, LIBRARY.size());
+}
+
+// Scrolled to its end, the list asks for the next page, and with the third the first goes: at most
+// 200 rows are built, and the row at the top stays there as the rows change.
+static void artists_pages(SimHost& host, Shell& shell) {
+    const auto artists = make_many_artists();
+    open_library(host, shell, artists);
+    expect(!check_rows(artists, 0, 100), "the first page is not listed");
+
+    scroll_list(shell, true);
+    expect(!check_rows(artists, 0, 200), "the second page is not listed after the first");
+
+    expect_in_place(scroll_list(shell, true), "the row at the top moved as the third page came");
+}
+
+static const char* check_artists_pages(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3}) {
+        return "the pages were not asked for one by one as the list was scrolled";
+    }
+
+    return check_rows(make_many_artists(), 100, 150);
+}
+
+// Back at the start, the first page is asked for again, and the third goes.
+static void artists_pages_back(SimHost& host, Shell& shell) {
+    artists_pages(host, shell);
+
+    expect_in_place(scroll_list(shell, false), "the row at the top moved as the first page came");
+}
+
+static const char* check_artists_pages_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 1}) {
+        return "the first page was not asked for again at the start";
+    }
+
+    return check_rows(make_many_artists(), 0, 200);
+}
+
+// The next page does not come: the list says so at its end, with a way to ask again.
+static void artists_page_failed(SimHost& host, Shell& shell) {
+    const auto artists = make_many_artists();
+    host.serve_artists(200, {make_artist_pages(artists)[0]});
+    open_artists(host, shell);
+
+    scroll_list(shell, true);
+    expect(host.get_artist_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
+
+    host.answer_artists(SimHost::UNREACHABLE, "");
+}
+
+static const char* check_artists_page_failed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (!says(MSG_BACKEND_UNREACHABLE) || !says(MSG_TRY_AGAIN)) {
+        return "the list does not say at its end why the page did not come";
+    }
+    if (lv_obj_get_scroll_bottom(find_list()) != 0) {
+        return "the list is not at its end";
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2}) {
+        return "a page that did not come was asked for again without a touch";
+    }
+
+    return check_rows(make_many_artists(), 0, 100);
+}
+
+// Try again at the list's end, once the backend answers.
+static void artists_page_retry(SimHost& host, Shell& shell) {
+    artists_page_failed(host, shell);
+
+    host.serve_artists(200, make_artist_pages(make_many_artists()));
+    tap_label(host, shell, MSG_TRY_AGAIN);
+}
+
+static const char* check_artists_page_retry(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 2}) {
+        return "the second page was not asked for again";
+    }
+
+    return check_rows(make_many_artists(), 0, 200);
+}
+
+// The back button closes the artists screen.
+static void artists_back(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_artists_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_now_playing(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 1 ? nullptr : "the artists screen did not close";
+}
+
+// A touch on the bar's cover, or on its texts, from the artists screen.
+static void artists_bar_cover(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(BAR_COVER.x, BAR_COVER.y);
+}
+
+static void artists_bar_texts(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+// The "Reconnecting" marker at the heading's right, clear of the button beside the list.
+static void artists_reconnecting(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+
+    open_library(host, shell, LIBRARY);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -2966,6 +3719,25 @@ const std::vector<Scene>& get_scenes() {
         {"bar-open-failed-list", bar_open_failed_list, check_bar_opened},
         {"bar-open-not-root", bar_open_not_root, check_bar_open_not_root, after_touches_ms(3)},
         {"bar-controls", bar_controls, check_bar_controls, after_touches_ms(5)},
+        {"library-open", library_open, check_library_open},
+        {"artists", artists, check_artists},
+        {"artists-letters", artists_letters, check_artists_letters},
+        {"artists-jump", artists_jump, check_artists_jump, after_touches_ms(2)},
+        {"artists-jump-end", artists_jump_end, check_artists_jump_end, after_touches_ms(2)},
+        {"artists-loading", artists_loading, check_artists_loading},
+        {"artists-unreachable", artists_unreachable, check_artists_unreachable},
+        {"artists-error", artists_error, check_artists_error},
+        {"artists-unreadable", artists_unreadable, check_artists_error},
+        {"artists-empty", artists_empty, check_artists_empty},
+        {"artists-retry", artists_retry, check_artists_retry},
+        {"artists-pages", artists_pages, check_artists_pages},
+        {"artists-pages-back", artists_pages_back, check_artists_pages_back},
+        {"artists-page-failed", artists_page_failed, check_artists_page_failed},
+        {"artists-page-retry", artists_page_retry, check_artists_page_retry},
+        {"artists-back", artists_back, check_artists_back},
+        {"artists-bar-cover", artists_bar_cover, check_bar_opened},
+        {"artists-bar-texts", artists_bar_texts, check_bar_opened},
+        {"artists-reconnecting", artists_reconnecting, check_artists},
     };
 
     return scenes;

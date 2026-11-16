@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "ArtistsView.h"
 #include "Messages.h"
 #include "NowPlayingView.h"
 #include "SpeakerPickerView.h"
@@ -105,6 +106,8 @@ void Shell::show_first_view() {
 }
 
 void Shell::open_speaker_picker() { push(std::make_unique<SpeakerPickerView>(_host, this)); }
+
+void Shell::open_library() { push(std::make_unique<ArtistsView>(_host, this)); }
 
 void Shell::show_now_playing() {
     const auto found =

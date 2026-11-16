@@ -407,6 +407,142 @@ const char* read_volume_change(int status, const char* body, size_t length, Volu
     return read_volume_fields(root.get(), volume);
 }
 
+// A number of the answer's that must be whole and at least `least`.
+static bool read_count(const cJSON* object, const char* name, int least, uint32_t& value) {
+    const auto item = cJSON_GetObjectItemCaseSensitive(object, name);
+    if (!cJSON_IsNumber(item) || item->valuedouble != item->valueint || item->valueint < least) {
+        return false;
+    }
+
+    value = uint32_t(item->valueint);
+
+    return true;
+}
+
+// A page of a list: `data`, each item read by `read_item`, and of `meta` the page's number, its
+// size, which is the PAGE_SIZE asked for, and the list's total, which the items up to this page
+// do not pass. `sort_by`, `sort_dir` and `total_pages` are not used, so they are not read.
+template <typename Item>
+static const char* read_page_fields(const cJSON* root, Page<Item>& page,
+                                    const char* (*read_item)(const cJSON* item, Item& read)) {
+    if (!cJSON_IsObject(root)) {
+        return "the body is not a JSON object";
+    }
+
+    const auto meta = cJSON_GetObjectItemCaseSensitive(root, "meta");
+    if (!cJSON_IsObject(meta)) {
+        return "meta is not an object";
+    }
+
+    if (!read_count(meta, "page", 1, page.number)) {
+        return "meta.page is not a whole number from 1";
+    }
+
+    uint32_t per_page;
+    if (!read_count(meta, "per_page", 1, per_page) || per_page != PAGE_SIZE) {
+        return "meta.per_page is not the page size asked for";
+    }
+
+    if (!read_count(meta, "total", 0, page.total)) {
+        return "meta.total is not a whole number from 0";
+    }
+
+    const auto data = cJSON_GetObjectItemCaseSensitive(root, "data");
+    if (!cJSON_IsArray(data)) {
+        return "data is not an array";
+    }
+
+    const auto size = uint32_t(cJSON_GetArraySize(data));
+    if (size > PAGE_SIZE) {
+        return "data holds more items than a page";
+    }
+    if (uint64_t(page.number - 1) * PAGE_SIZE + size > page.total) {
+        return "data holds more items than meta.total leaves for the page";
+    }
+
+    const cJSON* item;
+    cJSON_ArrayForEach(item, data) {
+        Item read;
+        if (const auto problem = read_item(item, read)) {
+            return problem;
+        }
+
+        page.items.push_back(std::move(read));
+    }
+
+    return nullptr;
+}
+
+template <typename Item>
+static const char* read_page(int status, const char* body, size_t length, Page<Item>& page,
+                             const char* (*read_item)(const cJSON* item, Item& read)) {
+    const auto root = parse(body, length);
+
+    if (status != 200) {
+        page.state = LoadState::Failed;
+        page.error = read_error(root.get());
+
+        return "not a 200";
+    }
+
+    Page<Item> answered{.state = LoadState::Loaded};
+    if (const auto problem = read_page_fields(root.get(), answered, read_item)) {
+        page.state = LoadState::Failed;
+        page.error.clear();
+
+        return problem;
+    }
+
+    page = std::move(answered);
+
+    return nullptr;
+}
+
+// An artist's `artwork_id` is not shown, so it is not read.
+static const char* read_artist(const cJSON* item, Artist& artist) {
+    if (!cJSON_IsObject(item)) {
+        return "an artist is not an object";
+    }
+
+    const auto id = get_string(item, "id");
+    if (!id || !*id) {
+        return "an artist has no id";
+    }
+
+    const auto title = get_string(item, "title");
+    if (!title) {
+        return "an artist has no title";
+    }
+
+    const auto letter = get_string(item, "index_letter");
+    if (!letter || strlen(letter) != 1 || !(*letter == '#' || (*letter >= 'A' && *letter <= 'Z'))) {
+        return "an artist's index_letter is not a letter from A to Z or #";
+    }
+
+    // The id is opaque, and goes back to the backend as it came: it is never cut.
+    artist = Artist{.id = id, .title = read_text(title), .index_letter = *letter};
+
+    return nullptr;
+}
+
+// The jump to a letter rests on the order: a letter's artists are together, those under '#' first,
+// which ASCII puts before 'A'.
+const char* read_artists(int status, const char* body, size_t length, Page<Artist>& page) {
+    if (const auto problem = read_page(status, body, length, page, read_artist)) {
+        return problem;
+    }
+
+    for (size_t i = 1; i < page.items.size(); i++) {
+        if (page.items[i].index_letter < page.items[i - 1].index_letter) {
+            page = {.state = LoadState::Failed};
+
+            return "the artists are not in the order of their index_letter";
+        }
+    }
+
+    return nullptr;
+}
+
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id) {
     if (!cJSON_IsObject(payload)) {
         return "the payload is not a JSON object";

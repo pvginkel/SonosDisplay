@@ -15,3 +15,5 @@ playlist_music F0CB8
 cloud_off F0164
 alert F05D6
 update F06B0
+arrow_left F004D
+music_box_multiple F0333

@@ -201,6 +201,45 @@ void SimHost::process() {
     }
 }
 
+void SimHost::request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) {
+    _artist_requests.push_back(number);
+
+    const ArtistRequest request{number, std::move(scope), std::move(done)};
+    if (_artists_status && number >= 1 && number <= _artist_pages.size()) {
+        answer_artist_request(request, *_artists_status, _artist_pages[number - 1].c_str());
+    } else {
+        _held_artists.push_back(request);
+    }
+}
+
+void SimHost::answer_artists(int status, const char* body) {
+    if (_held_artists.empty()) {
+        fprintf(stderr, "render: the artists were answered, and none were asked for\n");
+        exit(1);
+    }
+
+    const auto request = std::move(_held_artists.front());
+    _held_artists.erase(_held_artists.begin());
+
+    answer_artist_request(request, status, body);
+}
+
+void SimHost::answer_artist_request(const ArtistRequest& request, int status, const char* body) {
+    if (request.scope.expired()) {
+        return;
+    }
+
+    Page<Artist> page;
+    if (status == UNREACHABLE) {
+        page.state = LoadState::Unreachable;
+    } else if (const auto problem = read_artists(status, body, strlen(body), page)) {
+        printf("W (SimHost) GET artists page %u answered %d, %s: %s\n", unsigned(request.number), status, problem,
+               page.error.c_str());
+    }
+
+    request.done(std::move(page));
+}
+
 void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                               std::function<void(Artwork)> done) {
     _artwork.request(ArtworkRequest{

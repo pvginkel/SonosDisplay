@@ -5,7 +5,9 @@
 // the rest of the firmware; UiHost.h is the other.
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <vector>
@@ -464,6 +466,148 @@ struct Volume {
 
 private:
     uint32_t _last_id{};
+};
+
+// How many items a list asks the backend for at a time: the most a page of the API holds.
+inline constexpr uint32_t PAGE_SIZE = 100;
+
+// A page of a list the backend gives in pages, as the host read the answer.
+template <typename Item>
+struct Page {
+    // Loaded, or why the page did not come: Unreachable or Failed.
+    LoadState state{LoadState::Loading};
+
+    // What the backend said went wrong, when the state is Failed and it said so.
+    std::string error;
+
+    // Which page it is, from 1, and how many items the whole list has, as the answer says.
+    uint32_t number{};
+    uint32_t total{};
+
+    std::vector<Item> items;
+};
+
+// The pages of a list that a view holds, apart from their items, which PagedList holds: which
+// pages they are, and how the last request for one went. At most MAX_PAGES pages are held, each
+// the one after the one before, so a view builds at most MAX_PAGES × PAGE_SIZE rows.
+struct PageWindow {
+    static constexpr size_t MAX_PAGES = 2;
+
+    // How the last request for a page went: Loading while it is on its way, or before the first.
+    LoadState state{LoadState::Loading};
+
+    // What the backend said went wrong, when the state is Failed and it said so.
+    std::string error;
+
+    // The page last asked for, from 1; 0 before the first.
+    uint32_t asked{};
+
+    // How many items the whole list has, by the last page answered.
+    uint32_t total{};
+
+    // The page of the first item held, from 1; 0 while none is held.
+    uint32_t first_page{};
+
+    // How many items each page held has, in order.
+    std::vector<size_t> page_sizes;
+
+    // Whether a page has come, and its items are held.
+    bool is_held() const { return !page_sizes.empty(); }
+
+    // How many items are held.
+    size_t count() const {
+        size_t count = 0;
+        for (const auto size : page_sizes) {
+            count += size;
+        }
+
+        return count;
+    }
+
+    // The place in the whole list of the first item held, from 0.
+    uint32_t first_index() const { return (first_page - 1) * PAGE_SIZE; }
+
+    // The page before the first one held, or 0 when that is the list's first.
+    uint32_t page_before() const { return is_held() && first_page > 1 ? first_page - 1 : 0; }
+
+    // The page after the last one held, or 0 when the list ends with it.
+    uint32_t page_after() const {
+        return is_held() && first_index() + count() < total ? first_page + uint32_t(page_sizes.size()) : 0;
+    }
+
+    // Whether this page was asked for and did not come.
+    bool has_failed(uint32_t page) const {
+        return page == asked && (state == LoadState::Unreachable || state == LoadState::Failed);
+    }
+
+    // A page is on its way from here on. The pages held stay until it comes.
+    void ask(uint32_t page) {
+        asked = page;
+        state = LoadState::Loading;
+        error.clear();
+    }
+};
+
+// The pages of a list that a view holds, with their items, and the rules by which they come and
+// go: the page next to those held is added at their end, and the one at the far end is dropped
+// past MAX_PAGES.
+template <typename Item>
+struct PagedList : PageWindow {
+    // The items of the pages held, in order.
+    std::vector<Item> items;
+
+    // The page asked for came, or did not. A page next to those held is added beside them; another
+    // takes the place of every page held: the first page, or one asked for again. One that did not
+    // come leaves the pages held as they are.
+    void answered(Page<Item>&& page) {
+        state = page.state;
+        error = std::move(page.error);
+        if (state != LoadState::Loaded) {
+            return;
+        }
+
+        total = page.total;
+        const auto size = page.items.size();
+
+        if (is_held() && page.number == first_page + page_sizes.size()) {
+            items.insert(items.end(), std::make_move_iterator(page.items.begin()),
+                         std::make_move_iterator(page.items.end()));
+            page_sizes.push_back(size);
+
+            if (page_sizes.size() > MAX_PAGES) {
+                items.erase(items.begin(), items.begin() + ptrdiff_t(page_sizes.front()));
+                page_sizes.erase(page_sizes.begin());
+                first_page++;
+            }
+        } else if (is_held() && page.number + 1 == first_page) {
+            items.insert(items.begin(), std::make_move_iterator(page.items.begin()),
+                         std::make_move_iterator(page.items.end()));
+            page_sizes.insert(page_sizes.begin(), size);
+            first_page--;
+
+            if (page_sizes.size() > MAX_PAGES) {
+                items.erase(items.end() - ptrdiff_t(page_sizes.back()), items.end());
+                page_sizes.pop_back();
+            }
+        } else {
+            items = std::move(page.items);
+            page_sizes = {size};
+            first_page = page.number;
+        }
+    }
+};
+
+// An artist of the library.
+struct Artist {
+    // The artist's id as the API gives it.
+    std::string id;
+    std::string title;
+
+    // The letter the artist files under: 'A' to 'Z', or '#' for an artist that files under none.
+    // The backend lists a letter's artists together, those under '#' first.
+    char index_letter{};
+
+    bool operator==(const Artist&) const = default;
 };
 
 struct Model {

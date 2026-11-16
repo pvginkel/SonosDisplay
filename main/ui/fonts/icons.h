@@ -19,3 +19,5 @@
 #define ICON_CLOUD_OFF "\xF3\xB0\x85\xA4"  // U+F0164
 #define ICON_ALERT "\xF3\xB0\x97\x96"  // U+F05D6
 #define ICON_UPDATE "\xF3\xB0\x9A\xB0"  // U+F06B0
+#define ICON_ARROW_LEFT "\xF3\xB0\x81\x8D"  // U+F004D
+#define ICON_MUSIC_BOX_MULTIPLE "\xF3\xB0\x8C\xB3"  // U+F0333

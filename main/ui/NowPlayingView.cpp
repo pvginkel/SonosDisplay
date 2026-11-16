@@ -10,7 +10,7 @@ static constexpr int32_t COVER_SIZE = 400;
 static constexpr int32_t COVER_TOP = 40;
 static constexpr int32_t COLUMN_WIDTH = 312;
 static constexpr int32_t COLUMN_PADDING = 24;
-static constexpr int32_t SPEAKER_SIZE = 64;
+static constexpr int32_t TOP_BUTTON_SIZE = 64;
 static constexpr int32_t TEXT_GAP = 4;
 static constexpr int32_t TITLE_LINES = 2;
 static constexpr int32_t ERROR_LINES = 2;
@@ -35,7 +35,7 @@ void NowPlayingView::do_render(lv_obj_t* parent) {
     lv_obj_set_style_pad_row(column, Theme::GAP, LV_PART_MAIN);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
 
-    create_speaker_button(column);
+    create_buttons(column);
     create_texts(column);
     _controls = _transport.create(column, LV_PCT(100), CONTROL_SIZE, Theme::FONT_ICON_LARGE, true);
     create_retry(column);
@@ -66,23 +66,32 @@ void NowPlayingView::create_cover(lv_obj_t* parent) {
     lv_obj_set_style_text_color(notice_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
 }
 
-void NowPlayingView::create_speaker_button(lv_obj_t* parent) {
-    // At the column's left, and no wider than its icon: the Shell's "Reconnecting" marker shows
-    // over the rest of this row.
+static void create_button(lv_obj_t* parent, const char* icon, lv_event_cb_t clicked, void* user_data) {
     auto button = lv_container_create(parent);
-    lv_obj_set_size(button, SPEAKER_SIZE, SPEAKER_SIZE);
+    lv_obj_set_size(button, TOP_BUTTON_SIZE, TOP_BUTTON_SIZE);
     lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_style_bg_color(button, Theme::color(Theme::SURFACE), LV_PART_MAIN);
     lv_obj_set_style_bg_color(button, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
     lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
     lv_obj_set_style_radius(button, Theme::RADIUS, LV_PART_MAIN);
-    lv_obj_add_event_cb(button, speaker_clicked, LV_EVENT_CLICKED, this);
+    lv_obj_add_event_cb(button, clicked, LV_EVENT_CLICKED, user_data);
 
-    auto icon = lv_label_create(button);
-    lv_label_set_text(icon, ICON_SPEAKER);
-    lv_obj_set_style_text_font(icon, Theme::FONT_ICON, LV_PART_MAIN);
-    lv_obj_set_style_text_color(icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
-    lv_obj_center(icon);
+    auto icon_label = lv_label_create(button);
+    lv_label_set_text(icon_label, icon);
+    lv_obj_set_style_text_font(icon_label, Theme::FONT_ICON, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+    lv_obj_center(icon_label);
+}
+
+void NowPlayingView::create_buttons(lv_obj_t* parent) {
+    // At the column's left: the Shell's "Reconnecting" marker shows over the rest of this row,
+    // the library button's place included, which takes a press under it.
+    auto row = lv_container_create(parent);
+    lv_obj_set_style_pad_column(row, Theme::GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+
+    create_button(row, ICON_SPEAKER, speaker_clicked, this);
+    create_button(row, ICON_MUSIC_BOX_MULTIPLE, library_clicked, this);
 }
 
 void NowPlayingView::create_texts(lv_obj_t* parent) {
@@ -217,6 +226,12 @@ void NowPlayingView::speaker_clicked(lv_event_t* event) {
     auto self = (NowPlayingView*)lv_event_get_user_data(event);
 
     self->_shell->open_speaker_picker();
+}
+
+void NowPlayingView::library_clicked(lv_event_t* event) {
+    auto self = (NowPlayingView*)lv_event_get_user_data(event);
+
+    self->_shell->open_library();
 }
 
 void NowPlayingView::retry_clicked(lv_event_t* event) {
