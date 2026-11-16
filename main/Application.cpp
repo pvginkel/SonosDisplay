@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <optional>
 
 #include "api/Answers.h"
 #include "esp_heap_caps.h"
@@ -95,13 +96,15 @@ static const char* command_name(Command command) {
 }
 
 // The body of a join: the speaker whose group is joined. The id is the backend's own text, so
-// cJSON writes it as a JSON string.
-static std::string join_body(const std::string& speaker_id) {
+// cJSON writes it as a JSON string. Nothing when the heap cannot hold it.
+static std::optional<std::string> join_body(const std::string& speaker_id) {
     const auto id = cJSON_CreateString(speaker_id.c_str());
     DEFER(cJSON_Delete(id));
 
     const auto text = cJSON_PrintUnformatted(id);
-    ESP_ERROR_CHECK(text ? ESP_OK : ESP_ERR_NO_MEM);
+    if (!text) {
+        return std::nullopt;
+    }
     DEFER(cJSON_free(text));
 
     return std::string("{\"speaker_id\":") + text + "}";
@@ -502,7 +505,17 @@ void Application::send_group_change(const std::string& speaker_id, bool adds) {
     HttpRequest request{.method = adds ? HTTP_METHOD_PUT : HTTP_METHOD_DELETE,
                         .path = speaker_path(speaker_id, "/group")};
     if (adds) {
-        request.body = join_body(_model.speaker_id);
+        auto body = join_body(_model.speaker_id);
+
+        // A body the heap cannot hold is a change not taken, as HttpClient answers a request it
+        // cannot take.
+        if (!body) {
+            ESP_LOGE(TAG, "Cannot build the body of the join of %s", speaker_id.c_str());
+            group_change_answered(change, adds, HttpResponse{.err = ESP_ERR_NO_MEM});
+            return;
+        }
+
+        request.body = std::move(*body);
     }
 
     // The answer is the change's own, whichever speaker is the chosen one by then.
