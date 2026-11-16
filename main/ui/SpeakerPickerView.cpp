@@ -69,7 +69,7 @@ void SpeakerPickerView::do_update() {
     _revision = model.revision;
 
     // Of the pending changes a row shows only whose they are. The backend's taking one changes
-    // the model and builds nothing, so the row's spinner turns on.
+    // the model and builds nothing, so the row's spinner keeps turning and does not start over.
     if (model.speakers != _shown || model.speaker_id != _shown_choice ||
         get_pending_speakers(model.grouping) != _shown_pending) {
         build();

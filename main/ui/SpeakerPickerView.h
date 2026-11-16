@@ -20,7 +20,7 @@ class SpeakerPickerView : public View {
     uint32_t _revision{};
     SpeakerList _shown;
     std::string _shown_choice;
-    // The speakers a change of whose group is pending.
+    // The speakers with a group change pending, as the rows show them.
     std::vector<std::string> _shown_pending;
     lv_obj_t* _hint{};
     lv_obj_t* _body{};
