@@ -24,6 +24,10 @@ enum class StreamState {
 // when it does come.
 inline constexpr uint32_t ANSWER_TIME_LIMIT_MS = 30 * 1000;
 
+// Whether every text font draws this Unicode code point. A text the backend sends is read without
+// the characters they do not draw, which LVGL would draw as its placeholder box.
+bool can_draw(uint32_t code_point);
+
 // How the last request for a piece of the backend's state went.
 enum class LoadState {
     // Asked for, and not answered yet.

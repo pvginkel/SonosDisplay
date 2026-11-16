@@ -75,6 +75,17 @@ static const char SPEAKERS_MANY[] = R"({"data":[
  "group":{"coordinator_id":"speaker-office","member_ids":["speaker-office"],"volume":12,"muted":false}}
 ]})";
 
+// Names with characters the fonts draw since slice 002 (U+2010 the hyphen, U+02BC the modifier
+// apostrophe, U+201E the low quote) and two they do not (U+266B and U+2192).
+static const char SPEAKERS_GLYPHS[] = R"({"data":[
+{"id":"speaker-garage","name":"Garage‐Werkbank","model":"Play:3","volume":24,"muted":false,
+ "group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],"volume":24,"muted":false}},
+{"id":"speaker-studio","name":"Studio ♫ʼ74 „B”","model":"One","volume":10,"muted":false,
+ "group":{"coordinator_id":"speaker-studio","member_ids":["speaker-studio"],"volume":10,"muted":false}},
+{"id":"speaker-shed","name":"Shed→","model":"Era 100","volume":12,"muted":false,
+ "group":{"coordinator_id":"speaker-shed","member_ids":["speaker-shed"],"volume":12,"muted":false}}
+]})";
+
 static const char SPEAKERS_EMPTY[] = R"({"data":[]})";
 
 // The error envelope, with the two fields the API's document allows as null.
@@ -147,6 +158,17 @@ static const char RADIO[] =
     R"({"actions":["play","pause"],"queue_length":null,"queue_position":null,"shuffle":false,"source":"radio",)"
     R"("state":"playing","track":{"album":null,"artist":"Český rozhlas Vltava","artwork_id":null,)"
     R"("duration_ms":null,"title":"Dvořák: Slovanské tance, č. 8 – Česká filharmonie","track_id":null}})";
+
+// Texts with the characters the library's titles hold beyond Latin-1 and Latin Extended-A, which
+// the fonts draw since slice 002: U+2010 the hyphen, U+201E the low quote, U+2032 and U+2033 the
+// primes, U+02BC the modifier apostrophe, U+2082, U+1D62 and U+2C7C subscripts, U+2202, U+2206,
+// U+2211, U+221A and U+2212 signs of maths, U+207B and U+2070 superscripts. And three characters
+// they do not: U+2192, U+266B and U+6771.
+static const char PLAYING_GLYPHS[] =
+    R"({"actions":["play","pause","next","previous"],"queue_length":5,"queue_position":2,"shuffle":false,)"
+    R"("source":"queue","state":"playing","track":{"album":"Signs 東∂ ∆ ∑ √ − 10⁻⁰",)"
+    R"("artist":"Ensemble ʼ67 feat. x₂ᵢⱼ","artwork_id":"YXJ0d29yay9nbHlwaHM","duration_ms":451000,)"
+    R"("title":"Rock‐a‐bye „Night” →7′30″♫","track_id":"3301"}})";
 
 static const char NOTHING_LOADED[] =
     R"({"actions":[],"queue_length":0,"queue_position":null,"shuffle":false,"source":"queue","state":"stopped",)"
@@ -670,6 +692,24 @@ static void speakers_many(SimHost& host, Shell& shell) {
     shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
 }
 
+// A speaker's name is read as a text of the backend's, the library's characters in it drawn and
+// the ones the fonts do not draw left out; the bar shows a track with them too.
+static void speakers_glyphs(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+    host.answer_speakers(200, SPEAKERS_GLYPHS);
+
+    const auto& speakers = host.get_model().speakers.speakers;
+    expect(speakers.size() == 3 && speakers[0].name == "Garage‐Werkbank" && speakers[1].name == "Studio ʼ74 „B”" &&
+               speakers[2].name == "Shed",
+           "the names were not read as the fonts draw them");
+
+    host.answer_playback(200, PLAYING_GLYPHS);
+    host.answer_volume(200, SPEAKER);
+
+    shell.open();
+    shell.open_speaker_picker();
+}
+
 static void speakers_loading(SimHost& host, Shell& shell) {
     shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
 }
@@ -1154,6 +1194,38 @@ static void now_playing(SimHost& host, Shell& shell) {
 
     const auto& volume = host.get_model().volume;
     expect(volume.level == 24 && !volume.muted && volume.shown() == 24, "the speaker fixture's volume was not read");
+}
+
+// The library's characters draw in the fonts, and a character they do not draw is left out where
+// the text is read, as are bytes that are not UTF-8.
+static void now_playing_glyphs(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING_GLYPHS);
+
+    const auto& track = host.get_model().playback.track;
+    expect(track && track->title == "Rock‐a‐bye „Night” 7′30″", "the title was not read as the fonts draw it");
+    expect(track && track->artist == "Ensemble ʼ67 feat. x₂ᵢⱼ", "the artist was not read as the fonts draw it");
+    expect(track && track->album == "Signs ∂ ∆ ∑ √ − 10⁻⁰", "the album was not read as the fonts draw it");
+
+    // A stray continuation byte, a sequence cut short, and a lead byte no sequence starts with.
+    const std::string broken = R"({"actions":[],"state":"stopped","track":{"album":"A)"
+                               "\x80"
+                               R"(B","artist":"C)"
+                               "\xFF"
+                               R"(D","artwork_id":null,"title":"E)"
+                               "\xE2\x80"
+                               R"("}})";
+    Playback read;
+    expect(!read_playback(200, broken.c_str(), broken.length(), read), "a playback with bytes not UTF-8 was refused");
+    expect(read.track && read.track->album == "AB" && read.track->artist == "CD" && read.track->title == "E",
+           "bytes that are not UTF-8 were not left out");
+
+    // A text is cut at a character, to 200 bytes: the first "é" ends at the 200th.
+    const auto long_title = std::string(198, 'a') + "é";
+    const auto long_body = std::string(R"({"actions":[],"state":"stopped","track":{"album":null,"artist":"F",)") +
+                           R"("artwork_id":null,"title":")" + long_title + "é" + R"("}})";
+    expect(!read_playback(200, long_body.c_str(), long_body.length(), read),
+           "a playback with a long title was refused");
+    expect(read.track && read.track->title == long_title, "a long title was not cut at a character to 200 bytes");
 }
 
 static void now_playing_paused(SimHost& host, Shell& shell) {
@@ -2807,6 +2879,7 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-missing-unreachable", speakers_missing_unreachable, check_missing},
         {"speakers-pick", speakers_pick, check_pick},
         {"speakers-many", speakers_many},
+        {"speakers-glyphs", speakers_glyphs, check_bar},
         {"speakers-loading", speakers_loading},
         {"speakers-empty", speakers_empty, check_empty},
         {"speakers-unreachable", speakers_unreachable, check_notice_over_bar},
@@ -2832,6 +2905,7 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-group-late-answer", speakers_group_late_answer, check_group_late_answer,
          ANSWER_TIME_LIMIT_MS + 1000},
         {"now-playing", now_playing, check_now_playing},
+        {"now-playing-glyphs", now_playing_glyphs, check_now_playing},
         {"now-playing-paused", now_playing_paused},
         {"now-playing-radio", now_playing_radio, check_radio},
         {"now-playing-nothing", now_playing_nothing},

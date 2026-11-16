@@ -2,7 +2,8 @@
 
 // The backend's answers, read into the model's types. This is where what the backend sends
 // enters the app, so it is checked here: an answer that is not what the API's document says is
-// refused whole, and one it allows is never refused for a field the display does not show.
+// refused whole, and one it allows is never refused for a field the display does not show. A text
+// it sends is read without the characters the fonts do not draw (can_draw()).
 //
 // It includes cJSON, the C++ standard library and ui/Model.h only, so sim/ builds it too and its
 // scenes come from bodies as the backend sends them.

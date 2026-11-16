@@ -12,7 +12,7 @@
 // No list on the display builds more than 200 rows, and the picker builds one per speaker.
 static constexpr size_t MAX_SPEAKERS = 200;
 
-// A text the backend sends is shown as it is, up to this many bytes.
+// A text the backend sends is shown up to this many bytes.
 static constexpr size_t MAX_TEXT_LENGTH = 200;
 
 using Json = std::unique_ptr<cJSON, void (*)(cJSON*)>;
@@ -25,15 +25,72 @@ static const char* get_string(const cJSON* object, const char* name) {
     return cJSON_IsString(item) ? item->valuestring : nullptr;
 }
 
-// A text of the backend's, cut at a character boundary.
-static std::string read_text(const char* text) {
-    std::string result = text;
-    if (result.length() > MAX_TEXT_LENGTH) {
-        auto end = MAX_TEXT_LENGTH;
-        while (end > 0 && (uint8_t(result[end]) & 0xC0) == 0x80) {
-            end--;
+// The UTF-8 character `text` starts with, of `length` bytes at most: its length in bytes, with its
+// code point in `code_point`, or 0 where `text` does not start with one: a stray continuation
+// byte, a sequence cut short, an overlong one, or one past U+10FFFF.
+static size_t decode_utf8(const char* text, size_t length, uint32_t& code_point) {
+    const auto lead = uint8_t(text[0]);
+    size_t size;
+    uint32_t least;
+
+    if (lead < 0x80) {
+        code_point = lead;
+        return 1;
+    } else if ((lead & 0xE0) == 0xC0) {
+        size = 2;
+        code_point = lead & 0x1F;
+        least = 0x80;
+    } else if ((lead & 0xF0) == 0xE0) {
+        size = 3;
+        code_point = lead & 0x0F;
+        least = 0x800;
+    } else if ((lead & 0xF8) == 0xF0) {
+        size = 4;
+        code_point = lead & 0x07;
+        least = 0x10000;
+    } else {
+        return 0;
+    }
+
+    if (size > length) {
+        return 0;
+    }
+
+    for (size_t i = 1; i < size; i++) {
+        const auto byte = uint8_t(text[i]);
+        if ((byte & 0xC0) != 0x80) {
+            return 0;
         }
-        result.resize(end);
+
+        code_point = code_point << 6 | (byte & 0x3F);
+    }
+
+    return code_point >= least && code_point <= 0x10FFFF ? size : 0;
+}
+
+// A text of the backend's as the display draws it: without the characters the fonts do not draw
+// and the bytes that are not UTF-8, and cut at a character to MAX_TEXT_LENGTH bytes.
+static std::string read_text(const char* text) {
+    const auto length = strlen(text);
+    std::string result;
+
+    for (size_t at = 0; at < length;) {
+        uint32_t code_point;
+        const auto size = decode_utf8(text + at, length - at, code_point);
+        if (!size) {
+            at++;
+            continue;
+        }
+
+        if (can_draw(code_point)) {
+            if (result.length() + size > MAX_TEXT_LENGTH) {
+                break;
+            }
+
+            result.append(text + at, size);
+        }
+
+        at += size;
     }
 
     return result;
@@ -112,7 +169,7 @@ static const char* read_speaker_items(const cJSON* root, std::vector<Speaker>& s
             return "a speaker has no name";
         }
 
-        Speaker speaker{.id = id, .name = name};
+        Speaker speaker{.id = id, .name = read_text(name)};
         if (const auto problem = read_group_members(item, speaker.member_ids)) {
             return problem;
         }

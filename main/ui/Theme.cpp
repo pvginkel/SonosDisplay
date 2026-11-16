@@ -1,5 +1,21 @@
 #include "Theme.h"
 
+#include <initializer_list>
+
+#include "Model.h"
+
+bool can_draw(uint32_t code_point) {
+    lv_font_glyph_dsc_t glyph;
+
+    for (const auto font : {Theme::FONT_BODY, Theme::FONT_BODY_LARGE, Theme::FONT_TITLE, Theme::FONT_HEADLINE}) {
+        if (!lv_font_get_glyph_dsc(font, &glyph, code_point, 0)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void Theme::begin(lv_display_t* display) {
     auto theme = lv_theme_default_init(display, color(ACCENT), color(SURFACE), true, FONT_BODY);
     lv_display_set_theme(display, theme);

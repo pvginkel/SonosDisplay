@@ -14,9 +14,12 @@ cd "$(dirname "$0")"
 OUT=../../main/ui/fonts
 CONV="npx --yes lv_font_conv@1.5.3"
 
-# Latin script with accents: Basic Latin, Latin-1 Supplement, Latin Extended-A, and typographic
-# punctuation (dashes, quotes, bullet, ellipsis, euro).
-TEXT_RANGES=0x20-0x7E,0xA0-0xFF,0x100-0x17F,0x2013-0x2014,0x2018-0x201D,0x2022,0x2026,0x20AC
+# Latin script with accents: Basic Latin, Latin-1 Supplement, Latin Extended-A, and the
+# punctuation, signs and sub- and superscripts the library's titles hold (dashes, quotes, bullet,
+# ellipsis, primes, euro, the modifier apostrophe, a few of maths). Roboto holds each of them. A
+# text the backend sends is read without a character the fonts do not hold (main/api/Answers.cpp).
+TEXT_RANGES=0x20-0x7E,0xA0-0xFF,0x100-0x17F,0x2BC,0x1D62,0x2010-0x2015,0x2018-0x201F,0x2022,0x2026,0x2032-0x2033,\
+0x2070,0x207B,0x2082,0x20AC,0x2202,0x2206,0x2211-0x2212,0x221A,0x2C7C
 
 ICON_RANGES=$(grep -v '^#' icons.txt | awk 'NF == 2 { printf "%s0x%s", sep, $2; sep = "," }')
 
