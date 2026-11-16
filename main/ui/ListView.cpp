@@ -109,28 +109,49 @@ void ListView::ask(uint32_t page) {
 void ListView::build() {
     _changed = false;
 
-    const auto& pages = get_pages();
+    auto& pages = get_pages();
 
-    // The row at the top of the list, and how far past its top the list is scrolled: the list
-    // built again shows it where it was. A list scrolled to its end stays there, unless rows come
-    // after it.
+    // The rows on screen: the one at the top, how far past its top the list is scrolled, and the
+    // one at the bottom. The list built again shows the top one where it was. A list scrolled to
+    // its end stays there, unless rows come after it.
     std::optional<uint32_t> anchor;
     int32_t anchor_offset = 0;
+    uint32_t last_shown = 0;
     auto at_end = false;
     const auto end_before = _first_index + uint32_t(_row_count);
     if (_list) {
         lv_obj_update_layout(_list);
         const auto scrolled = lv_obj_get_scroll_y(_list);
+        const auto shown_end = scrolled + lv_obj_get_height(_list);
         at_end = lv_obj_get_scroll_bottom(_list) <= 0;
 
         for (size_t i = 0; i < _row_count; i++) {
             const auto row = lv_obj_get_child(_list, int32_t(_first_row_child + i));
-            if (lv_obj_get_y(row) + lv_obj_get_height(row) > scrolled) {
-                anchor = _first_index + uint32_t(i);
-                anchor_offset = scrolled - lv_obj_get_y(row);
+            const auto top = lv_obj_get_y(row);
+            if (top >= shown_end) {
                 break;
             }
+            if (top + lv_obj_get_height(row) <= scrolled) {
+                continue;
+            }
+
+            if (!anchor) {
+                anchor = _first_index + uint32_t(i);
+                anchor_offset = scrolled - top;
+            }
+            last_shown = _first_index + uint32_t(i);
         }
+    }
+
+    // A page came beside those built, one past MAX_PAGES: the page at the far end from it goes,
+    // unless a row on screen is in it; then the page that came goes.
+    if (pages.page_sizes.size() > PageWindow::MAX_PAGES) {
+        const size_t first = pages.first_index();
+        const auto came_first = first < _first_index;
+        const auto far_shown = anchor && (came_first ? last_shown >= first + pages.count() - pages.page_sizes.back()
+                                                     : *anchor < first + pages.page_sizes.front());
+
+        pages.drop(came_first == far_shown);
     }
 
     lv_obj_clean(_content);
@@ -167,6 +188,11 @@ void ListView::build() {
     }
 
     do_list_built();
+
+    // What ask_near_ends() held back while a page that came was not built yet is asked for here.
+    if (_list) {
+        ask_near_ends();
+    }
 }
 
 static lv_obj_t* create_centered_column(lv_obj_t* parent) {
@@ -331,10 +357,11 @@ void ListView::scroll_to_row(size_t index) {
 }
 
 // Within a screen of an end that has a page past it, that page is asked for, unless one is on its
-// way already. A page that did not come is asked for again by its Try again only.
+// way already, or one came that the list is not built with yet. A page that did not come is asked
+// for again by its Try again only.
 void ListView::ask_near_ends() {
     const auto& pages = get_pages();
-    if (pages.state == LoadState::Loading) {
+    if (pages.state == LoadState::Loading || _changed) {
         return;
     }
 

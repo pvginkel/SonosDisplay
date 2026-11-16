@@ -2948,13 +2948,14 @@ static const std::vector<ArtistFixture> LIBRARY = {
 
 // How many artists the library has in the scenes that page: three pages, the last one short.
 static constexpr size_t MANY_ARTISTS = 250;
+static constexpr size_t FOUR_PAGES_OF_ARTISTS = 350;
 
 // Artists enough to page through, each named for its place in the list from 1, and filing under
 // the letter its name starts with.
-static std::vector<ArtistFixture> make_many_artists() {
+static std::vector<ArtistFixture> make_many_artists(size_t count = MANY_ARTISTS) {
     std::vector<ArtistFixture> artists;
-    for (size_t i = 0; i < MANY_ARTISTS; i++) {
-        const auto letter = char('A' + i * 26 / MANY_ARTISTS);
+    for (size_t i = 0; i < count; i++) {
+        const auto letter = char('A' + i * 26 / count);
 
         char title[32];
         snprintf(title, sizeof(title), "%c Artist %03zu", letter, i + 1);
@@ -3614,6 +3615,173 @@ static const char* check_artists_page_retry(const SimHost& host, const Shell& sh
     return check_rows(make_many_artists(), 0, 200);
 }
 
+// The time from the scene's start at which the third page comes, after two touches.
+static constexpr uint32_t LATE_PAGE_MS = after_touches_ms(2);
+
+// At the end of the two pages held, the list asks for the third; a jump to the first letter comes
+// before it does. The page that comes would drop the rows on screen, so it goes instead.
+static void artists_page_late(SimHost& host, Shell& shell) {
+    const auto pages = make_artist_pages(make_many_artists());
+    host.serve_artists(200, {pages[0], pages[1]});
+    open_artists(host, shell);
+    scroll_list(shell, true);
+    scroll_list(shell, true);
+
+    host.tap(JUMP.x, JUMP.y);
+    tap_label(host, shell, "A", true);
+    host.answer_after(LATE_PAGE_MS, [&host, page = pages[2]]() { host.answer_artists(200, page.c_str()); });
+}
+
+static const char* check_artists_page_late(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3}) {
+        return "the third page was not asked for at the end";
+    }
+
+    const auto row = find_row("A Artist 001");
+    if (!row || get_place(row).top != LIST_TOP) {
+        return "the first artist is not at the top of the list as the third page came";
+    }
+
+    return check_rows(make_many_artists(), 0, 200);
+}
+
+// The list goes to its start before the third page comes, then to its end again: the page that
+// went is asked for again, and comes.
+static void artists_page_late_again(SimHost& host, Shell& shell) {
+    const auto artists = make_many_artists();
+    const auto pages = make_artist_pages(artists);
+    host.serve_artists(200, {pages[0], pages[1]});
+    open_artists(host, shell);
+    scroll_list(shell, true);
+    scroll_list(shell, true);
+
+    scroll_list(shell, false);
+    host.answer_artists(200, pages[2].c_str());
+    shell.update();
+    expect(!check_rows(artists, 0, 200), "the third page took the place of the first, which is on screen");
+
+    host.serve_artists(200, pages);
+    scroll_list(shell, true);
+}
+
+static const char* check_artists_page_late_again(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 3}) {
+        return "the third page was not asked for again at the end";
+    }
+
+    return check_rows(make_many_artists(), 100, 150);
+}
+
+// Scrolls the list on screen to its end, or to its start, as a drag does before the Shell builds
+// what the backend's answers brought.
+static void drag_list(bool to_end) {
+    lv_obj_update_layout(lv_screen_active());
+    const auto list = find_list();
+    expect(list, "no list is on screen");
+
+    lv_obj_scroll_to_y(list, to_end ? LV_COORD_MAX : 0, LV_ANIM_OFF);
+}
+
+// The 199th of the 250: at the top, the rows on screen run past it into the third page.
+static constexpr const char* ROW_BEFORE_THIRD_PAGE = "U Artist 199";
+
+// Back at the start of the second and third pages, the list asks for the first; before it comes,
+// the list moves to where the rows on screen run into the third. The page that comes would drop
+// them, so it goes instead.
+static void artists_page_late_start(SimHost& host, Shell& shell) {
+    artists_pages(host, shell);
+    host.serve_artists(200, {});
+
+    scroll_list(shell, false);
+    lv_obj_update_layout(lv_screen_active());
+    const auto row = find_row(ROW_BEFORE_THIRD_PAGE);
+    expect(row, "the row before the third page is not listed");
+    lv_obj_scroll_to_y(find_list(), lv_obj_get_y(row), LV_ANIM_OFF);
+
+    host.answer_artists(200, make_artist_pages(make_many_artists())[0].c_str());
+    shell.update();
+}
+
+static const char* check_artists_page_late_start(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 1}) {
+        return "the first page was not asked for again at the start";
+    }
+
+    const auto row = find_row(ROW_BEFORE_THIRD_PAGE);
+    if (!row || get_place(row).top != LIST_TOP) {
+        return "the row at the top moved as the first page came";
+    }
+
+    return check_rows(make_many_artists(), 100, 150);
+}
+
+// The list goes from the end of the pages held to their start while the page after them is on its
+// way, which goes as it comes. The page before them is then asked for, with no scroll to ask.
+static void artists_page_late_ask(SimHost& host, Shell& shell) {
+    const auto artists = make_many_artists(FOUR_PAGES_OF_ARTISTS);
+    const auto pages = make_artist_pages(artists);
+    host.serve_artists(200, {pages[0], pages[1], pages[2]});
+    open_artists(host, shell);
+    scroll_list(shell, true);
+    scroll_list(shell, true);
+    scroll_list(shell, true);
+
+    const auto top = scroll_list(shell, false);
+    host.answer_artists(200, pages[3].c_str());
+    shell.update();
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+
+    expect_in_place(top, "the row at the top moved as the pages came");
+}
+
+static const char* check_artists_page_late_ask(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3, 4, 1}) {
+        return "the first page was not asked for at the start once the fourth went";
+    }
+
+    return check_rows(make_many_artists(FOUR_PAGES_OF_ARTISTS), 0, 200);
+}
+
+// The third page comes, and the list goes to its end before it is built with it: the page after
+// the third is not asked for until it is, so no more than two pages are built.
+static void artists_page_unbuilt(SimHost& host, Shell& shell) {
+    const auto pages = make_artist_pages(make_many_artists(FOUR_PAGES_OF_ARTISTS));
+    host.serve_artists(200, {pages[0], pages[1]});
+    open_artists(host, shell);
+    scroll_list(shell, true);
+    scroll_list(shell, true);
+
+    host.answer_artists(200, pages[2].c_str());
+    host.serve_artists(200, pages);
+    drag_list(false);
+    drag_list(true);
+    shell.update();
+}
+
+static const char* check_artists_page_unbuilt(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (host.get_artist_requests() != std::vector<uint32_t>{1, 2, 3}) {
+        return "a page was asked for past one the list was not built with";
+    }
+
+    return check_rows(make_many_artists(FOUR_PAGES_OF_ARTISTS), 100, 200);
+}
+
 // The back button closes the artists screen.
 static void artists_back(SimHost& host, Shell& shell) {
     open_library(host, shell, LIBRARY);
@@ -3793,6 +3961,11 @@ const std::vector<Scene>& get_scenes() {
         {"artists-pages-back", artists_pages_back, check_artists_pages_back},
         {"artists-page-failed", artists_page_failed, check_artists_page_failed},
         {"artists-page-retry", artists_page_retry, check_artists_page_retry},
+        {"artists-page-late", artists_page_late, check_artists_page_late, after_touches_ms(3)},
+        {"artists-page-late-again", artists_page_late_again, check_artists_page_late_again},
+        {"artists-page-late-start", artists_page_late_start, check_artists_page_late_start},
+        {"artists-page-late-ask", artists_page_late_ask, check_artists_page_late_ask},
+        {"artists-page-unbuilt", artists_page_unbuilt, check_artists_page_unbuilt},
         {"artists-back", artists_back, check_artists_back},
         {"artists-bar-cover", artists_bar_cover, check_bar_opened},
         {"artists-bar-texts", artists_bar_texts, check_bar_opened},

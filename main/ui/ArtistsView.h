@@ -24,7 +24,7 @@ public:
     ArtistsView(UiHost* host, Shell* shell);
 
 protected:
-    const PageWindow& get_pages() const override { return _artists; }
+    PageWindow& get_pages() override { return _artists; }
     void request_page(uint32_t page) override;
     void build_row(lv_obj_t* row, size_t index) override;
     const char* get_loading_message() const override;

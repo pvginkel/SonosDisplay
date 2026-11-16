@@ -5,8 +5,9 @@
 // item's row.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
-// end, the list asks for the page past it, and once it comes the page at the far end is dropped,
-// the rows on screen staying where they are. While no page has come it says why instead: the
+// end, the list asks for the page past it, and once it comes the page at the far end from it is
+// dropped, or, when a row on screen is in that one, the page that came; the rows on screen stay
+// where they are. While no page has come it says why instead: the
 // first is on its way, did not come, with a way to ask again, or the list is empty. Past the rows,
 // at an end with a page past it, a spinner shows while that page has not come, and why, with a
 // way to ask again, when it did not.
@@ -47,7 +48,7 @@ protected:
     void do_update() override;
 
     // The pages the subclass holds.
-    virtual const PageWindow& get_pages() const = 0;
+    virtual PageWindow& get_pages() = 0;
 
     // Asks the host for this page, after PageWindow::ask(). Its answer goes into the pages, and
     // calls list_changed().

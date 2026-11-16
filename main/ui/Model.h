@@ -488,8 +488,9 @@ struct Page {
 };
 
 // The pages of a list that a view holds, apart from their items, which PagedList holds: which
-// pages they are, and how the last request for one went. At most MAX_PAGES pages are held, each
-// the one after the one before, so a view builds at most MAX_PAGES × PAGE_SIZE rows.
+// pages they are, and how the last request for one went. Each is the one after the one before. A
+// page that comes beside them makes one past MAX_PAGES until the view drops one at an end as it
+// builds the list, so it builds at most MAX_PAGES × PAGE_SIZE rows.
 struct PageWindow {
     static constexpr size_t MAX_PAGES = 2;
 
@@ -546,11 +547,13 @@ struct PageWindow {
         state = LoadState::Loading;
         error.clear();
     }
+
+    // Drops the first page held, or the last, with its items.
+    virtual void drop(bool first) = 0;
 };
 
-// The pages of a list that a view holds, with their items, and the rules by which they come and
-// go: the page next to those held is added at their end, and the one at the far end is dropped
-// past MAX_PAGES.
+// The pages of a list that a view holds, with their items, and the rules by which they come: the
+// page next to those held is added at their end.
 template <typename Item>
 struct PagedList : PageWindow {
     // The items of the pages held, in order.
@@ -573,26 +576,26 @@ struct PagedList : PageWindow {
             items.insert(items.end(), std::make_move_iterator(page.items.begin()),
                          std::make_move_iterator(page.items.end()));
             page_sizes.push_back(size);
-
-            if (page_sizes.size() > MAX_PAGES) {
-                items.erase(items.begin(), items.begin() + ptrdiff_t(page_sizes.front()));
-                page_sizes.erase(page_sizes.begin());
-                first_page++;
-            }
         } else if (is_held() && page.number + 1 == first_page) {
             items.insert(items.begin(), std::make_move_iterator(page.items.begin()),
                          std::make_move_iterator(page.items.end()));
             page_sizes.insert(page_sizes.begin(), size);
             first_page--;
-
-            if (page_sizes.size() > MAX_PAGES) {
-                items.erase(items.end() - ptrdiff_t(page_sizes.back()), items.end());
-                page_sizes.pop_back();
-            }
         } else {
             items = std::move(page.items);
             page_sizes = {size};
             first_page = page.number;
+        }
+    }
+
+    void drop(bool first) override {
+        if (first) {
+            items.erase(items.begin(), items.begin() + ptrdiff_t(page_sizes.front()));
+            page_sizes.erase(page_sizes.begin());
+            first_page++;
+        } else {
+            items.erase(items.end() - ptrdiff_t(page_sizes.back()), items.end());
+            page_sizes.pop_back();
         }
     }
 };
