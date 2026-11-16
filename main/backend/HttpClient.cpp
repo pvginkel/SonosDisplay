@@ -31,6 +31,7 @@ esp_err_t HttpClient::begin(const std::string& base_url, const char* root_certif
 
 void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope, std::function<void(HttpResponse&&)> done) {
     auto job = new Job{std::move(request), std::move(scope), std::move(done)};
+    _unanswered++;
 
     if (xQueueSend(_jobs, &job, 0) != pdTRUE) {
         ESP_LOGW(TAG, "%s: request queue full; dropping %s", _name, job->request.path.c_str());
@@ -49,6 +50,7 @@ void HttpClient::run() {
         // A closed view leaves no work behind it.
         if (job->scope.expired()) {
             delete job;
+            _unanswered--;
             continue;
         }
 
@@ -61,15 +63,19 @@ void HttpClient::deliver(Job* job, HttpResponse&& response) {
     auto shared_job = std::shared_ptr<Job>(job);
     auto shared_response = std::make_shared<HttpResponse>(std::move(response));
 
-    const auto task = [shared_job, shared_response]() {
+    const auto task = [this, shared_job, shared_response]() {
         if (!shared_job->scope.expired()) {
             shared_job->done(std::move(*shared_response));
         }
+
+        _unanswered--;
     };
 
     // send() runs on the UI task, which must not wait on its own queue.
     if (!_ui_queue->try_enqueue(task)) {
         ESP_LOGE(TAG, "%s: UI queue full; dropping the response to %s", _name, shared_job->request.path.c_str());
+
+        _unanswered--;
     }
 }
 

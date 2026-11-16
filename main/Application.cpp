@@ -6,6 +6,7 @@
 #include <optional>
 
 #include "api/Answers.h"
+#include "board/RunMark.h"
 #include "esp_heap_caps.h"
 #include "nvs.h"
 #include "support.h"
@@ -178,6 +179,8 @@ void Application::run() {
 }
 
 void Application::do_configuration_loaded(cJSON* data) {
+    RunMark::reached(RunMark::Stage::Configured);
+
     ApplicationBase::do_configuration_loaded(data);
 
     // esp-mdm frees the JSON when this returns, so what is needed is copied out.
@@ -213,6 +216,8 @@ void Application::do_configuration_loaded(cJSON* data) {
 }
 
 void Application::do_ready() {
+    RunMark::reached(RunMark::Stage::Ready);
+
     ApplicationBase::do_ready();
 
     _board->log_state();
@@ -678,7 +683,27 @@ void Application::do_process() {
         _shell->update();
     }
 
+    // After the Shell's update, so a cover it asked for counts as a request under way. do_ready
+    // restarted the panel before the backend's first connections were opened, and the first view
+    // opened while they were; once they are made, the panel is restarted again.
+    if (!_settled && has_settled()) {
+        _settled = true;
+
+        ESP_LOGI(TAG, "Startup has settled; restarting the panel");
+
+        RunMark::reached(RunMark::Stage::Settled);
+        _board->resync_panel();
+    }
+
     log_memory();
+}
+
+// The first view is up and the backend's first connections are made: the event stream is
+// connected, and neither client holds a request it has not answered. do_ready opens the first
+// view as it starts the backend.
+bool Application::has_settled() const {
+    return _event_stream && _model.stream_state == StreamState::Connected && _api_client->is_idle() &&
+           _art_client->is_idle();
 }
 
 void Application::log_memory() {

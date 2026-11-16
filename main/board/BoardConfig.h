@@ -45,6 +45,10 @@ constexpr gpio_num_t LCD_GPIO_DATA[LCD_DATA_WIDTH] = {
 // How long a flush waits for one vblank. A frame is 840 x 510 clocks, 30.6 ms at 14 MHz.
 constexpr uint32_t LCD_VSYNC_TIMEOUT_MS = 100;
 
+// How long the stop before a restart waits for a present another task is in: its two vblank
+// waits and the cache writeback.
+constexpr uint32_t LCD_STOP_TIMEOUT_MS = 2 * LCD_VSYNC_TIMEOUT_MS + 50;
+
 // How far into a frame, counted from its vblank, a swap of framebuffers still takes effect at
 // the end of that frame. The DMA reads the link to the next buffer a few lines before the frame
 // ends, about 29 ms in; the rest is margin for the cache writeback and for preemption.

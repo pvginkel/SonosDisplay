@@ -1,13 +1,28 @@
 #include "Board.h"
 
 #include "BoardConfig.h"
+#include "RunMark.h"
 #include "esp_system.h"
 #include "support.h"
 
 LOG_TAG(Board);
 
+// The panel the shutdown handler stops, which takes no argument.
+static RgbPanel* shutdown_panel;
+
 esp_err_t Board::begin() {
+    RunMark::begin();
+
     ESP_ERROR_RETURN(_panel.begin());
+
+    // esp_restart() runs the handlers on the task that called it, newest first, before it arms
+    // the watchdog that finishes the restart: nothing bounds a handler but itself. ESP-IDF keeps
+    // five; esp_timer's is in before app_main, and esp-mdm's two and WiFi's come after this one.
+    shutdown_panel = &_panel;
+    _shutdown_handler_err = esp_register_shutdown_handler(shut_down);
+    if (_shutdown_handler_err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot register the shutdown handler: %s", esp_err_to_name(_shutdown_handler_err));
+    }
 
     ESP_LOGI(TAG, "Setting up the I2C bus");
 
@@ -60,6 +75,17 @@ void Board::log_state() {
     } else {
         ESP_LOGE(TAG, "Touch is not available: %s", esp_err_to_name(_touch_err));
     }
+
+    if (_shutdown_handler_err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot register the shutdown handler: %s", esp_err_to_name(_shutdown_handler_err));
+    }
+
+    RunMark::log_previous();
+}
+
+void Board::shut_down() {
+    RunMark::restart_begun();
+    RunMark::panel_stopped(shutdown_panel->stop());
 }
 
 void Board::process() {

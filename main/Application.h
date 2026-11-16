@@ -30,6 +30,7 @@ class Application : public ApplicationBase, public UiHost {
     // The scope of the app's own requests, which lives as long as the app.
     std::shared_ptr<void> _scope{std::make_shared<int>(0)};
     int64_t _last_memory_log_ms{};
+    bool _settled{};
 
 public:
     explicit Application(Board* board);
@@ -67,6 +68,7 @@ private:
     void fetch_artwork(ArtworkRequest&& request);
     void artwork_answered(const ArtworkRequest& request, HttpResponse&& response);
     void event_received(const std::string& type, const cJSON* payload);
+    bool has_settled() const;
     void model_changed() { _model.revision++; }
     void log_memory();
 };

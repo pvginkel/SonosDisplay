@@ -4,6 +4,7 @@
 #include "esp_attr.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_timer.h"
+#include "freertos/task.h"
 #include "support.h"
 
 LOG_TAG(RgbPanel);
@@ -84,9 +85,32 @@ void RgbPanel::restart() {
     wait_vsync();
 }
 
+bool RgbPanel::stop() {
+    // Paired with present(), which sets _presenting before it reads _stopped: either the present
+    // sees the stop, or the stop sees the present.
+    _stopped.store(true);
+
+    const auto deadline = esp_timer_get_time() + LCD_STOP_TIMEOUT_MS * 1000ll;
+    while (_presenting.load()) {
+        if (esp_timer_get_time() >= deadline) {
+            return false;
+        }
+
+        vTaskDelay(1);
+    }
+
+    return true;
+}
+
 void RgbPanel::wait_vsync() { xSemaphoreTake(_vsync, pdMS_TO_TICKS(LCD_VSYNC_TIMEOUT_MS)); }
 
 void RgbPanel::present(uint8_t* framebuffer) {
+    _presenting.store(true);
+    if (_stopped.load()) {
+        _presenting.store(false);
+        return;
+    }
+
     // Late in a frame the DMA has already read the link to the next one, so a swap made then
     // would show the old buffer once more while LVGL draws into it. The swap waits for the
     // next frame to start instead.
@@ -103,6 +127,8 @@ void RgbPanel::present(uint8_t* framebuffer) {
     // into the old one.
     xSemaphoreTake(_vsync, 0);
     wait_vsync();
+
+    _presenting.store(false);
 }
 
 bool IRAM_ATTR RgbPanel::on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*, void* user_ctx) {

@@ -16,6 +16,8 @@ class RgbPanel {
     SemaphoreHandle_t _vsync{};
     // esp_timer's clock at the last vblank, in microseconds, truncated: only differences are used.
     std::atomic<uint32_t> _last_vsync_us{};
+    std::atomic<bool> _stopped{};
+    std::atomic<bool> _presenting{};
     lv_display_t* _display{};
 
 public:
@@ -29,6 +31,11 @@ public:
     // Restarts the panel's transfer, which ends any drift of the picture. Returns once the panel
     // shows the current framebuffer again, up to two frames later.
     void restart();
+
+    // Ends the presents for good, before a restart: none begins after this returns. A present
+    // another task is in is waited for, up to LCD_STOP_TIMEOUT_MS, and the result says whether
+    // it ended in that time. On the task that presents, it returns at once.
+    bool stop();
 
     lv_display_t* get_display() const { return _display; }
 

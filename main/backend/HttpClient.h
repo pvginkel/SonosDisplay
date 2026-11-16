@@ -4,6 +4,7 @@
 // UI task. It depends on esp_http_client, FreeRTOS and esp-support only, and on nothing in ui/ or
 // Application, so it can move to esp-libs as it is (docs/firmware-design.md, section 4).
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -50,6 +51,8 @@ class HttpClient {
     QueueHandle_t _jobs{};
     esp_http_client_handle_t _client{};
     int64_t _last_used_ms{};
+    // Requests sent whose answer has not yet run on the UI task, or been dropped.
+    std::atomic<uint32_t> _unanswered{};
 
 public:
     static constexpr UBaseType_t QUEUE_DEPTH = 16;
@@ -72,6 +75,9 @@ public:
     // Queues a request. `done` runs on the UI task. `scope` is owned by the caller, in practice
     // the view that asked: once it has expired, the request is dropped and `done` is not called.
     void send(HttpRequest request, std::weak_ptr<void> scope, std::function<void(HttpResponse&&)> done);
+
+    // No request is queued or under way, and every answer has run on the UI task.
+    bool is_idle() const { return _unanswered.load() == 0; }
 
 private:
     void run();
