@@ -4936,12 +4936,16 @@ static void tap_queue_button(SimHost& host, Shell& shell, const char* title, Que
     tap_center(host, find_queue_button(show_row(shell, title), action));
 }
 
-// Whether a queue's button shows its press on its way: a spinner turns where its icon was.
+// Whether a queue's button shows its press on its way: its icon is hidden, and a spinner turns in
+// its place.
 static bool shows_on_its_way(const lv_obj_t* button) {
-    const auto last = lv_obj_get_child(button, -1);
+    return lv_obj_get_child_count(button) == 2 && lv_obj_has_flag(lv_obj_get_child(button, 0), LV_OBJ_FLAG_HIDDEN) &&
+           lv_obj_check_type(lv_obj_get_child(button, 1), &lv_spinner_class);
+}
 
-    return lv_obj_has_flag(lv_obj_get_child(button, 0), LV_OBJ_FLAG_HIDDEN) && last &&
-           lv_obj_check_type(last, &lv_spinner_class);
+// Whether a queue's button is at rest: its icon shows, alone.
+static bool shows_at_rest(const lv_obj_t* button) {
+    return lv_obj_get_child_count(button) == 1 && !lv_obj_has_flag(lv_obj_get_child(button, 0), LV_OBJ_FLAG_HIDDEN);
 }
 
 // The rows that show presses on their way, by title, and the actions of those presses.
@@ -4972,9 +4976,12 @@ static const char* check_presses(const Presses& presses) {
             const auto on_its_way =
                 pressed != presses.end() &&
                 std::find(pressed->second.begin(), pressed->second.end(), action) != pressed->second.end();
-            if (shows_on_its_way(find_queue_button(row, action)) != on_its_way) {
-                return on_its_way ? "a press on its way does not show on its button"
-                                  : "a button whose press is not on its way shows one";
+            const auto button = find_queue_button(row, action);
+            if (on_its_way && !shows_on_its_way(button)) {
+                return "a press on its way does not show on its button";
+            }
+            if (!on_its_way && !shows_at_rest(button)) {
+                return "a button whose press is not on its way is not at rest";
             }
         }
     }
