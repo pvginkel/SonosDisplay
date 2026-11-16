@@ -3853,6 +3853,32 @@ static const char* check_artists_back(const SimHost& host, const Shell& shell) {
     return shell.count_views() == 1 ? nullptr : "the artists screen did not close";
 }
 
+// What the now-playing screen said is not said again once a view over it closes, however soon.
+static void now_playing_refused_back(SimHost& host, Shell& shell) {
+    host.artists().serve(200, make_artist_pages(LIBRARY));
+    open_now_playing(host, shell, PLAYING);
+    host.answer_commands(409, ERROR_NOT_AVAILABLE);
+    host.answer_next_playback(200, PLAYING_LAST);
+
+    host.tap(NEXT.x, NEXT.y);
+    host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_now_playing_refused_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_refused(host, shell)) {
+        return problem;
+    }
+    if (shell.count_views() != 1) {
+        return "the artists screen did not close";
+    }
+    if (says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the now-playing screen still says what it said before the artists screen opened over it";
+    }
+
+    return check_now_playing(host, shell);
+}
+
 // A touch on the bar's cover, or on its texts, from the artists screen.
 static void artists_bar_cover(SimHost& host, Shell& shell) {
     open_library(host, shell, LIBRARY);
@@ -6173,6 +6199,7 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-next", now_playing_next, check_next},
         {"now-playing-refused", now_playing_refused, check_refused_said},
         {"now-playing-refused-later", now_playing_refused, check_refused_later, AFTER_NOTICE_MS},
+        {"now-playing-refused-back", now_playing_refused_back, check_now_playing_refused_back, after_touches_ms(3)},
         {"now-playing-loading", now_playing_loading, check_loading},
         {"now-playing-unreachable", now_playing_unreachable, check_now_playing},
         {"now-playing-error", now_playing_error},
