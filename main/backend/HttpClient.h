@@ -6,21 +6,27 @@
 
 #include <atomic>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
 
+#include "Mutex.h"
 #include "Queue.h"
 #include "esp_err.h"
 #include "esp_http_client.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
+#include "freertos/semphr.h"
 
 struct HttpRequest {
     esp_http_client_method_t method{HTTP_METHOD_GET};
     std::string path;  // "/api/..." appended to the base URL
     std::string body;  // JSON for POST/PUT/DELETE, else empty
     size_t max_response{256 * 1024};
+    // Whether the request goes as one with an equal request that also merges and still waits to
+    // be sent. The later caller's scope and `done` then take the place of the earlier's, whose
+    // `done` is not called. A request under way merges with nothing.
+    bool merges{};
 };
 
 // A response body in PSRAM, with a NUL byte after its last byte that `length` does not count.
@@ -48,7 +54,11 @@ class HttpClient {
     const char* _name;
     std::string _base_url;
     const char* _root_certificate{};
-    QueueHandle_t _jobs{};
+    Mutex _lock;
+    // The jobs that wait to be sent, oldest first. Guarded by _lock.
+    std::deque<Job*> _waiting;
+    // Counts the jobs in _waiting.
+    SemaphoreHandle_t _jobs_waiting{};
     esp_http_client_handle_t _client{};
     int64_t _last_used_ms{};
     // Requests sent whose answer has not yet run on the UI task, or been dropped.
@@ -72,8 +82,9 @@ public:
     esp_err_t begin(const std::string& base_url, const char* root_certificate, uint32_t stack_size,
                     UBaseType_t priority, BaseType_t core);
 
-    // Queues a request. `done` runs on the UI task. `scope` is owned by the caller, in practice
-    // the view that asked: once it has expired, the request is dropped and `done` is not called.
+    // Queues a request, or merges it with one that waits (HttpRequest::merges). `done` runs on
+    // the UI task. `scope` is owned by the caller, in practice the view that asked: once it has
+    // expired, the request is dropped and `done` is not called.
     void send(HttpRequest request, std::weak_ptr<void> scope, std::function<void(HttpResponse&&)> done);
 
     // No request is queued or under way, and every answer has run on the UI task.

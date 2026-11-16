@@ -18,6 +18,12 @@ enum class StreamState {
     Disconnected,
 };
 
+// How long a change sent to the backend waits for its answer, from when it is sent. Longer than a
+// request on the path of presses takes, whose connection, send and answer HttpClient gives 5 s a
+// wait. A change whose answer has not come by then is settled, and its answer changes nothing
+// when it does come.
+inline constexpr uint32_t ANSWER_TIME_LIMIT_MS = 30 * 1000;
+
 // How the last request for a piece of the backend's state went.
 enum class LoadState {
     // Asked for, and not answered yet.
@@ -84,6 +90,9 @@ struct GroupChange {
     // Whether the speaker joins the group. It leaves it otherwise.
     bool adds{};
 
+    // LVGL's tick when the change was sent.
+    uint32_t sent_at{};
+
     // LVGL's tick when the backend took the change; empty while the change is on its way.
     std::optional<uint32_t> taken_at;
 
@@ -94,7 +103,8 @@ struct GroupChange {
 // answer to a change says that the speaker took it, not that the group has changed: the speakers
 // list shows the old groups until the speakers have reported the new ones. A change is pending
 // from the press until then, and its speaker takes no second change for as long: the backend
-// decides from the old groups whether a repeat is sent to the speaker.
+// decides from the old groups whether a repeat is sent to the speaker. An answer to a change that
+// is no longer pending changes nothing: the host reads one only while is_pending() says so.
 struct Grouping {
     // How long a change the backend took waits for a list that shows it.
     static constexpr uint32_t TIME_LIMIT_MS = 15 * 1000;
@@ -117,11 +127,18 @@ struct Grouping {
     // Whether a change of this speaker can be sent.
     bool allows(const std::string& speaker_id) const { return !find(speaker_id); }
 
-    // A change is on its way to the backend: `speaker_id` joins the group of `group_of`, the
-    // chosen speaker, or leaves it. Returns the change's id, which its answer is told by.
-    uint32_t sent(const std::string& speaker_id, const std::string& group_of, bool adds) {
+    // Whether the change with this id is pending.
+    bool is_pending(uint32_t id) const {
+        return std::any_of(pending.begin(), pending.end(), [id](const GroupChange& change) { return change.id == id; });
+    }
+
+    // A change is on its way to the backend from `now`, LVGL's tick: `speaker_id` joins the group
+    // of `group_of`, the chosen speaker, or leaves it. Returns the change's id, which its answer is
+    // told by.
+    uint32_t sent(const std::string& speaker_id, const std::string& group_of, bool adds, uint32_t now) {
         const auto id = ++_last_id;
-        pending.push_back(GroupChange{.id = id, .speaker_id = speaker_id, .group_of = group_of, .adds = adds});
+        pending.push_back(
+            GroupChange{.id = id, .speaker_id = speaker_id, .group_of = group_of, .adds = adds, .sent_at = now});
 
         return id;
     }
@@ -155,10 +172,12 @@ struct Grouping {
     }
 
     // Settles the changes the backend took TIME_LIMIT_MS or longer before `now`, LVGL's tick, and
-    // returns whether there was one. The host then fetches the speakers again.
+    // those still on their way ANSWER_TIME_LIMIT_MS or longer after they were sent, and returns
+    // whether there was one. The host then fetches the speakers again.
     bool timed_out(uint32_t now) {
         const auto settled = std::erase_if(pending, [now](const GroupChange& change) {
-            return change.taken_at && now - *change.taken_at >= TIME_LIMIT_MS;
+            return change.taken_at ? now - *change.taken_at >= TIME_LIMIT_MS
+                                   : now - change.sent_at >= ANSWER_TIME_LIMIT_MS;
         });
 
         return settled > 0;
@@ -286,7 +305,21 @@ private:
     }
 };
 
-// The volume of the chosen speaker's group, and the rules by which presses change it.
+// A change of the volume on its way to the backend.
+struct VolumeChange {
+    // What tells this change's answer from another change's.
+    uint32_t id{};
+
+    // What the level changes by.
+    int step{};
+
+    // LVGL's tick when the change was sent.
+    uint32_t sent_at{};
+};
+
+// The volume of the chosen speaker's group, and the rules by which presses change it. An answer to
+// a change that is not the one on its way changes nothing: the host reads one only while
+// is_sending() says so.
 struct Volume {
     // What one press changes the level by.
     static constexpr int STEP = 2;
@@ -303,8 +336,8 @@ struct Volume {
     int level{};
     bool muted{};
 
-    // The step on its way to the backend; 0 while none is.
-    int sending{};
+    // The change on its way to the backend, if one is.
+    std::optional<VolumeChange> sending;
 
     // The steps pressed since that one was sent. They go as one change once it is answered, so
     // at most one change is on its way however many presses there were.
@@ -318,8 +351,11 @@ struct Volume {
 
     bool is_changing() const { return sending || waiting; }
 
+    // Whether the change with this id is the one on its way.
+    bool is_sending(uint32_t id) const { return sending && sending->id == id; }
+
     // The level the presses lead to, which a view shows while the level is known.
-    int shown() const { return std::clamp(level + sending + waiting, 0, MAX_LEVEL); }
+    int shown() const { return std::clamp(level + (sending ? sending->step : 0) + waiting, 0, MAX_LEVEL); }
 
     // Whether a press on down, a negative step, or on up does anything. While the level is on its
     // way nothing does. While it could not be fetched one step goes without it: the answer to a
@@ -349,38 +385,58 @@ struct Volume {
         }
     }
 
-    // The change to send now: the steps that wait, once none is on its way. It is on its way
-    // from here on.
-    std::optional<int> next_change() {
+    // The change to send now, at `now`, LVGL's tick: the steps that wait, once none is on its
+    // way. It is on its way from here on.
+    std::optional<VolumeChange> next_change(uint32_t now) {
         if (sending || !waiting) {
             return std::nullopt;
         }
 
-        sending = std::clamp(waiting, -MAX_CHANGE, MAX_CHANGE);
+        sending = VolumeChange{.id = ++_last_id, .step = std::clamp(waiting, -MAX_CHANGE, MAX_CHANGE), .sent_at = now};
         waiting = 0;
 
         return sending;
     }
 
-    // The backend took the change, and its answer is the level.
-    void change_taken() { sending = 0; }
+    // The backend took the change on its way, and its answer is the level.
+    void change_taken() { sending.reset(); }
 
-    // The backend answered the change with an error, or did not answer. The steps that wait are
-    // dropped with it, and the host fetches the volume again, which puts the level right.
+    // The backend answered the change on its way with an error, or did not answer. The steps that
+    // wait are dropped with it, and the host fetches the volume again, which puts the level right.
     void change_not_taken() {
-        sending = 0;
+        sending.reset();
         waiting = 0;
         changes_not_taken++;
     }
 
+    // Settles the change on its way when it was sent ANSWER_TIME_LIMIT_MS or longer before `now`,
+    // LVGL's tick, and returns whether there was one. The steps that wait are dropped with it, and
+    // the host fetches the volume again, which puts the level right.
+    bool timed_out(uint32_t now) {
+        if (!sending || now - sending->sent_at < ANSWER_TIME_LIMIT_MS) {
+            return false;
+        }
+
+        sending.reset();
+        waiting = 0;
+
+        return true;
+    }
+
     // Another speaker is chosen: nothing is known of its volume. The count goes on, so a view
-    // does not take the change for one that was not taken.
+    // does not take the change for one that was not taken, and so do the ids, so the answer to a
+    // change for the speaker before is not taken for a later change's.
     void speaker_changed() {
         const auto not_taken = changes_not_taken;
+        const auto last_id = _last_id;
 
         *this = {};
         changes_not_taken = not_taken;
+        _last_id = last_id;
     }
+
+private:
+    uint32_t _last_id{};
 };
 
 struct Model {

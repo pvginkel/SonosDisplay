@@ -529,15 +529,16 @@ static void expect_group_change_rules() {
         expect(model.in_group("speaker-bathroom"), "a change refused did not fetch the speakers again");
     }
 
-    // The time limit runs from the backend's answer, on LVGL's tick, which wraps.
+    // The time limit of a change the backend took runs from its answer, on LVGL's tick, which
+    // wraps.
     {
         static constexpr uint32_t LIMIT = Grouping::TIME_LIMIT_MS;
 
         Grouping grouping;
 
-        const auto first = grouping.sent("speaker-bathroom", "speaker-garage", true);
-        expect(!grouping.timed_out(10 * LIMIT) && !grouping.allows("speaker-bathroom"),
-               "a change on its way ran out of time");
+        const auto first = grouping.sent("speaker-bathroom", "speaker-garage", true, 0);
+        expect(!grouping.timed_out(ANSWER_TIME_LIMIT_MS - 1) && !grouping.allows("speaker-bathroom"),
+               "a change on its way ran out of time before its answer's time limit");
 
         grouping.taken(first, 1000);
         expect(!grouping.timed_out(1000 + LIMIT - 1) && !grouping.allows("speaker-bathroom"),
@@ -547,7 +548,7 @@ static void expect_group_change_rules() {
         expect(!grouping.timed_out(1000 + LIMIT) && grouping.changes_not_taken == 0,
                "a change settled by the time limit is settled twice, or counts as not taken");
 
-        const auto wrapped = grouping.sent("speaker-bathroom", "speaker-garage", false);
+        const auto wrapped = grouping.sent("speaker-bathroom", "speaker-garage", false, UINT32_MAX - 99);
         grouping.taken(wrapped, UINT32_MAX - 99);
         expect(!grouping.timed_out(LIMIT - 101) && grouping.timed_out(LIMIT - 100),
                "the time limit does not hold across the tick's wrap");
@@ -558,11 +559,11 @@ static void expect_group_change_rules() {
         expect(!read_speakers(200, SPEAKERS_REGROUPED, strlen(SPEAKERS_REGROUPED), list),
                "the regrouped fixture was not read as a list");
 
-        const auto settled = grouping.sent("speaker-bathroom", "speaker-garage", true);
+        const auto settled = grouping.sent("speaker-bathroom", "speaker-garage", true, 0);
         grouping.listed(list);
         expect(grouping.allows("speaker-bathroom"), "a list did not settle a change on its way");
 
-        const auto later = grouping.sent("speaker-bathroom", "speaker-garage", false);
+        const auto later = grouping.sent("speaker-bathroom", "speaker-garage", false, 0);
         grouping.taken(settled, 0);
         grouping.not_taken(settled);
         expect(!grouping.allows("speaker-bathroom") && !grouping.find("speaker-bathroom")->taken_at &&
@@ -958,6 +959,84 @@ static const char* check_group_scrolled(const SimHost& host, const Shell& shell)
     }
 
     return check_groups(host, shell, "speaker-attic", 1, 1, {{"speaker-garage", "speaker-attic", true}});
+}
+
+// A change of a group that is not answered is settled once ANSWER_TIME_LIMIT_MS have passed since
+// it was sent, on LVGL's tick, which wraps, and counts as neither taken nor not taken. A change the
+// backend took keeps its own limit from the answer. The answer to a settled change is not the
+// answer to a later change of the same speaker.
+static void expect_group_answer_time_limit_rules() {
+    static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
+
+    Grouping grouping;
+
+    const auto first = grouping.sent("speaker-bathroom", "speaker-garage", true, 1000);
+    expect(!grouping.timed_out(1000 + LIMIT - 1) && grouping.is_pending(first),
+           "a change on its way was settled before its time limit");
+    expect(grouping.timed_out(1000 + LIMIT) && !grouping.is_pending(first) && grouping.allows("speaker-bathroom"),
+           "the time limit did not settle a change on its way");
+    expect(!grouping.timed_out(1000 + LIMIT) && grouping.changes_not_taken == 0,
+           "a change settled by its time limit is settled twice, or counts as not taken");
+
+    const auto later = grouping.sent("speaker-bathroom", "speaker-garage", false, 1000 + LIMIT);
+    grouping.taken(first, 1000 + LIMIT);
+    expect(grouping.is_pending(later) && !grouping.find("speaker-bathroom")->taken_at,
+           "the answer to a change settled by its time limit was taken for a later change's");
+
+    // Taken just before its time limit, a change waits for its list from the answer.
+    grouping.taken(later, 1000 + 2 * LIMIT - 1);
+    expect(!grouping.timed_out(1000 + 2 * LIMIT - 2 + Grouping::TIME_LIMIT_MS) && grouping.is_pending(later),
+           "a change the backend took was settled by the time limit of a change on its way");
+    expect(grouping.timed_out(1000 + 2 * LIMIT - 1 + Grouping::TIME_LIMIT_MS) && !grouping.is_pending(later),
+           "a change the backend took was not settled by its time limit");
+
+    const auto wrapped = grouping.sent("speaker-bathroom", "speaker-garage", true, UINT32_MAX - 99);
+    expect(!grouping.timed_out(LIMIT - 101) && grouping.timed_out(LIMIT - 100) && !grouping.is_pending(wrapped),
+           "the time limit of a change on its way does not hold across the tick's wrap");
+}
+
+// A change of a group that is never answered: once its time limit has passed it is settled without
+// a notice, the speakers are fetched again, and the control takes a press again. The list fetched
+// shows the speaker added after all, so the press removes it, and the row shows that pending.
+static void speakers_group_no_answer(SimHost& host, Shell& shell) {
+    expect_group_answer_time_limit_rules();
+
+    open_groups(host, shell, SPEAKERS_ALONE, "speaker-garage");
+    host.answer_next_speakers(200, SPEAKERS_GARAGE_LEADS);
+
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+    host.wait(ANSWER_TIME_LIMIT_MS);
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+}
+
+static const char* check_group_no_answer(const SimHost& host, const Shell& shell) {
+    if (host.get_model().not_taken()) {
+        return "a change settled by its time limit counts as not taken";
+    }
+
+    return check_groups(host, shell, "speaker-garage", 1, 1,
+                        {{"speaker-library", "speaker-garage", true}, {"speaker-library", "speaker-garage", false}});
+}
+
+// The answer to a change of a group comes after its time limit: the change is settled by then, and
+// the answer, a refusal, changes nothing.
+static void speakers_group_late_answer(SimHost& host, Shell& shell) {
+    open_groups(host, shell, SPEAKERS_ALONE, "speaker-garage");
+    host.answer_next_speakers(200, SPEAKERS_ALONE);
+
+    host.tap(SECOND_GROUP_CONTROL.x, SECOND_GROUP_CONTROL.y);
+    host.answer_after(ANSWER_TIME_LIMIT_MS + 500, [&host]() { host.answer_group_change(502, ERROR_SPEAKER); });
+}
+
+static const char* check_group_late_answer(const SimHost& host, const Shell& shell) {
+    if (host.count_unanswered_group_changes()) {
+        return "the change was not answered";
+    }
+    if (host.get_model().not_taken()) {
+        return "a refusal that came after the time limit counts as not taken";
+    }
+
+    return check_groups(host, shell, "speaker-garage", 1, 0, {{"speaker-library", "speaker-garage", true}});
 }
 
 // While no speaker is chosen no row carries a group control: a touch where one would be picks
@@ -1478,7 +1557,8 @@ static void now_playing_volume_burst(SimHost& host, Shell& shell) {
         volume.pressed(-Volume::STEP);
         expect(volume.shown() == 0 && volume.waiting == -3, "the level went under 0");
         expect(!volume.allows(-Volume::STEP) && volume.allows(Volume::STEP), "down is live at 0");
-        expect(volume.next_change() == -3 && !volume.next_change(), "a second change went while one was on its way");
+        const auto change = volume.next_change(0);
+        expect(change && change->step == -3 && !volume.next_change(0), "a second change went while one was on its way");
 
         expect(!answer(R"({"muted":false,"volume":99})"), "the answer to a change was not read");
         volume.change_taken();
@@ -1499,7 +1579,7 @@ static const char* check_volume_burst(const SimHost& host, const Shell&) {
     if (host.get_volume_changes() != std::vector<int>{Volume::STEP}) {
         return "two touches did not send one change";
     }
-    if (volume.sending != Volume::STEP || volume.waiting != Volume::STEP) {
+    if (!volume.sending || volume.sending->step != Volume::STEP || volume.waiting != Volume::STEP) {
         return "the second touch does not wait for the first one's answer";
     }
 
@@ -1553,7 +1633,8 @@ static void now_playing_volume_refused(SimHost& host, Shell& shell) {
     expect(volume.is_known() && volume.level == 24, "a change refused changed the level");
 
     volume.pressed(-Volume::STEP);
-    expect(volume.next_change() == -Volume::STEP, "a press did not go");
+    const auto change = volume.next_change(0);
+    expect(change && change->step == -Volume::STEP, "a press did not go");
     volume.pressed(-Volume::STEP);
     volume.change_not_taken();
     expect(!volume.is_changing() && volume.shown() == 24 && volume.changes_not_taken == 1,
@@ -1615,6 +1696,94 @@ static const char* check_volume_unknown(const SimHost& host, const Shell&) {
 
     return volume.allows(Volume::STEP) && volume.allows(-Volume::STEP) ? nullptr
                                                                        : "an unknown level leaves no press to make";
+}
+
+// A change of the volume that is not answered is settled once ANSWER_TIME_LIMIT_MS have passed
+// since it was sent, on LVGL's tick, which wraps: the steps pressed since are dropped with it, and
+// it counts as neither taken nor not taken. Its id tells it from a later change, also one for
+// another speaker.
+static void expect_volume_answer_time_limit_rules() {
+    static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
+
+    Volume volume;
+    std::string error;
+    expect(!read_volume_change(200, VOLUME_26, strlen(VOLUME_26), volume, error),
+           "the answer to a change was not read");
+
+    volume.pressed(Volume::STEP);
+    const auto first = volume.next_change(1000);
+    volume.pressed(Volume::STEP);
+    expect(first && !volume.timed_out(1000 + LIMIT - 1) && volume.is_sending(first->id) && volume.shown() == 30,
+           "a change on its way was settled before its time limit");
+    expect(volume.timed_out(1000 + LIMIT) && !volume.is_changing() && volume.shown() == 26,
+           "the time limit did not settle a change, or left the presses since waiting");
+    expect(!volume.timed_out(1000 + LIMIT) && volume.changes_not_taken == 0,
+           "a change settled by its time limit is settled twice, or counts as not taken");
+
+    volume.pressed(Volume::STEP);
+    const auto later = volume.next_change(1000 + LIMIT);
+    expect(later && !volume.is_sending(first->id) && volume.is_sending(later->id),
+           "the answer to a change settled by its time limit would be taken for a later change's");
+
+    volume.speaker_changed();
+    volume.pressed(Volume::STEP);
+    const auto other = volume.next_change(UINT32_MAX - 99);
+    expect(other && !volume.is_sending(later->id) && volume.is_sending(other->id),
+           "the answer to a change for the speaker before would be taken for a later change's");
+    expect(!volume.timed_out(LIMIT - 101) && volume.timed_out(LIMIT - 100),
+           "the time limit of a change does not hold across the tick's wrap");
+}
+
+// A change of the volume that is never answered: once its time limit has passed it is settled
+// without a notice, the level is fetched again, and a touch on up goes at once again.
+static void now_playing_volume_no_answer(SimHost& host, Shell& shell) {
+    expect_volume_answer_time_limit_rules();
+
+    open_now_playing(host, shell, PLAYING);
+    host.answer_next_volume(200, SPEAKER_GROUPED);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.wait(ANSWER_TIME_LIMIT_MS);
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+}
+
+static const char* check_volume_no_answer(const SimHost& host, const Shell&) {
+    const auto& volume = host.get_model().volume;
+
+    if (host.get_volume_changes() != std::vector<int>{Volume::STEP, Volume::STEP}) {
+        return "the touch after the time limit did not go at once";
+    }
+    if (volume.changes_not_taken) {
+        return "a change settled by its time limit counts as not taken";
+    }
+    if (volume.level != 31) {
+        return "the volume was not fetched again after the time limit";
+    }
+
+    return volume.shown() == 33 ? nullptr : "the level is not the one pressed to";
+}
+
+// The answer to a change of the volume comes after its time limit, while a later change is on its
+// way: it changes nothing, and the later change still waits for its own.
+static void now_playing_volume_late_answer(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+    host.answer_next_volume(200, SPEAKER_GROUPED);
+
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.wait(ANSWER_TIME_LIMIT_MS);
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.answer_after(ANSWER_TIME_LIMIT_MS + 600, [&host]() { host.answer_volume_change(200, VOLUME_34); });
+}
+
+static const char* check_volume_late_answer(const SimHost& host, const Shell& shell) {
+    if (host.count_unanswered_volume_changes() != 1) {
+        return "the first change was not answered, or the second was";
+    }
+    if (!host.get_model().volume.sending) {
+        return "the late answer settled the change on its way";
+    }
+
+    return check_volume_no_answer(host, shell);
 }
 
 // The level could not be fetched: a touch on up sends one step without it, and nothing more goes
@@ -2346,6 +2515,9 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-group-not-taken-later", speakers_group_not_taken, check_group_not_taken_later, AFTER_NOTICE_MS},
         {"speakers-group-time-limit", speakers_group_time_limit, check_group_time_limit,
          Grouping::TIME_LIMIT_MS + 1000},
+        {"speakers-group-no-answer", speakers_group_no_answer, check_group_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
+        {"speakers-group-late-answer", speakers_group_late_answer, check_group_late_answer,
+         ANSWER_TIME_LIMIT_MS + 1000},
         {"now-playing", now_playing, check_now_playing},
         {"now-playing-paused", now_playing_paused},
         {"now-playing-radio", now_playing_radio, check_radio},
@@ -2370,6 +2542,10 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-volume-refused", now_playing_volume_refused, check_volume_refused},
         {"now-playing-volume-unknown", now_playing_volume_unknown, check_volume_unknown},
         {"now-playing-volume-blind", now_playing_volume_blind, check_volume_blind},
+        {"now-playing-volume-no-answer", now_playing_volume_no_answer, check_volume_no_answer,
+         ANSWER_TIME_LIMIT_MS + 1000},
+        {"now-playing-volume-late-answer", now_playing_volume_late_answer, check_volume_late_answer,
+         ANSWER_TIME_LIMIT_MS + 1000},
         {"now-playing-cover-change", now_playing_cover_change, check_cover_change},
         {"now-playing-cover-refused", now_playing_cover_refused, check_cover_refused},
         {"now-playing-cover-wake", now_playing_cover_wake, check_cover_wake},

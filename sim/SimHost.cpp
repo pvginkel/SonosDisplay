@@ -1,6 +1,8 @@
 #include "SimHost.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -76,15 +78,17 @@ void SimHost::change_volume(int step) {
 }
 
 void SimHost::send_volume_change() {
-    const auto delta = _model.volume.next_change();
-    if (!delta) {
+    const auto change = _model.volume.next_change(lv_tick_get());
+    if (!change) {
         return;
     }
 
-    _volume_changes.push_back(*delta);
+    _volume_changes.push_back(change->step);
 
     if (_volume_change_answer) {
-        answer_volume_change(_volume_change_answer->status, _volume_change_answer->body.c_str());
+        volume_change_answered(change->id, _volume_change_answer->status, _volume_change_answer->body.c_str());
+    } else {
+        _unanswered_volume_changes.push_back(change->id);
     }
 }
 
@@ -120,33 +124,78 @@ void SimHost::remove_from_group(const std::string& speaker_id) { send_group_chan
 void SimHost::send_group_change(const std::string& speaker_id, bool adds) {
     _group_changes.push_back(GroupChangeRequest{speaker_id, _model.speaker_id, adds});
 
-    const auto change = _model.grouping.sent(speaker_id, _model.speaker_id, adds);
+    const auto change = _model.grouping.sent(speaker_id, _model.speaker_id, adds, lv_tick_get());
     _model.revision++;
 
-    if (!_group_change_answer) {
+    if (_group_change_answer) {
+        group_change_answered(UnansweredGroupChange{change, adds}, _group_change_answer->status,
+                              _group_change_answer->body.c_str());
+    } else {
+        _unanswered_group_changes.push_back(UnansweredGroupChange{change, adds});
+    }
+}
+
+void SimHost::answer_group_change(int status, const char* body) {
+    if (_unanswered_group_changes.empty()) {
+        fprintf(stderr, "render: a change of a group was answered, and none was sent\n");
+        exit(1);
+    }
+
+    const auto change = _unanswered_group_changes.front();
+    _unanswered_group_changes.erase(_unanswered_group_changes.begin());
+
+    group_change_answered(change, status, body);
+}
+
+void SimHost::group_change_answered(const UnansweredGroupChange& change, int status, const char* body) {
+    if (!_model.grouping.is_pending(change.id)) {
         return;
     }
 
     std::string error;
-    const auto problem = read_command(_group_change_answer->status, _group_change_answer->body.c_str(),
-                                      _group_change_answer->body.length(), error);
+    const auto problem = read_command(status, body, strlen(body), error);
     if (problem) {
-        printf("W (SimHost) %s group answered %d, %s: %s\n", adds ? "PUT" : "DELETE", _group_change_answer->status,
-               problem, error.c_str());
+        printf("W (SimHost) %s group answered %d, %s: %s\n", change.adds ? "PUT" : "DELETE", status, problem,
+               error.c_str());
 
-        _model.grouping.not_taken(change);
+        _model.grouping.not_taken(change.id);
         refresh_speakers();
     } else {
-        _model.grouping.taken(change, lv_tick_get());
+        _model.grouping.taken(change.id, lv_tick_get());
     }
 
     _model.revision++;
 }
 
+void SimHost::answer_after(uint32_t ms, std::function<void()> answer) {
+    _later.emplace_back(lv_tick_get() + ms, std::move(answer));
+}
+
 void SimHost::process() {
-    if (_model.grouping.timed_out(lv_tick_get())) {
+    const auto now = lv_tick_get();
+
+    // One at a time, since an answer may bring another.
+    while (true) {
+        const auto due = std::find_if(_later.begin(), _later.end(),
+                                      [now](const auto& later) { return int32_t(now - later.first) >= 0; });
+        if (due == _later.end()) {
+            break;
+        }
+
+        const auto answer = std::move(due->second);
+        _later.erase(due);
+
+        answer();
+    }
+
+    if (_model.grouping.timed_out(now)) {
         _model.revision++;
         refresh_speakers();
+    }
+
+    if (_model.volume.timed_out(now)) {
+        _model.revision++;
+        refresh_volume();
     }
 }
 
@@ -277,6 +326,22 @@ void SimHost::answer_volume(int status, const char* body) {
 }
 
 void SimHost::answer_volume_change(int status, const char* body) {
+    if (_unanswered_volume_changes.empty()) {
+        fprintf(stderr, "render: a change of the volume was answered, and none was sent\n");
+        exit(1);
+    }
+
+    const auto change = _unanswered_volume_changes.front();
+    _unanswered_volume_changes.erase(_unanswered_volume_changes.begin());
+
+    volume_change_answered(change, status, body);
+}
+
+void SimHost::volume_change_answered(uint32_t change, int status, const char* body) {
+    if (!_model.volume.is_sending(change)) {
+        return;
+    }
+
     std::string error;
     const auto problem = read_volume_change(status, body, strlen(body), _model.volume, error);
     if (problem) {

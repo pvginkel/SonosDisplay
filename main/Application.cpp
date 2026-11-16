@@ -286,7 +286,8 @@ void Application::refresh_speakers() {
         model_changed();
     }
 
-    _api_client->send(HttpRequest{.path = "/api/speakers"}, _scope,
+    // A burst of events asks for the speakers once more, not once per event.
+    _api_client->send(HttpRequest{.path = "/api/speakers", .merges = true}, _scope,
                       [this](HttpResponse&& response) { speakers_answered(std::move(response)); });
 }
 
@@ -332,8 +333,9 @@ void Application::refresh_playback() {
         model_changed();
     }
 
-    // An answer about a speaker that is no longer the chosen one is dropped.
-    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, "/playback")}, _scope,
+    // An answer about a speaker that is no longer the chosen one is dropped. A burst of events
+    // asks for the playback once more, not once per event.
+    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, "/playback"), .merges = true}, _scope,
                       [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
                           if (speaker_id == _model.speaker_id) {
                               playback_answered(std::move(response));
@@ -371,8 +373,9 @@ void Application::refresh_volume() {
         model_changed();
     }
 
-    // An answer about a speaker that is no longer the chosen one is dropped.
-    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, "")}, _scope,
+    // An answer about a speaker that is no longer the chosen one is dropped. volume_changed comes
+    // once for every speaker of a group, and asks for the volume once more.
+    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, ""), .merges = true}, _scope,
                       [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
                           if (speaker_id == _model.speaker_id) {
                               volume_answered(std::move(response));
@@ -405,32 +408,36 @@ void Application::change_volume(int step) {
     send_volume_change();
 }
 
-// backend_api runs one request at a time, and its queue drops a request when it is full. So at
+// backend_press runs one request at a time, and its queue drops a request when it is full. So at
 // most one change of the volume is in it: the presses made while one is on its way go as one
 // change when it is answered, and a transport command waits for that one change at most.
 void Application::send_volume_change() {
-    const auto delta = _model.volume.next_change();
-    if (!delta) {
+    const auto change = _model.volume.next_change(lv_tick_get());
+    if (!change) {
         return;
     }
 
-    ESP_LOGI(TAG, "Sending a volume step of %d", *delta);
+    ESP_LOGI(TAG, "Sending a volume step of %d", change->step);
 
     // A step, not a level: the speaker takes it from the volume it has, which may not be the one
-    // on screen. An answer about a speaker that is no longer the chosen one is dropped.
-    _api_client->send(HttpRequest{.method = HTTP_METHOD_POST,
-                                  .path = speaker_path(_model.speaker_id, "/group/volume"),
-                                  .body = "{\"delta\":" + std::to_string(*delta) + "}"},
-                      _scope, [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
-                          if (speaker_id == _model.speaker_id) {
-                              volume_change_answered(std::move(response));
-                          }
-                      });
+    // on screen.
+    _press_client->send(
+        HttpRequest{.method = HTTP_METHOD_POST,
+                    .path = speaker_path(_model.speaker_id, "/group/volume"),
+                    .body = "{\"delta\":" + std::to_string(change->step) + "}"},
+        _scope, [this, id = change->id](HttpResponse&& response) { volume_change_answered(id, std::move(response)); });
 }
 
-void Application::volume_change_answered(HttpResponse&& response) {
+void Application::volume_change_answered(uint32_t change, HttpResponse&& response) {
     auto& volume = _model.volume;
     std::string error;
+
+    // The change was settled by its time limit, or another speaker was chosen: the level fetched
+    // then is the one shown.
+    if (!volume.is_sending(change)) {
+        ESP_LOGW(TAG, "Ignoring the answer to a volume change that is settled");
+        return;
+    }
 
     // Whether the speaker moved for a change that was not taken is not known, so the level is
     // fetched again.
@@ -461,12 +468,12 @@ void Application::send_command(Command command) {
     const auto path = speaker_path(_model.speaker_id, "/playback/") + command_name(command);
 
     // An answer about a speaker that is no longer the chosen one is dropped.
-    _api_client->send(HttpRequest{.method = HTTP_METHOD_POST, .path = path}, _scope,
-                      [this, command, speaker_id = _model.speaker_id](HttpResponse&& response) {
-                          if (speaker_id == _model.speaker_id) {
-                              command_answered(command, std::move(response));
-                          }
-                      });
+    _press_client->send(HttpRequest{.method = HTTP_METHOD_POST, .path = path}, _scope,
+                        [this, command, speaker_id = _model.speaker_id](HttpResponse&& response) {
+                            if (speaker_id == _model.speaker_id) {
+                                command_answered(command, std::move(response));
+                            }
+                        });
 }
 
 void Application::command_answered(Command command, HttpResponse&& response) {
@@ -501,7 +508,7 @@ void Application::send_group_change(const std::string& speaker_id, bool adds) {
     ESP_LOGI(TAG, "Sending speaker %s %s the group of %s", speaker_id.c_str(), adds ? "into" : "out of",
              _model.speaker_id.c_str());
 
-    const auto change = _model.grouping.sent(speaker_id, _model.speaker_id, adds);
+    const auto change = _model.grouping.sent(speaker_id, _model.speaker_id, adds, lv_tick_get());
     model_changed();
 
     // A join goes to the speaker that joins, and names a speaker of the group: the group keeps
@@ -524,7 +531,7 @@ void Application::send_group_change(const std::string& speaker_id, bool adds) {
     }
 
     // The answer is the change's own, whichever speaker is the chosen one by then.
-    _api_client->send(std::move(request), _scope, [this, change, adds](HttpResponse&& response) {
+    _press_client->send(std::move(request), _scope, [this, change, adds](HttpResponse&& response) {
         group_change_answered(change, adds, std::move(response));
     });
 }
@@ -532,6 +539,12 @@ void Application::send_group_change(const std::string& speaker_id, bool adds) {
 void Application::group_change_answered(uint32_t change, bool adds, HttpResponse&& response) {
     auto& grouping = _model.grouping;
     std::string error;
+
+    // A list or the time limit settled the change, and the speakers fetched then show the groups.
+    if (!grouping.is_pending(change)) {
+        ESP_LOGW(TAG, "Ignoring the answer to a group change that is settled");
+        return;
+    }
 
     // A 204 says that the speaker took the change. The groups change later, and speakers_changed
     // then fetches the list that settles it. Whether the speaker moved for a change that was not
@@ -631,6 +644,10 @@ void Application::begin_backend() {
     ESP_ERROR_CHECK(_api_client->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
                                        BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
 
+    _press_client = std::make_unique<HttpClient>(&get_queue(), "backend_press");
+    ESP_ERROR_CHECK(_press_client->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
+                                         BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
+
     _art_client = std::make_unique<HttpClient>(&get_queue(), "backend_art");
     ESP_ERROR_CHECK(_art_client->begin(_model.backend_url, homelab_root_pem, BACKEND_TASK_STACK_SIZE,
                                        BACKEND_TASK_PRIORITY, BACKEND_TASK_CORE));
@@ -672,11 +689,24 @@ void Application::do_process() {
     // screen wakes.
     _artwork.set_screen_lit(_board->get_screen_power().is_lit());
 
-    // A group change the backend took, which no list has shown within its time limit: the list
-    // fetched now shows the groups as they are.
-    if (_model.grouping.timed_out(lv_tick_get())) {
+    const auto now = lv_tick_get();
+
+    // A group change the backend took, which no list has shown within its time limit, or one
+    // whose answer has not come within its own: the list fetched now shows the groups as they are.
+    if (_model.grouping.timed_out(now)) {
+        ESP_LOGI(TAG, "A group change is settled by its time limit");
+
         model_changed();
         refresh_speakers();
+    }
+
+    // A change of the volume whose answer has not come within its time limit: the level fetched
+    // now is the one the speaker has.
+    if (_model.volume.timed_out(now)) {
+        ESP_LOGW(TAG, "A volume change had no answer within %d s", int(ANSWER_TIME_LIMIT_MS / 1000));
+
+        model_changed();
+        refresh_volume();
     }
 
     if (_shell) {
@@ -699,11 +729,11 @@ void Application::do_process() {
 }
 
 // The first view is up and the backend's first connections are made: the event stream is
-// connected, and neither client holds a request it has not answered. do_ready opens the first
-// view as it starts the backend.
+// connected, and no client holds a request it has not answered. do_ready opens the first view as
+// it starts the backend.
 bool Application::has_settled() const {
     return _event_stream && _model.stream_state == StreamState::Connected && _api_client->is_idle() &&
-           _art_client->is_idle();
+           _press_client->is_idle() && _art_client->is_idle();
 }
 
 void Application::log_memory() {

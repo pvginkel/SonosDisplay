@@ -37,9 +37,6 @@ static constexpr uint32_t STEP_MS = 10;
 // long press.
 static constexpr uint32_t TAP_MS = 100;
 
-// From one of a scene's touches to the next: what the first one changed is on screen by then.
-static constexpr uint32_t TAP_INTERVAL_MS = 200;
-
 static uint32_t tick_ms;
 static const SimHost* scene_host;
 static uint32_t scene_elapsed_ms;
@@ -63,10 +60,10 @@ static void flush(lv_display_t* display, const lv_area_t*, uint8_t*) { lv_displa
 
 static void read_touch(lv_indev_t*, lv_indev_data_t* data) {
     const auto& taps = scene_host->get_taps();
-    const auto index = scene_elapsed_ms / TAP_INTERVAL_MS;
+    const auto index = scene_elapsed_ms / SimHost::TAP_INTERVAL_MS;
 
-    if (index < taps.size() && scene_elapsed_ms % TAP_INTERVAL_MS < TAP_MS) {
-        data->point = taps[index];
+    if (index < taps.size() && taps[index] && scene_elapsed_ms % SimHost::TAP_INTERVAL_MS < TAP_MS) {
+        data->point = *taps[index];
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;

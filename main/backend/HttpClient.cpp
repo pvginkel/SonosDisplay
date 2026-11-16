@@ -19,8 +19,8 @@ esp_err_t HttpClient::begin(const std::string& base_url, const char* root_certif
     _base_url = base_url;
     _root_certificate = root_certificate;
 
-    _jobs = xQueueCreate(QUEUE_DEPTH, sizeof(Job*));
-    ESP_RETURN_ON_FALSE(_jobs, ESP_ERR_NO_MEM, TAG, "Cannot create the request queue");
+    _jobs_waiting = xSemaphoreCreateCounting(QUEUE_DEPTH, 0);
+    ESP_RETURN_ON_FALSE(_jobs_waiting, ESP_ERR_NO_MEM, TAG, "Cannot create the request queue");
 
     const auto created = xTaskCreatePinnedToCore([](void* arg) { ((HttpClient*)arg)->run(); }, _name, stack_size, this,
                                                  priority, nullptr, core);
@@ -30,21 +30,45 @@ esp_err_t HttpClient::begin(const std::string& base_url, const char* root_certif
 }
 
 void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope, std::function<void(HttpResponse&&)> done) {
+    auto lock = _lock.take();
+
+    if (request.merges) {
+        for (const auto waiting : _waiting) {
+            const auto& other = waiting->request;
+
+            if (other.merges && other.method == request.method && other.path == request.path &&
+                other.body == request.body) {
+                waiting->scope = std::move(scope);
+                waiting->done = std::move(done);
+                return;
+            }
+        }
+    }
+
     auto job = new Job{std::move(request), std::move(scope), std::move(done)};
     _unanswered++;
 
-    if (xQueueSend(_jobs, &job, 0) != pdTRUE) {
+    if (_waiting.size() == QUEUE_DEPTH) {
         ESP_LOGW(TAG, "%s: request queue full; dropping %s", _name, job->request.path.c_str());
 
         deliver(job, HttpResponse{.err = ESP_ERR_NO_MEM});
+        return;
     }
+
+    _waiting.push_back(job);
+    xSemaphoreGive(_jobs_waiting);
 }
 
 void HttpClient::run() {
     while (true) {
+        xSemaphoreTake(_jobs_waiting, portMAX_DELAY);
+
         Job* job;
-        if (xQueueReceive(_jobs, &job, portMAX_DELAY) != pdTRUE) {
-            continue;
+        {
+            auto lock = _lock.take();
+
+            job = _waiting.front();
+            _waiting.pop_front();
         }
 
         // A closed view leaves no work behind it.

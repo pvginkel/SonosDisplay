@@ -3,8 +3,10 @@
 // UiHost on fixtures: what the device gets from IoT Support and the backend, made up.
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "UiHost.h"
@@ -35,21 +37,31 @@ class SimHost : public UiHost {
         std::string body;
     };
 
+    // A change of a group sent to the backend and not answered yet.
+    struct UnansweredGroupChange {
+        uint32_t id;
+        bool adds;
+    };
+
     struct ArtworkAnswer {
         int status;
         std::vector<uint8_t> body;
     };
 
     Model _model;
-    std::vector<lv_point_t> _taps;
+    std::vector<std::optional<lv_point_t>> _taps;
+    // What answers on LVGL's clock, and from when.
+    std::vector<std::pair<uint32_t, std::function<void()>>> _later;
     std::vector<Command> _commands;
     std::optional<Answer> _command_answer;
     std::optional<Answer> _next_playback;
     std::vector<int> _volume_changes;
+    std::vector<uint32_t> _unanswered_volume_changes;
     std::optional<Answer> _volume_change_answer;
     std::optional<Answer> _next_volume;
     std::optional<Answer> _next_speakers;
     std::vector<GroupChangeRequest> _group_changes;
+    std::vector<UnansweredGroupChange> _unanswered_group_changes;
     std::optional<Answer> _group_change_answer;
     ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
     std::vector<ArtworkFetch> _artwork_fetches;
@@ -59,6 +71,9 @@ class SimHost : public UiHost {
     std::vector<ArtworkRequest> _held_artwork;
 
 public:
+    // From one of a scene's touches to the next: what the first one changed is on screen by then.
+    static constexpr uint32_t TAP_INTERVAL_MS = 200;
+
     SimHost();
 
     Model& model() { return _model; }
@@ -74,9 +89,14 @@ public:
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
-    // What the device does on every turn of its loop: a group change past its time limit is
-    // settled, and the speakers are asked for again.
+    // What the device does on every turn of its loop: the answers due by now come, and a change
+    // of a group or of the volume past its time limit is settled, and the speakers or the volume
+    // are asked for again.
     void process();
+
+    // Runs `answer` in process() once LVGL's clock has moved on by `ms` from now, as an answer that
+    // comes that late.
+    void answer_after(uint32_t ms, std::function<void()> answer);
 
     // The backend's answer to GET /api/speakers, read as the device reads it.
     void answer_speakers(int status, const char* body);
@@ -88,6 +108,14 @@ public:
     // What the backend answers every change of a group from here on, read as the device reads it.
     // Without it a change stays on its way.
     void answer_group_changes(int status, const char* body) { _group_change_answer = Answer{status, body}; }
+
+    // The backend's answer to the oldest change of a group that answer_group_changes() did not
+    // answer, read as the device reads it: an answer to a change that is settled by now changes
+    // nothing.
+    void answer_group_change(int status, const char* body);
+
+    // How many changes of groups are not answered yet, settled ones among them.
+    size_t count_unanswered_group_changes() const { return _unanswered_group_changes.size(); }
 
     // The changes of groups the views have sent, in order.
     const std::vector<GroupChangeRequest>& get_group_changes() const { return _group_changes; }
@@ -114,9 +142,13 @@ public:
     // stays unanswered.
     void answer_next_volume(int status, const char* body) { _next_volume = Answer{status, body}; }
 
-    // The backend's answer to the change of the volume that is on its way, read as the device
-    // reads it. The steps pressed since go as the next change.
+    // The backend's answer to the oldest change of the volume that answer_volume_changes() did not
+    // answer, read as the device reads it: an answer to a change that is settled by now changes
+    // nothing. The steps pressed since go as the next change.
     void answer_volume_change(int status, const char* body);
+
+    // How many changes of the volume are not answered yet, settled ones among them.
+    size_t count_unanswered_volume_changes() const { return _unanswered_volume_changes.size(); }
 
     // What the backend answers every change of the volume from here on. Without it a change
     // stays on its way.
@@ -163,13 +195,21 @@ public:
     }
 
     // Touches the screen at a point, and lifts 100 ms later. The first touch is made as the scene
-    // starts, and each one after it 200 ms after the one before.
+    // starts, and each one after it TAP_INTERVAL_MS after the one before.
     void tap(int32_t x, int32_t y) { _taps.push_back(lv_point_t{x, y}); }
-    const std::vector<lv_point_t>& get_taps() const { return _taps; }
+
+    // Touches nothing for `ms`, rounded up to whole TAP_INTERVAL_MS: the next touch comes that
+    // much later.
+    void wait(uint32_t ms) { _taps.resize(_taps.size() + (ms + TAP_INTERVAL_MS - 1) / TAP_INTERVAL_MS); }
+
+    // A scene's touches, in order; an empty one touches nothing.
+    const std::vector<std::optional<lv_point_t>>& get_taps() const { return _taps; }
 
 private:
     void send_volume_change();
+    void volume_change_answered(uint32_t change, int status, const char* body);
     void send_group_change(const std::string& speaker_id, bool adds);
+    void group_change_answered(const UnansweredGroupChange& change, int status, const char* body);
     void fetch_artwork(ArtworkRequest&& request);
     void answer_artwork(const ArtworkRequest& request);
 };

@@ -23,7 +23,11 @@ class Application : public ApplicationBase, public UiHost {
     std::unique_ptr<Shell> _shell;
     LoadingView* _loading_view{};
     uint32_t _screen_off_seconds{ScreenPower::DEFAULT_TIMEOUT_SECONDS};
+    // The backend's state, fetched again on its events.
     std::unique_ptr<HttpClient> _api_client;
+    // Presses: transport commands and changes of the volume and of groups, in the order they were
+    // made, behind no fetch.
+    std::unique_ptr<HttpClient> _press_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
     ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
@@ -61,7 +65,7 @@ private:
     void playback_answered(HttpResponse&& response);
     void volume_answered(HttpResponse&& response);
     void send_volume_change();
-    void volume_change_answered(HttpResponse&& response);
+    void volume_change_answered(uint32_t change, HttpResponse&& response);
     void command_answered(Command command, HttpResponse&& response);
     void send_group_change(const std::string& speaker_id, bool adds);
     void group_change_answered(uint32_t change, bool adds, HttpResponse&& response);
