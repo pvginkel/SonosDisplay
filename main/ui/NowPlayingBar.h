@@ -2,9 +2,9 @@
 
 // The now-playing bar, which the Shell shows under its content area: the cover of the track the
 // chosen speaker plays, its title and artist, play or pause, next, and the volume of the
-// speaker's group. Its controls are the now-playing screen's, under the same rules. A command or
-// a change of the volume that was not taken is said in the place of the title. A touch on the
-// cover or the texts opens the now-playing screen.
+// speaker's group. Its controls are the now-playing screen's, under the same rules. What came of a
+// press (PressNotice) is said in the place of the title. A touch on the cover or the texts opens
+// the now-playing screen.
 
 #include <cstdint>
 
@@ -25,10 +25,7 @@ private:
     bool _shown{};
     // What is on screen, so it is drawn again only when the model changed.
     uint32_t _revision{};
-    // The model's count of commands and volume changes not taken that the bar has said.
-    uint32_t _not_taken_said{};
-    uint32_t _notice_since{};
-    bool _notice{};
+    PressNotice _notice;
     Cover _cover;
     TransportControls _transport;
     VolumeControl _volume;

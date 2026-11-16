@@ -17,3 +17,5 @@ alert F05D6
 update F06B0
 arrow_left F004D
 music_box_multiple F0333
+shuffle_variant F049F
+playlist_plus F0412

@@ -2,15 +2,45 @@
 
 // The controls the now-playing screen and the now-playing bar share, and the rules by which they
 // are live: previous, play or pause, and next, each only while the speaker allows its command, and
-// the volume of the speaker's group, down, the level, and up.
+// the volume of the speaker's group, down, the level, and up. And what both say for a while after
+// a press.
 
 #include <cstdint>
+#include <string>
 
 #include "UiHost.h"
 #include "lvgl.h"
 
-// How long a view says that a command or a change of the volume was not taken.
-inline constexpr uint32_t NOT_TAKEN_NOTICE_MS = 5000;
+// How long a view says what came of a press.
+inline constexpr uint32_t NOTICE_MS = 5000;
+
+// What a view says for NOTICE_MS of what came of the presses made on the display: that a command,
+// a change of the volume or of a group, or a request to queue an item was not taken, that the
+// backend failed to queue one, in its words, or that it took an add, which nothing else on screen
+// shows. Each is said once, by the view on screen when it comes; of several at once, the failure
+// before the rest.
+class PressNotice {
+    // The model's counts that the notice has said.
+    uint32_t _not_taken{};
+    uint32_t _failed{};
+    uint32_t _added{};
+    uint32_t _since{};
+    std::string _text;
+
+public:
+    // Says nothing of what the model holds now: only what comes later. Clears what is said.
+    void skip(const Model& model);
+
+    // Says what came since the model was last read, from now. Returns whether what is said
+    // changed.
+    bool apply(const Model& model);
+
+    // Clears what is said once it has been said for NOTICE_MS. Returns whether it was cleared.
+    bool expire();
+
+    // What is said; empty while nothing is.
+    const std::string& get_text() const { return _text; }
+};
 
 class TransportControls {
     UiHost* _host;

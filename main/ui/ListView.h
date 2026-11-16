@@ -2,8 +2,9 @@
 
 // A screen of a list the backend gives in pages: a heading with a way back, and under it a row
 // for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
-// item's row, and opens an item whose row it made openable. While the Shell's "Reconnecting"
-// marker shows at the top right, the heading ends before it.
+// item's row, opens an item whose row it made openable, and queues an item whose row it gave the
+// queue's buttons. While the Shell's "Reconnecting" marker shows at the top right, the heading ends
+// before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -69,6 +70,15 @@ protected:
     // A row's title, which takes the room the row has left and is cut where it ends.
     static void create_row_title(lv_obj_t* row, const std::string& title);
 
+    // Ends this row, which build_row() was handed, with buttons that play its item, shuffle it
+    // where `shuffles`, and add it to the queue. A press on one calls queue_row(); a drag that
+    // starts on one still scrolls the list.
+    void create_queue_buttons(lv_obj_t* row, bool shuffles);
+
+    // Plays, shuffles or adds to the queue the item held at `index`, on a press on a button
+    // create_queue_buttons() made in its row.
+    virtual void queue_row(size_t index, QueueAction action) {}
+
     // What the screen says while the first page is on its way, and when the list is empty.
     virtual const char* get_loading_message() const = 0;
     virtual const char* get_empty_message() const = 0;
@@ -99,8 +109,13 @@ private:
     void build_list();
     void build_page_state(uint32_t page);
     void ask_near_ends();
+    size_t find_item(const lv_obj_t* row);
     static void back_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
     static void row_clicked(lv_event_t* event);
+    static void queue_clicked(lv_event_t* event, QueueAction action);
+    static void play_clicked(lv_event_t* event);
+    static void shuffle_clicked(lv_event_t* event);
+    static void add_clicked(lv_event_t* event);
     static void scrolled(lv_event_t* event);
 };

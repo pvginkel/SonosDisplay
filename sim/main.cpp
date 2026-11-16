@@ -62,8 +62,14 @@ static void read_touch(lv_indev_t*, lv_indev_data_t* data) {
     const auto& taps = scene_host->get_taps();
     const auto index = scene_elapsed_ms / SimHost::TAP_INTERVAL_MS;
 
-    if (index < taps.size() && taps[index] && scene_elapsed_ms % SimHost::TAP_INTERVAL_MS < TAP_MS) {
-        data->point = *taps[index];
+    const auto down_ms = scene_elapsed_ms % SimHost::TAP_INTERVAL_MS;
+    if (index < taps.size() && taps[index] && down_ms < TAP_MS) {
+        // A drag reaches its end at the last read before the touch lifts.
+        const auto& touch = *taps[index];
+        const auto moved = int32_t(down_ms);
+        const auto last = int32_t(TAP_MS - STEP_MS);
+        data->point = lv_point_t{touch.from.x + (touch.to.x - touch.from.x) * moved / last,
+                                 touch.from.y + (touch.to.y - touch.from.y) * moved / last};
         data->state = LV_INDEV_STATE_PRESSED;
     } else {
         data->state = LV_INDEV_STATE_RELEASED;

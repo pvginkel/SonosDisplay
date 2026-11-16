@@ -341,6 +341,32 @@ const char* read_command(int status, const char* body, size_t length, std::strin
     return "not a 204";
 }
 
+// The task's `status` is not shown, so it is not read.
+const char* read_queue_answer(int status, const char* body, size_t length, std::string& task_id, std::string& error) {
+    const auto root = parse(body, length);
+
+    if (status != 202) {
+        error = read_error(root.get());
+
+        return "not a 202";
+    }
+
+    error.clear();
+
+    if (!cJSON_IsObject(root.get())) {
+        return "the body is not a JSON object";
+    }
+
+    const auto id = get_string(root.get(), "task_id");
+    if (!id) {
+        return "the answer has no task_id";
+    }
+
+    task_id = id;
+
+    return nullptr;
+}
+
 // A volume and its mute, which a speaker's group and the answer to a change both hold.
 static const char* read_volume_fields(const cJSON* object, Volume& volume) {
     const auto level = cJSON_GetObjectItemCaseSensitive(object, "volume");
@@ -611,6 +637,42 @@ const char* read_speaker_event(const cJSON* payload, std::string& speaker_id) {
     }
 
     speaker_id = id;
+
+    return nullptr;
+}
+
+// An event's `timestamp` is not shown, so it is not read, and neither is what a task that goes on
+// reports.
+const char* read_task_event(const cJSON* payload, std::optional<TaskEnd>& end) {
+    if (!cJSON_IsObject(payload)) {
+        return "the payload is not a JSON object";
+    }
+
+    const auto task_id = get_string(payload, "task_id");
+    if (!task_id) {
+        return "the payload has no task_id";
+    }
+
+    const auto type = get_string(payload, "event_type");
+    if (!type) {
+        return "the payload has no event_type";
+    }
+
+    if (!strcmp(type, "task_started") || !strcmp(type, "progress_update")) {
+        end.reset();
+    } else if (!strcmp(type, "task_completed")) {
+        end = TaskEnd{.task_id = task_id};
+    } else if (!strcmp(type, "task_failed")) {
+        const auto data = cJSON_GetObjectItemCaseSensitive(payload, "data");
+        const auto error = cJSON_IsObject(data) ? get_string(data, "error") : nullptr;
+        if (!error) {
+            return "a task_failed has no data.error";
+        }
+
+        end = TaskEnd{.task_id = task_id, .error = read_text(error)};
+    } else {
+        return "the event_type is not one of a task's";
+    }
 
     return nullptr;
 }

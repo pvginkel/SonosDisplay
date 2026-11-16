@@ -37,6 +37,12 @@ struct GroupChangeRequest {
 
 class SimHost : public UiHost {
 public:
+    // A touch of the screen: where the finger goes down, and where it is when it lifts.
+    struct Touch {
+        lv_point_t from;
+        lv_point_t to;
+    };
+
     // The status of an answer that did not come: the backend could not be reached.
     static constexpr int UNREACHABLE = 0;
 
@@ -144,7 +150,7 @@ private:
     };
 
     Model _model;
-    std::vector<std::optional<lv_point_t>> _taps;
+    std::vector<std::optional<Touch>> _taps;
     // What answers on LVGL's clock, and from when.
     std::vector<std::pair<uint32_t, std::function<void()>>> _later;
     std::vector<Command> _commands;
@@ -159,6 +165,10 @@ private:
     std::vector<GroupChangeRequest> _group_changes;
     std::vector<UnansweredGroupChange> _unanswered_group_changes;
     std::optional<Answer> _group_change_answer;
+    std::vector<QueueRequest> _queue_requests;
+    std::vector<std::string> _queue_request_bodies;
+    std::vector<uint32_t> _unanswered_queue_requests;
+    std::optional<Answer> _queue_answer;
     ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
     std::vector<ArtworkFetch> _artwork_fetches;
     std::optional<ArtworkAnswer> _artwork_answer;
@@ -186,6 +196,7 @@ public:
     void send_command(Command command) override;
     void add_to_group(const std::string& speaker_id) override;
     void remove_from_group(const std::string& speaker_id) override;
+    void queue_item(const QueueRequest& request) override;
     void request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) override;
     void request_albums(const std::string& artist_id, uint32_t number, std::weak_ptr<void> scope,
                         std::function<void(Page<Album>)> done) override;
@@ -196,9 +207,9 @@ public:
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
-    // What the device does on every turn of its loop: the answers due by now come, and a change
-    // of a group or of the volume past its time limit is settled, and the speakers or the volume
-    // are asked for again.
+    // What the device does on every turn of its loop: the answers due by now come, a change of a
+    // group or of the volume past its time limit is settled and the speakers or the volume are
+    // asked for again, and a request to queue an item past its time limit is settled.
     void process();
 
     // Runs `answer` in process() once LVGL's clock has moved on by `ms` from now, as an answer that
@@ -268,6 +279,27 @@ public:
     // them.
     const std::vector<std::string>& get_volume_change_bodies() const { return _volume_change_bodies; }
 
+    // What the backend answers every request to queue an item from here on, read as the device
+    // reads it. Without it a request stays on its way.
+    void answer_queue_requests(int status, const char* body) { _queue_answer = Answer{status, body}; }
+
+    // The backend's answer to the oldest request to queue an item that answer_queue_requests() did
+    // not answer, read as the device reads it: an answer to a request that is settled by now
+    // changes nothing.
+    void answer_queue_request(int status, const char* body);
+
+    // How many requests to queue an item are not answered yet, settled ones among them.
+    size_t count_unanswered_queue_requests() const { return _unanswered_queue_requests.size(); }
+
+    // The requests to queue an item the views have sent, in order, and their bodies, as the device
+    // writes them.
+    const std::vector<QueueRequest>& get_queue_requests() const { return _queue_requests; }
+    const std::vector<std::string>& get_queue_request_bodies() const { return _queue_request_bodies; }
+
+    // The event task_event with this payload, which the event stream brings, read as the device
+    // reads it.
+    void send_task_event(const char* payload);
+
     // The library's lists.
     ListFixture<Artist>& artists() { return _artists; }
     const ListFixture<Artist>& artists() const { return _artists; }
@@ -317,20 +349,24 @@ public:
 
     // Touches the screen at a point, and lifts 100 ms later. The first touch is made as the scene
     // starts, and each one after it TAP_INTERVAL_MS after the one before.
-    void tap(int32_t x, int32_t y) { _taps.push_back(lv_point_t{x, y}); }
+    void tap(int32_t x, int32_t y) { _taps.push_back(Touch{{x, y}, {x, y}}); }
+
+    // Touches the screen at `from`, moves to `to` and lifts there, as a tap does.
+    void drag(lv_point_t from, lv_point_t to) { _taps.push_back(Touch{from, to}); }
 
     // Touches nothing for `ms`, rounded up to whole TAP_INTERVAL_MS: the next touch comes that
     // much later.
     void wait(uint32_t ms) { _taps.resize(_taps.size() + (ms + TAP_INTERVAL_MS - 1) / TAP_INTERVAL_MS); }
 
     // A scene's touches, in order; an empty one touches nothing.
-    const std::vector<std::optional<lv_point_t>>& get_taps() const { return _taps; }
+    const std::vector<std::optional<Touch>>& get_taps() const { return _taps; }
 
 private:
     void send_volume_change();
     void volume_change_answered(uint32_t change, int status, const char* body);
     void send_group_change(const std::string& speaker_id, bool adds);
     void group_change_answered(const UnansweredGroupChange& change, int status, const char* body);
+    void queue_answered(uint32_t request, int status, const char* body);
     void fetch_artwork(ArtworkRequest&& request);
     void answer_artwork(const ArtworkRequest& request);
 };

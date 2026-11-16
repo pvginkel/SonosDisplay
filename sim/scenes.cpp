@@ -25,6 +25,7 @@
 #include "TracksView.h"
 #include "api/Answers.h"
 #include "api/Artwork.h"
+#include "api/Requests.h"
 #include "cJSON.h"
 #include "fonts/icons.h"
 
@@ -1362,7 +1363,7 @@ static const char* check_refused_said(const SimHost& host, const Shell& shell) {
 
 // A scene that runs this long is drawn after a view has stopped saying that a command was not
 // taken.
-static constexpr uint32_t AFTER_NOTICE_MS = NOT_TAKEN_NOTICE_MS + 1000;
+static constexpr uint32_t AFTER_NOTICE_MS = NOTICE_MS + 1000;
 
 // A scene of this many touches runs this long: what the last one changed is drawn.
 static constexpr uint32_t after_touches_ms(uint32_t touches) { return touches * SimHost::TAP_INTERVAL_MS + 300; }
@@ -3125,14 +3126,26 @@ static void tap_label(SimHost& host, Shell& shell, const char* text, bool with_h
     host.tap(center->x, center->y);
 }
 
+// The row of the queue's buttons that ends a row of an item, if it has one.
+static lv_obj_t* find_queue_buttons(const lv_obj_t* row) {
+    const auto last = lv_obj_get_child(row, -1);
+
+    return last && lv_obj_check_type(last, &lv_obj_class) ? last : nullptr;
+}
+
 // Whether this object of a list is the row of an item, and not the state of a page past them: it
-// holds labels only, its title first.
+// holds labels, its title first, and may end in the queue's buttons.
 static bool is_row(const lv_obj_t* obj) {
     if (!lv_obj_check_type(obj, &lv_obj_class) || !lv_obj_get_child_count(obj)) {
         return false;
     }
 
-    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+    const auto labels = lv_obj_get_child_count(obj) - (find_queue_buttons(obj) ? 1 : 0);
+    if (!labels) {
+        return false;
+    }
+
+    for (uint32_t i = 0; i < labels; i++) {
         if (!lv_obj_check_type(lv_obj_get_child(obj, int32_t(i)), &lv_label_class)) {
             return false;
         }
@@ -4062,26 +4075,38 @@ static constexpr lv_point_t PLAYLISTS_BUTTON = {728, 328};
 static constexpr lv_point_t SECOND_ROW = {344, 212};
 static constexpr lv_point_t THIRD_ROW = {344, 292};
 
-// Touches the row of the list on screen whose title is this, scrolled into view first.
-static void tap_row(SimHost& host, Shell& shell, const char* title) {
+// The row of the list on screen whose title is this, whole or cut, scrolled into view once the
+// Shell has built the screen.
+static lv_obj_t* show_row(Shell& shell, const char* title) {
     shell.update();
     lv_obj_update_layout(lv_screen_active());
 
     const auto list = find_list();
     expect(list, "no list is on screen");
 
-    std::vector<lv_obj_t*> found;
-    find_labels(list, title, found);
-    expect(found.size() == 1, "the row to touch is not listed");
+    lv_obj_t* row = nullptr;
+    for (const auto candidate : get_rows(list)) {
+        if (shows_title(get_row_title(candidate), title)) {
+            expect(!row, "two rows have the title to touch");
+            row = candidate;
+        }
+    }
+    expect(row, "the row to touch is not listed");
 
-    const auto row = lv_obj_get_parent(found[0]);
     lv_obj_scroll_to_view(row, LV_ANIM_OFF);
     lv_obj_update_layout(lv_screen_active());
 
+    return row;
+}
+
+static void tap_center(SimHost& host, const lv_obj_t* obj) {
     lv_area_t area;
-    lv_obj_get_coords(row, &area);
+    lv_obj_get_coords(obj, &area);
     host.tap((area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2);
 }
+
+// Touches the row of the list on screen whose title is this, scrolled into view first.
+static void tap_row(SimHost& host, Shell& shell, const char* title) { tap_center(host, show_row(shell, title)); }
 
 // The label of the heading of the screen on top, which the headline's font draws.
 static lv_obj_t* find_heading(lv_obj_t* obj) {
@@ -4170,8 +4195,9 @@ static const char* check_album_rows() {
     const auto rows = get_rows(find_list());
     for (size_t i = 0; i < ALBUMS.size(); i++) {
         const auto year = ALBUMS[i].year;
-        const auto shown = lv_obj_get_child_count(rows[i]) == 2 ? lv_label_get_text(lv_obj_get_child(rows[i], 1)) : "";
-        if (year ? shown != std::to_string(year) : lv_obj_get_child_count(rows[i]) != 1) {
+        const auto second = lv_obj_get_child(rows[i], 1);
+        const auto has_year = lv_obj_check_type(second, &lv_label_class);
+        if (year ? !has_year || lv_label_get_text(second) != std::to_string(year) : has_year) {
             return "an album's row does not show its year, or shows one it has not";
         }
     }
@@ -4707,6 +4733,552 @@ static const char* check_playlists_back(const SimHost&, const Shell& shell) {
     return check_rows(LIBRARY, 0, LIBRARY.size());
 }
 
+// The answer to a request to queue an item that the backend took: the task that does it.
+static const char QUEUE_TAKEN[] = R"({"status":"pending","task_id":"task-7"})";
+
+// A request to queue an item that the backend refuses before any task starts.
+static const char ERROR_ITEM_NOT_FOUND[] =
+    R"({"code":"ITEM_NOT_FOUND","correlationId":null,"details":{"message":"The request could not be completed"},)"
+    R"("error":"Plex has no album with this id"})";
+
+// The words of a queueing task that failed, longer than the bar's two lines.
+static const char TASK_ERROR[] = "Plex did not answer in time, and the album was not queued";
+
+// The events of the task QUEUE_TAKEN names, and of another one.
+static const char TASK_FAILED[] =
+    R"({"data":{"error":"Plex did not answer in time, and the album was not queued"},"event_type":"task_failed",)"
+    R"("task_id":"task-7","timestamp":"2026-11-16T10:12:25.123456+00:00"})";
+static const char OTHER_TASK_FAILED[] =
+    R"({"data":{"error":"The speaker did not answer"},"event_type":"task_failed","task_id":"task-9",)"
+    R"("timestamp":"2026-11-16T10:12:25.123456+00:00"})";
+static const char TASK_COMPLETED[] =
+    R"({"data":{},"event_type":"task_completed","task_id":"task-7","timestamp":"2026-11-16T10:12:25.123456+00:00"})";
+
+// Whether a label on screen shows this text, whole or cut with dots where its place ends.
+static bool shows_text(const lv_obj_t* obj, const char* text) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return false;
+    }
+    if (lv_obj_check_type(obj, &lv_label_class) && shows_title(lv_label_get_text(obj), text)) {
+        return true;
+    }
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+        if (shows_text(lv_obj_get_child(obj, int32_t(i)), text)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// The answers to a request to queue an item and the events of its task, as the device reads them,
+// and the rules by which the display watches for its own task's end.
+static void expect_queue_rules() {
+    std::string task_id;
+    std::string error;
+    expect(!read_queue_answer(202, QUEUE_TAKEN, strlen(QUEUE_TAKEN), task_id, error) && task_id == "task-7",
+           "a 202 with a task was not read as a request taken");
+    expect(read_queue_answer(204, QUEUE_TAKEN, strlen(QUEUE_TAKEN), task_id, error) &&
+               read_queue_answer(200, QUEUE_TAKEN, strlen(QUEUE_TAKEN), task_id, error),
+           "an answer other than a 202 was read as a request to queue an item taken");
+    expect(read_queue_answer(202, R"({"status":"pending"})", 20, task_id, error), "a 202 without a task_id was taken");
+    expect(read_queue_answer(202, R"(["task-7"])", 10, task_id, error), "a 202 that is not an object was taken");
+    expect(read_queue_answer(404, ERROR_ITEM_NOT_FOUND, strlen(ERROR_ITEM_NOT_FOUND), task_id, error) &&
+               error == "Plex has no album with this id",
+           "an error envelope was taken, or its words not read");
+
+    const auto read_event = [](const char* payload, std::optional<TaskEnd>& end) {
+        const auto json = cJSON_Parse(payload);
+        const auto problem = read_task_event(json, end);
+        cJSON_Delete(json);
+
+        return problem;
+    };
+
+    std::optional<TaskEnd> end;
+    expect(!read_event(TASK_FAILED, end) && end && end->task_id == "task-7" && end->error == TASK_ERROR,
+           "a task_failed was not read as its task's failure, in its words");
+    expect(!read_event(TASK_COMPLETED, end) && end && end->task_id == "task-7" && !end->error,
+           "a task_completed was not read as its task's end");
+    expect(!read_event(R"({"data":null,"event_type":"task_started","task_id":"task-7","timestamp":"x"})", end) && !end,
+           "a task_started was read as an end");
+    expect(
+        !read_event(R"({"data":{"text":"Queueing","value":0.5},"event_type":"progress_update","task_id":"t"})", end) &&
+            !end,
+        "a progress_update was read as an end");
+    expect(!read_event(R"({"data":{"error":"Plex♫ failed"},"event_type":"task_failed","task_id":"t"})", end) && end &&
+               end->error == "Plex failed",
+           "a failure's words were read with a character the fonts do not draw");
+    expect(read_event(R"({"event_type":"task_failed","task_id":"t"})", end) &&
+               read_event(R"({"data":null,"event_type":"task_failed","task_id":"t"})", end) &&
+               read_event(R"({"data":{"error":7},"event_type":"task_failed","task_id":"t"})", end) &&
+               read_event(R"({"data":{},"event_type":"task_cancelled","task_id":"t"})", end) &&
+               read_event(R"({"data":{},"event_type":"task_completed"})", end) &&
+               read_event(R"({"data":{},"task_id":"t"})", end) && read_event(R"(["task_completed"])", end),
+           "a task_event the API's document does not allow was read");
+
+    QueueRequest request{.kind = ItemKind::Album, .item_id = "album-\"1\"", .action = QueueAction::Play};
+    expect(write_queue_request(request) == R"({"kind":"album","item_id":"album-\"1\"","action":"play"})",
+           "an id was not written as a JSON string");
+
+    static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
+    Queueing queueing;
+
+    // An add the backend took, whose task then fails and another task's too.
+    auto id = queueing.sent(QueueAction::Add, 1000);
+    expect(!queueing.task_ended(TaskEnd{.task_id = "task-9", .error = "other"}) && queueing.ended.size() == 1,
+           "an end that came while a request was on its way was not held");
+    queueing.taken(id, "task-7");
+    expect(queueing.adds_taken == 1 && queueing.running == std::vector<std::string>{"task-7"} &&
+               queueing.ended.empty() && !queueing.tasks_failed,
+           "an add taken was not counted, its task not watched, or another task's end held on");
+    expect(!queueing.task_ended(TaskEnd{.task_id = "task-9", .error = "other"}) && queueing.ended.empty() &&
+               !queueing.tasks_failed,
+           "another task's failure was taken, or held with no request on its way");
+    expect(queueing.task_ended(TaskEnd{.task_id = "task-7", .error = "words"}) && queueing.tasks_failed == 1 &&
+               queueing.failure == "words" && queueing.running.empty(),
+           "the failure of the display's task was not said, or its task watched on");
+
+    // A play whose task completes before the answer comes.
+    id = queueing.sent(QueueAction::Play, 2000);
+    queueing.task_ended(TaskEnd{.task_id = "task-10"});
+    queueing.taken(id, "task-10");
+    expect(queueing.running.empty() && queueing.ended.empty() && queueing.adds_taken == 1 && queueing.tasks_failed == 1,
+           "a task that completed before its answer is watched, or a play counted as an add");
+
+    // The ends held, and the tasks watched, are bounded.
+    id = queueing.sent(QueueAction::Play, 3000);
+    for (size_t i = 0; i < Queueing::MAX_TASKS + 1; i++) {
+        queueing.task_ended(TaskEnd{.task_id = "other-" + std::to_string(i)});
+    }
+    expect(queueing.ended.size() == Queueing::MAX_TASKS && queueing.ended[0].task_id == "other-1",
+           "the ends held are not bounded, or the oldest did not give way");
+    queueing.not_taken(id);
+    expect(queueing.ended.empty() && queueing.requests_not_taken == 1,
+           "the ends held stayed once no request was on its way");
+
+    for (size_t i = 0; i < Queueing::MAX_TASKS + 1; i++) {
+        queueing.taken(queueing.sent(QueueAction::Play, 4000), "task-" + std::to_string(20 + i));
+    }
+    expect(queueing.running.size() == Queueing::MAX_TASKS && queueing.running[0] == "task-21",
+           "the tasks watched are not bounded, or the oldest did not give way");
+
+    // The time limit, across the tick's wrap too.
+    id = queueing.sent(QueueAction::Add, UINT32_MAX - 99);
+    queueing.task_ended(TaskEnd{.task_id = "task-30"});
+    expect(!queueing.timed_out(LIMIT - 101) && queueing.is_sending(id), "a request was settled before its time limit");
+    expect(queueing.timed_out(LIMIT - 100) && !queueing.is_sending(id) && queueing.requests_not_taken == 2 &&
+               queueing.ended.empty() && queueing.adds_taken == 1,
+           "the time limit did not settle a request as not taken, or kept the ends held");
+    expect(!queueing.timed_out(LIMIT), "a request was settled twice");
+}
+
+// Touches the button that does `action` at the end of the row whose title is this, scrolled into
+// view first: Play first, then Shuffle where the row has it, and Add to queue last.
+static void tap_queue_button(SimHost& host, Shell& shell, const char* title, QueueAction action) {
+    const auto buttons = find_queue_buttons(show_row(shell, title));
+    expect(buttons, "the row does not end in the queue's buttons");
+
+    const auto count = int32_t(lv_obj_get_child_count(buttons));
+    expect(action != QueueAction::Shuffle || count == 3, "the row has no Shuffle");
+
+    const auto index = action == QueueAction::Play ? 0 : action == QueueAction::Shuffle ? 1 : count - 1;
+    tap_center(host, lv_obj_get_child(buttons, index));
+}
+
+// The requests the presses sent, and their bodies, as the device writes them.
+static const char* check_queue_requests(const SimHost& host, const std::vector<QueueRequest>& requests,
+                                        const std::vector<std::string>& bodies) {
+    if (host.get_queue_requests() != requests) {
+        return "the presses did not ask for the items and actions pressed, in order";
+    }
+
+    return host.get_queue_request_bodies() == bodies ? nullptr : "a request's body is not the one the API takes";
+}
+
+// The bar under the screen says that the add went, and nothing else was said.
+static const char* check_added(const SimHost& host) {
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.adds_taken != 1 || queueing.requests_not_taken || queueing.tasks_failed) {
+        return "the add was not taken alone";
+    }
+
+    return says(MSG_ADDED_TO_QUEUE) ? nullptr : "the bar does not say that the add went";
+}
+
+// Every row of the list on screen ends in the queue's buttons, three, or two without Shuffle.
+static const char* check_queue_buttons(size_t count) {
+    for (const auto row : get_rows(find_list())) {
+        const auto buttons = find_queue_buttons(row);
+        if (!buttons || lv_obj_get_child_count(buttons) != count) {
+            return count == 3 ? "a row does not offer Play, Shuffle and Add to queue"
+                              : "a row does not offer Play and Add to queue alone";
+        }
+    }
+
+    return nullptr;
+}
+
+// A press on an artist's Play, Shuffle and Add to queue, each on the artist of its row: Play and
+// Add name the albums' order, newest first, which Shuffle does not take. None opens the artist,
+// and the bar says that the add went.
+static void artists_queue(SimHost& host, Shell& shell) {
+    expect_queue_rules();
+
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    open_library(host, shell, LIBRARY);
+
+    tap_queue_button(host, shell, LIBRARY[0].first.c_str(), QueueAction::Play);
+    tap_queue_button(host, shell, LIBRARY[1].first.c_str(), QueueAction::Shuffle);
+    tap_queue_button(host, shell, LIBRARY[2].first.c_str(), QueueAction::Add);
+}
+
+static const char* check_artists_queue(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.albums().get_requests().empty()) {
+        return "a press on a button opened its artist";
+    }
+    if (const auto problem = check_queue_buttons(3)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_queue_requests(host,
+                                 {
+                                     {.kind = ItemKind::Artist, .item_id = "artist-1", .action = QueueAction::Play},
+                                     {.kind = ItemKind::Artist, .item_id = "artist-2", .action = QueueAction::Shuffle},
+                                     {.kind = ItemKind::Artist, .item_id = "artist-3", .action = QueueAction::Add},
+                                 },
+                                 {
+                                     R"({"kind":"artist","item_id":"artist-1","action":"play","order":"newest_first"})",
+                                     R"({"kind":"artist","item_id":"artist-2","action":"shuffle"})",
+                                     R"({"kind":"artist","item_id":"artist-3","action":"add","order":"newest_first"})",
+                                 })) {
+        return problem;
+    }
+
+    return check_added(host);
+}
+
+// A drag that starts on a row's Play scrolls the list, and sends nothing.
+static void artists_queue_drag(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    const auto play = lv_obj_get_child(find_queue_buttons(show_row(shell, LIBRARY[2].first.c_str())), 0);
+    lv_area_t area;
+    lv_obj_get_coords(play, &area);
+    const lv_point_t from{(area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2};
+
+    host.drag(from, lv_point_t{from.x, from.y - 160});
+}
+
+static const char* check_artists_queue_drag(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.get_queue_requests().empty() || !host.albums().get_requests().empty()) {
+        return "a drag that started on Play sent it, or opened the artist";
+    }
+
+    return lv_obj_get_scroll_y(find_list()) > 0 ? nullptr : "a drag that started on Play did not scroll the list";
+}
+
+// The albums screen of Sigur Rós, over the now-playing screen.
+static void open_albums_screen(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_now_playing(host, shell, PLAYING);
+
+    shell.push(std::make_unique<AlbumsView>(
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+}
+
+// A press on an album's Play, Shuffle and Add to queue, each on the album of its row. None opens
+// the album, and the bar says that the add went.
+static void albums_queue(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    tap_queue_button(host, shell, "Kveikur", QueueAction::Shuffle);
+    tap_queue_button(host, shell, "Valtari", QueueAction::Add);
+}
+
+static const char* check_albums_queue(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.tracks().get_requests().empty()) {
+        return "a press on a button opened its album";
+    }
+    if (const auto problem = check_queue_buttons(3)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_queue_requests(host,
+                                 {
+                                     {.kind = ItemKind::Album, .item_id = "album-1", .action = QueueAction::Play},
+                                     {.kind = ItemKind::Album, .item_id = "album-2", .action = QueueAction::Shuffle},
+                                     {.kind = ItemKind::Album, .item_id = "album-3", .action = QueueAction::Add},
+                                 },
+                                 {
+                                     R"({"kind":"album","item_id":"album-1","action":"play"})",
+                                     R"({"kind":"album","item_id":"album-2","action":"shuffle"})",
+                                     R"({"kind":"album","item_id":"album-3","action":"add"})",
+                                 })) {
+        return problem;
+    }
+
+    return check_added(host);
+}
+
+// An album whose title is longer than its row: the title is cut with dots before its year, and the
+// year ends before the buttons.
+static void albums_long_title(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    show_row(shell, ALBUMS[4].title.c_str());
+}
+
+static const char* check_albums_long_title(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+
+    lv_obj_t* row = nullptr;
+    for (const auto candidate : get_rows(find_list())) {
+        if (shows_title(get_row_title(candidate), ALBUMS[4].title)) {
+            row = candidate;
+        }
+    }
+    if (!row) {
+        return "the album with the long title is not listed";
+    }
+
+    lv_area_t title;
+    lv_area_t year;
+    lv_area_t buttons;
+    lv_area_t shown;
+    lv_obj_get_coords(lv_obj_get_child(row, 0), &title);
+    lv_obj_get_coords(lv_obj_get_child(row, 1), &year);
+    lv_obj_get_coords(find_queue_buttons(row), &buttons);
+    lv_obj_get_coords(find_list(), &shown);
+
+    if (std::string(get_row_title(row)) == ALBUMS[4].title) {
+        return "the long title is not cut";
+    }
+    if (title.x2 >= year.x1 || year.x2 >= buttons.x1) {
+        return "the long title runs into its year, or the year into the buttons";
+    }
+
+    return title.y1 >= shown.y1 && title.y2 <= shown.y2 ? nullptr : "the row with the long title is not on screen";
+}
+
+// A press on a track's Play and Add to queue; a track offers no Shuffle.
+static void tracks_queue(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_tracks(host, shell);
+
+    tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Play);
+    tap_queue_button(host, shell, KVEIKUR[1].c_str(), QueueAction::Add);
+}
+
+static const char* check_tracks_queue(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_buttons(2)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_queue_requests(host,
+                                 {
+                                     {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Play},
+                                     {.kind = ItemKind::Track, .item_id = "track-2", .action = QueueAction::Add},
+                                 },
+                                 {
+                                     R"({"kind":"track","item_id":"track-1","action":"play"})",
+                                     R"({"kind":"track","item_id":"track-2","action":"add"})",
+                                 })) {
+        return problem;
+    }
+
+    return check_added(host);
+}
+
+// A press on a playlist's Play, Shuffle and Add to queue, each on the playlist of its row.
+static void playlists_queue(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_playlists(host, shell);
+
+    tap_queue_button(host, shell, PLAYLISTS[0].c_str(), QueueAction::Play);
+    tap_queue_button(host, shell, PLAYLISTS[1].c_str(), QueueAction::Shuffle);
+    tap_queue_button(host, shell, PLAYLISTS[2].c_str(), QueueAction::Add);
+}
+
+static const char* check_playlists_queue(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_buttons(3)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_requests(
+            host,
+            {
+                {.kind = ItemKind::Playlist, .item_id = "playlist-1", .action = QueueAction::Play},
+                {.kind = ItemKind::Playlist, .item_id = "playlist-2", .action = QueueAction::Shuffle},
+                {.kind = ItemKind::Playlist, .item_id = "playlist-3", .action = QueueAction::Add},
+            },
+            {
+                R"({"kind":"playlist","item_id":"playlist-1","action":"play"})",
+                R"({"kind":"playlist","item_id":"playlist-2","action":"shuffle"})",
+                R"({"kind":"playlist","item_id":"playlist-3","action":"add"})",
+            })) {
+        return problem;
+    }
+
+    return check_added(host);
+}
+
+// An add the backend refuses: the bar says that it did not go through, not that it went.
+static void queue_not_taken(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(404, ERROR_ITEM_NOT_FOUND);
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Add);
+}
+
+static const char* check_queue_not_taken(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.requests_not_taken != 1 || queueing.adds_taken || !queueing.running.empty()) {
+        return "the add refused was taken";
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) && !says(MSG_ADDED_TO_QUEUE) ? nullptr
+                                                                    : "the bar does not say that it did not go through";
+}
+
+// The task of a play the backend took fails: the bar says why, in the backend's words, cut to its
+// two lines.
+static void queue_failed(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    host.answer_after(400, [&host]() { host.send_task_event(TASK_FAILED); });
+}
+
+static const char* check_task_failed(const SimHost& host) {
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.tasks_failed != 1 || queueing.failure != TASK_ERROR || !queueing.running.empty() ||
+        !queueing.ended.empty() || queueing.requests_not_taken) {
+        return "the failure of the display's task was not taken once, or its task is still watched";
+    }
+
+    return shows_text(lv_screen_active(), TASK_ERROR) ? nullptr : "the failure is not said in the backend's words";
+}
+
+static const char* check_queue_failed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_task_failed(host);
+}
+
+// The failure of the task reaches the display before the answer that names the task: it is said
+// once the answer comes.
+static void queue_failed_early(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    host.answer_after(250, [&host]() { host.send_task_event(TASK_FAILED); });
+    host.answer_after(450, [&host]() { host.answer_queue_request(202, QUEUE_TAKEN); });
+}
+
+// Another task fails, and the display's own completes: nothing is said, and the task is no longer
+// watched.
+static void queue_failed_other(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    host.answer_after(300, [&host]() { host.send_task_event(OTHER_TASK_FAILED); });
+    host.answer_after(400, [&host]() { host.send_task_event(TASK_COMPLETED); });
+}
+
+static const char* check_queue_failed_other(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.tasks_failed || queueing.requests_not_taken || !queueing.running.empty()) {
+        return "another task's failure was taken, or the display's task is still watched";
+    }
+    if (shows_text(lv_screen_active(), "The speaker did not answer") || says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar says another task's failure";
+    }
+
+    return says("Svefn-g-englar") ? nullptr : "the bar does not say what plays";
+}
+
+// A request to queue an item that is not answered: once its time limit has passed the bar says
+// that it did not go through, and the answer and the task's failure that come after it change
+// nothing.
+static void queue_no_answer(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Add);
+    host.answer_after(ANSWER_TIME_LIMIT_MS + 400, [&host]() { host.answer_queue_request(202, QUEUE_TAKEN); });
+    host.answer_after(ANSWER_TIME_LIMIT_MS + 500, [&host]() { host.send_task_event(TASK_FAILED); });
+}
+
+static const char* check_queue_no_answer(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_queue_requests()) {
+        return "the late answer did not come";
+    }
+
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.requests_not_taken != 1 || queueing.adds_taken || queueing.tasks_failed || !queueing.running.empty() ||
+        !queueing.sending.empty()) {
+        return "the time limit did not settle the request as not taken, or the late answer changed it";
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) && !says(MSG_ADDED_TO_QUEUE) ? nullptr
+                                                                    : "the bar does not say that it did not go through";
+}
+
+// A play from the albums, and a touch on the bar for the now-playing screen: the task's failure
+// comes there, and the screen says it over the cover.
+static void queue_failed_now_playing(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+    host.answer_after(600, [&host]() { host.send_task_event(TASK_FAILED); });
+}
+
+static const char* check_queue_failed_now_playing(const SimHost& host, const Shell& shell) {
+    if (!shows<NowPlayingView>(shell) || shell.count_views() != 1) {
+        return "the touch on the bar did not bring the now-playing screen";
+    }
+
+    return check_task_failed(host);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -4860,6 +5432,18 @@ const std::vector<Scene>& get_scenes() {
         {"playlists-unreadable", playlists_unreadable, check_playlists_error},
         {"playlists-empty", playlists_empty, check_playlists_empty},
         {"playlists-back", playlists_back, check_playlists_back, after_touches_ms(2)},
+        {"artists-queue", artists_queue, check_artists_queue, after_touches_ms(3)},
+        {"artists-queue-drag", artists_queue_drag, check_artists_queue_drag, 1000},
+        {"albums-queue", albums_queue, check_albums_queue, after_touches_ms(3)},
+        {"albums-long-title", albums_long_title, check_albums_long_title},
+        {"tracks-queue", tracks_queue, check_tracks_queue, after_touches_ms(2)},
+        {"playlists-queue", playlists_queue, check_playlists_queue, after_touches_ms(3)},
+        {"queue-not-taken", queue_not_taken, check_queue_not_taken, after_touches_ms(1)},
+        {"queue-failed", queue_failed, check_queue_failed, 800},
+        {"queue-failed-early", queue_failed_early, check_queue_failed, 800},
+        {"queue-failed-other", queue_failed_other, check_queue_failed_other, 800},
+        {"queue-no-answer", queue_no_answer, check_queue_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
+        {"queue-failed-now-playing", queue_failed_now_playing, check_queue_failed_now_playing, 1000},
     };
 
     return scenes;

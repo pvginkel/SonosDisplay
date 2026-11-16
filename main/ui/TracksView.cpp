@@ -20,4 +20,11 @@ const char* TracksView::get_loading_message() const { return MSG_TRACKS_LOADING;
 
 const char* TracksView::get_empty_message() const { return MSG_TRACKS_EMPTY; }
 
-void TracksView::build_row(lv_obj_t* row, size_t index) { create_row_title(row, _tracks.items[index].title); }
+void TracksView::build_row(lv_obj_t* row, size_t index) {
+    create_row_title(row, _tracks.items[index].title);
+    create_queue_buttons(row, false);
+}
+
+void TracksView::queue_row(size_t index, QueueAction action) {
+    _host->queue_item(QueueRequest{.kind = ItemKind::Track, .item_id = _tracks.items[index].id, .action = action});
+}

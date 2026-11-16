@@ -21,6 +21,10 @@ static constexpr int32_t BUTTON_HEIGHT = 72;
 static constexpr int32_t BUTTON_PADDING = 40;
 static constexpr int32_t SPINNER_SIZE = 56;
 static constexpr int32_t SPINNER_ARC_WIDTH = 6;
+// The queue's buttons at a row's end, as far from its end as from its top and bottom.
+static constexpr int32_t QUEUE_BUTTON_SIZE = 64;
+static constexpr int32_t QUEUE_BUTTON_GAP = 8;
+static constexpr int32_t QUEUE_BUTTONS_END = (ListView::ROW_HEIGHT - QUEUE_BUTTON_SIZE) / 2;
 static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
@@ -378,6 +382,37 @@ void ListView::create_row_title(lv_obj_t* row, const std::string& title) {
     lv_label_set_text(label, title.c_str());
 }
 
+static void create_queue_button(lv_obj_t* parent, const char* icon, lv_event_cb_t clicked, void* user_data) {
+    auto button = lv_container_create(parent);
+    lv_obj_set_size(button, QUEUE_BUTTON_SIZE, QUEUE_BUTTON_SIZE);
+    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(button, Theme::color(Theme::BACKGROUND), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(button, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_add_event_cb(button, clicked, LV_EVENT_CLICKED, user_data);
+
+    auto icon_label = lv_label_create(button);
+    lv_label_set_text(icon_label, icon);
+    lv_obj_set_style_text_font(icon_label, Theme::FONT_ICON, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+    lv_obj_center(icon_label);
+}
+
+void ListView::create_queue_buttons(lv_obj_t* row, bool shuffles) {
+    lv_obj_set_style_pad_right(row, QUEUE_BUTTONS_END, LV_PART_MAIN);
+
+    auto buttons = lv_container_create(row);
+    lv_obj_set_style_pad_column(buttons, QUEUE_BUTTON_GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(buttons, LV_FLEX_FLOW_ROW);
+
+    create_queue_button(buttons, ICON_PLAY, play_clicked, this);
+    if (shuffles) {
+        create_queue_button(buttons, ICON_SHUFFLE_VARIANT, shuffle_clicked, this);
+    }
+    create_queue_button(buttons, ICON_PLAYLIST_PLUS, add_clicked, this);
+}
+
 void ListView::scroll_to_row(size_t index) {
     const auto row = lv_obj_get_child(_list, int32_t(_first_row_child + index));
 
@@ -419,16 +454,34 @@ void ListView::retry_clicked(lv_event_t* event) {
     self->ask(self->get_pages().asked);
 }
 
-// A page that came beside the rows may have moved the items held since the list was built, so the
-// row's place in the whole list finds its item. No page is dropped but as the list is built, so
-// the item of every row built is held.
+// The index of a row's item among those held. A page that came beside the rows may have moved the
+// items held since the list was built, so the row's place in the whole list finds its item. No page
+// is dropped but as the list is built, so the item of every row built is held.
+size_t ListView::find_item(const lv_obj_t* row) {
+    const auto place = _first_index + uint32_t(lv_obj_get_index(row)) - _first_row_child;
+
+    return place - get_pages().first_index();
+}
+
 void ListView::row_clicked(lv_event_t* event) {
     auto self = (ListView*)lv_event_get_user_data(event);
-    const auto row = lv_event_get_current_target_obj(event);
-    const auto place = self->_first_index + uint32_t(lv_obj_get_index(row)) - self->_first_row_child;
 
-    self->open_row(place - self->get_pages().first_index());
+    self->open_row(self->find_item(lv_event_get_current_target_obj(event)));
 }
+
+// The button is in the buttons' row, which is in the item's row.
+void ListView::queue_clicked(lv_event_t* event, QueueAction action) {
+    auto self = (ListView*)lv_event_get_user_data(event);
+    const auto row = lv_obj_get_parent(lv_obj_get_parent(lv_event_get_current_target_obj(event)));
+
+    self->queue_row(self->find_item(row), action);
+}
+
+void ListView::play_clicked(lv_event_t* event) { queue_clicked(event, QueueAction::Play); }
+
+void ListView::shuffle_clicked(lv_event_t* event) { queue_clicked(event, QueueAction::Shuffle); }
+
+void ListView::add_clicked(lv_event_t* event) { queue_clicked(event, QueueAction::Add); }
 
 void ListView::scrolled(lv_event_t* event) {
     auto self = (ListView*)lv_event_get_user_data(event);

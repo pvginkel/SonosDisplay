@@ -643,6 +643,189 @@ struct Playlist {
     bool operator==(const Playlist&) const = default;
 };
 
+// What an item of the library is, as the API names its kind.
+enum class ItemKind {
+    Artist,
+    Album,
+    Track,
+    Playlist,
+};
+
+// What a press on an item of the library does with the queue of the chosen speaker's group, as
+// the API names it.
+enum class QueueAction {
+    // Replaces the queue with the item, and plays it in order: an artist's albums newest first.
+    Play,
+    // Replaces the queue with the item, and plays it shuffled. A track is never shuffled.
+    Shuffle,
+    // Appends the item to the queue, and changes nothing else.
+    Add,
+};
+
+// A press on an item of the library: which item, and what is done with it.
+struct QueueRequest {
+    ItemKind kind{};
+
+    // The item's id as the API gives it.
+    std::string item_id;
+
+    QueueAction action{};
+
+    bool operator==(const QueueRequest&) const = default;
+};
+
+// The end of a task of the backend's, as the event stream reports it.
+struct TaskEnd {
+    std::string task_id;
+
+    // Why the task failed, in the backend's words; none for a task that completed.
+    std::optional<std::string> error;
+};
+
+// The items the display asked the backend to play, shuffle or add, and how that went. The backend
+// answers a request with the id of the task that does it, and reports the task's end on the event
+// stream, which is not the path the answer takes: the end may come first. A request is on its way
+// until its answer, or until ANSWER_TIME_LIMIT_MS after it was sent; an answer to a request that is
+// no longer on its way changes nothing: the host reads one only while is_sending() says so.
+struct Queueing {
+    // The most tasks watched for their end, and the most ends held for an answer to come.
+    static constexpr size_t MAX_TASKS = 8;
+
+    // A request on its way to the backend.
+    struct Sent {
+        // What tells this request's answer from another's.
+        uint32_t id{};
+
+        QueueAction action{};
+
+        // LVGL's tick when the request was sent.
+        uint32_t sent_at{};
+    };
+
+    std::vector<Sent> sending;
+
+    // The tasks the backend took a request with, until their end comes, the newest last. The
+    // stream drops what is sent while it is away, so the end of one may never come: the oldest
+    // gives way past MAX_TASKS.
+    std::vector<std::string> running;
+
+    // The ends of tasks no answer has named yet, the newest last. They are held while a request is
+    // on its way, whose answer may name one of them.
+    std::vector<TaskEnd> ended;
+
+    // How many requests were not taken: the backend answered an error, or did not answer. A view
+    // says so once for each.
+    uint32_t requests_not_taken{};
+
+    // How many adds the backend took. A view says so once for each: nothing else on screen shows
+    // that an add went.
+    uint32_t adds_taken{};
+
+    // How many tasks failed, and the last one's failure in the backend's words. A view says it
+    // once for each.
+    uint32_t tasks_failed{};
+    std::string failure;
+
+    // Whether the request with this id is on its way.
+    bool is_sending(uint32_t id) const {
+        return std::any_of(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
+    }
+
+    // A request is on its way from `now`, LVGL's tick. Returns its id, which its answer is told
+    // by.
+    uint32_t sent(QueueAction action, uint32_t now) {
+        const auto id = ++_last_id;
+        sending.push_back(Sent{.id = id, .action = action, .sent_at = now});
+
+        return id;
+    }
+
+    // The backend took the request, and the task with this id does it. A failure of the task that
+    // came before the answer is said now.
+    void taken(uint32_t id, const std::string& task_id) {
+        const auto found =
+            std::find_if(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
+        if (found->action == QueueAction::Add) {
+            adds_taken++;
+        }
+        sending.erase(found);
+
+        const auto end =
+            std::find_if(ended.begin(), ended.end(), [&task_id](const TaskEnd& end) { return end.task_id == task_id; });
+        if (end != ended.end()) {
+            if (end->error) {
+                failed(std::move(*end->error));
+            }
+            ended.erase(end);
+        } else {
+            running.push_back(task_id);
+            if (running.size() > MAX_TASKS) {
+                running.erase(running.begin());
+            }
+        }
+
+        if (sending.empty()) {
+            ended.clear();
+        }
+    }
+
+    // The backend answered the request with an error, or did not answer.
+    void not_taken(uint32_t id) {
+        std::erase_if(sending, [id](const Sent& sent) { return sent.id == id; });
+        requests_not_taken++;
+
+        if (sending.empty()) {
+            ended.clear();
+        }
+    }
+
+    // A task ended. Returns whether a view has something to say for it: it is a task of the
+    // display's, and failed. The end of a task no answer has named yet is held while a request is
+    // on its way; the events of other tasks are ignored.
+    bool task_ended(TaskEnd&& end) {
+        const auto found = std::find(running.begin(), running.end(), end.task_id);
+        if (found != running.end()) {
+            running.erase(found);
+            if (end.error) {
+                failed(std::move(*end.error));
+                return true;
+            }
+        } else if (!sending.empty()) {
+            ended.push_back(std::move(end));
+            if (ended.size() > MAX_TASKS) {
+                ended.erase(ended.begin());
+            }
+        }
+
+        return false;
+    }
+
+    // Settles the requests sent ANSWER_TIME_LIMIT_MS or longer before `now`, LVGL's tick, as not
+    // taken, and returns whether there was one.
+    bool timed_out(uint32_t now) {
+        const auto settled =
+            std::erase_if(sending, [now](const Sent& sent) { return now - sent.sent_at >= ANSWER_TIME_LIMIT_MS; });
+        if (!settled) {
+            return false;
+        }
+
+        requests_not_taken += uint32_t(settled);
+        if (sending.empty()) {
+            ended.clear();
+        }
+
+        return true;
+    }
+
+private:
+    uint32_t _last_id{};
+
+    void failed(std::string error) {
+        tasks_failed++;
+        failure = std::move(error);
+    }
+};
+
 struct Model {
     // Bumped by the host on every change, so a view redraws only when something changed.
     uint32_t revision{};
@@ -673,9 +856,14 @@ struct Model {
     // each is settled by the group it was sent for.
     Grouping grouping;
 
-    // How many commands, volume changes and group changes were not taken.
+    // The items asked to be played, shuffled or added.
+    Queueing queueing;
+
+    // How many commands, volume changes, group changes and requests to queue an item were not
+    // taken.
     uint32_t not_taken() const {
-        return playback.commands_not_taken + volume.changes_not_taken + grouping.changes_not_taken;
+        return playback.commands_not_taken + volume.changes_not_taken + grouping.changes_not_taken +
+               queueing.requests_not_taken;
     }
 
     // Whether the display is held on the speaker picker: no speaker is chosen, or the last list

@@ -5,10 +5,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <utility>
 
 #include "api/Answers.h"
 #include "api/Requests.h"
+#include "cJSON.h"
 
 SimHost::SimHost() {
     _model.backend_url = "http://sonos-controller.example:5000";
@@ -169,6 +171,76 @@ void SimHost::group_change_answered(const UnansweredGroupChange& change, int sta
     _model.revision++;
 }
 
+void SimHost::queue_item(const QueueRequest& request) {
+    _queue_requests.push_back(request);
+
+    const auto body = write_queue_request(request);
+    if (!body) {
+        fprintf(stderr, "render: the body of a request to queue an item could not be written\n");
+        exit(1);
+    }
+    _queue_request_bodies.push_back(*body);
+
+    const auto id = _model.queueing.sent(request.action, lv_tick_get());
+    _model.revision++;
+
+    if (_queue_answer) {
+        queue_answered(id, _queue_answer->status, _queue_answer->body.c_str());
+    } else {
+        _unanswered_queue_requests.push_back(id);
+    }
+}
+
+void SimHost::answer_queue_request(int status, const char* body) {
+    if (_unanswered_queue_requests.empty()) {
+        fprintf(stderr, "render: a request to queue an item was answered, and none was sent\n");
+        exit(1);
+    }
+
+    const auto request = _unanswered_queue_requests.front();
+    _unanswered_queue_requests.erase(_unanswered_queue_requests.begin());
+
+    queue_answered(request, status, body);
+}
+
+void SimHost::queue_answered(uint32_t request, int status, const char* body) {
+    if (!_model.queueing.is_sending(request)) {
+        return;
+    }
+
+    std::string task_id;
+    std::string error;
+    if (status == UNREACHABLE) {
+        _model.queueing.not_taken(request);
+    } else if (const auto problem = read_queue_answer(status, body, strlen(body), task_id, error)) {
+        printf("W (SimHost) POST queue answered %d, %s: %s\n", status, problem, error.c_str());
+
+        _model.queueing.not_taken(request);
+    } else {
+        _model.queueing.taken(request, task_id);
+    }
+
+    _model.revision++;
+}
+
+void SimHost::send_task_event(const char* payload) {
+    const auto json = cJSON_Parse(payload);
+    if (!json) {
+        fprintf(stderr, "render: a task_event's payload is not JSON\n");
+        exit(1);
+    }
+
+    std::optional<TaskEnd> end;
+    const auto problem = read_task_event(json, end);
+    cJSON_Delete(json);
+
+    if (problem) {
+        printf("W (SimHost) Event task_event: %s\n", problem);
+    } else if (end && _model.queueing.task_ended(std::move(*end))) {
+        _model.revision++;
+    }
+}
+
 void SimHost::answer_after(uint32_t ms, std::function<void()> answer) {
     _later.emplace_back(lv_tick_get() + ms, std::move(answer));
 }
@@ -198,6 +270,10 @@ void SimHost::process() {
     if (_model.volume.timed_out(now)) {
         _model.revision++;
         refresh_volume();
+    }
+
+    if (_model.queueing.timed_out(now)) {
+        _model.revision++;
     }
 }
 

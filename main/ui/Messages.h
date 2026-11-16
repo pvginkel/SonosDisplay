@@ -23,6 +23,7 @@
 #define MSG_PLAYBACK_LOADING "Asking what plays"
 #define MSG_NOTHING_PLAYING "Nothing is playing"
 #define MSG_COMMAND_NOT_TAKEN "That did not go through"
+#define MSG_ADDED_TO_QUEUE "Added to the queue"
 
 #define MSG_VOLUME_UNKNOWN "–"
 

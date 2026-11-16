@@ -154,3 +154,47 @@ void VolumeControl::clicked(lv_event_t* event) {
 
     self->_host->change_volume(control == self->_up ? Volume::STEP : -Volume::STEP);
 }
+
+void PressNotice::skip(const Model& model) {
+    _not_taken = model.not_taken();
+    _failed = model.queueing.tasks_failed;
+    _added = model.queueing.adds_taken;
+    _text.clear();
+}
+
+bool PressNotice::apply(const Model& model) {
+    const auto& queueing = model.queueing;
+    const char* text = nullptr;
+
+    // A failure whose words are all characters the fonts do not draw is said as one not taken.
+    if (queueing.tasks_failed != _failed) {
+        text = queueing.failure.empty() ? MSG_COMMAND_NOT_TAKEN : queueing.failure.c_str();
+    } else if (model.not_taken() != _not_taken) {
+        text = MSG_COMMAND_NOT_TAKEN;
+    } else if (queueing.adds_taken != _added) {
+        text = MSG_ADDED_TO_QUEUE;
+    }
+
+    _not_taken = model.not_taken();
+    _failed = queueing.tasks_failed;
+    _added = queueing.adds_taken;
+
+    if (!text) {
+        return false;
+    }
+
+    _text = text;
+    _since = lv_tick_get();
+
+    return true;
+}
+
+bool PressNotice::expire() {
+    if (_text.empty() || lv_tick_elaps(_since) < NOTICE_MS) {
+        return false;
+    }
+
+    _text.clear();
+
+    return true;
+}

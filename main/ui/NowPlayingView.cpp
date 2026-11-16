@@ -19,6 +19,9 @@ static constexpr int32_t BUTTON_HEIGHT = 72;
 static constexpr int32_t VOLUME_SIZE = 72;
 static constexpr int32_t NOTICE_PADDING_HOR = 20;
 static constexpr int32_t NOTICE_PADDING_VER = 12;
+// The backend's words may be any length: they get two lines of the cover's width.
+static constexpr int32_t NOTICE_TEXT_WIDTH = COVER_SIZE - 2 * Theme::GAP - 2 * NOTICE_PADDING_HOR;
+static constexpr int32_t NOTICE_LINES = 2;
 static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
@@ -41,8 +44,8 @@ void NowPlayingView::do_render(lv_obj_t* parent) {
     create_retry(column);
     _volume.create(column, LV_PCT(100), VOLUME_SIZE, Theme::FONT_TITLE);
 
-    // A command that was not taken before this view opened is not said by it.
-    _not_taken_said = _host->get_model().not_taken();
+    // What came of a press before this view opened is not said by it.
+    _press_notice.skip(_host->get_model());
 
     apply();
 }
@@ -60,10 +63,11 @@ void NowPlayingView::create_cover(lv_obj_t* parent) {
     lv_obj_align(_notice, LV_ALIGN_BOTTOM_MID, 0, -Theme::GAP);
     lv_obj_add_flag(_notice, LV_OBJ_FLAG_HIDDEN);
 
-    auto notice_label = lv_label_create(_notice);
-    lv_label_set_text(notice_label, MSG_COMMAND_NOT_TAKEN);
-    lv_obj_set_style_text_font(notice_label, Theme::FONT_BODY, LV_PART_MAIN);
-    lv_obj_set_style_text_color(notice_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+    _notice_label = lv_label_create(_notice);
+    lv_label_set_long_mode(_notice_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(_notice_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(_notice_label, Theme::FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_notice_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
 }
 
 static void create_button(lv_obj_t* parent, const char* icon, lv_event_cb_t clicked, void* user_data) {
@@ -138,14 +142,17 @@ void NowPlayingView::do_update() {
         apply();
     }
 
-    if (!lv_obj_has_flag(_notice, LV_OBJ_FLAG_HIDDEN) && lv_tick_elaps(_notice_since) >= NOT_TAKEN_NOTICE_MS) {
-        lv_obj_add_flag(_notice, LV_OBJ_FLAG_HIDDEN);
+    if (_press_notice.expire()) {
+        apply_notice();
     }
 }
 
-// A command that was not taken while another view was over this one is not said by it: the bar
-// under that view said it.
-void NowPlayingView::do_show() { _not_taken_said = _host->get_model().not_taken(); }
+// What came of a press while another view was over this one is not said by it: the bar under that
+// view said it.
+void NowPlayingView::do_show() {
+    _press_notice.skip(_host->get_model());
+    apply_notice();
+}
 
 static void set_hidden(lv_obj_t* obj, bool hidden) {
     if (hidden) {
@@ -172,11 +179,26 @@ void NowPlayingView::apply() {
 
     _transport.apply(playback);
 
-    if (model.not_taken() != _not_taken_said) {
-        _not_taken_said = model.not_taken();
-        _notice_since = lv_tick_get();
-        lv_obj_remove_flag(_notice, LV_OBJ_FLAG_HIDDEN);
+    if (_press_notice.apply(model)) {
+        apply_notice();
     }
+}
+
+void NowPlayingView::apply_notice() {
+    const auto& text = _press_notice.get_text();
+
+    set_hidden(_notice, text.empty());
+    if (text.empty()) {
+        return;
+    }
+
+    // A text of one line is as wide as it is; a longer one wraps within the cover.
+    lv_point_t size;
+    lv_text_get_size(&size, text.c_str(), Theme::FONT_BODY, 0, 0, NOTICE_TEXT_WIDTH, LV_TEXT_FLAG_NONE);
+    const auto width = size.y > lv_font_get_line_height(Theme::FONT_BODY) ? NOTICE_TEXT_WIDTH : size.x;
+
+    lv_obj_set_width(_notice_label, width);
+    lv_label_set_text_lines(_notice_label, text.c_str(), width, NOTICE_LINES);
 }
 
 void NowPlayingView::apply_texts(const Playback& playback) {

@@ -81,9 +81,8 @@ void NowPlayingBar::set_shown(bool shown) {
     lv_obj_update_flag(_bar, LV_OBJ_FLAG_HIDDEN, !shown);
 
     if (shown) {
-        // A command that was not taken while the bar was hidden is not said by it.
-        _not_taken_said = _host->get_model().not_taken();
-        _notice = false;
+        // What came of a press while the bar was hidden is not said by it.
+        _notice.skip(_host->get_model());
 
         apply();
     } else {
@@ -100,8 +99,7 @@ void NowPlayingBar::update() {
         apply();
     }
 
-    if (_notice && lv_tick_elaps(_notice_since) >= NOT_TAKEN_NOTICE_MS) {
-        _notice = false;
+    if (_notice.expire()) {
         apply_texts(_host->get_model().playback);
     }
 }
@@ -110,11 +108,7 @@ void NowPlayingBar::apply() {
     const auto& model = _host->get_model();
     _revision = model.revision;
 
-    if (model.not_taken() != _not_taken_said) {
-        _not_taken_said = model.not_taken();
-        _notice_since = lv_tick_get();
-        _notice = true;
-    }
+    _notice.apply(model);
 
     _cover.apply(model.playback);
     apply_texts(model.playback);
@@ -127,8 +121,8 @@ void NowPlayingBar::apply_texts(const Playback& playback) {
     const char* artist = "";
     auto title_color = Theme::TEXT_SECONDARY;
 
-    if (_notice) {
-        title = MSG_COMMAND_NOT_TAKEN;
+    if (!_notice.get_text().empty()) {
+        title = _notice.get_text().c_str();
         title_color = Theme::ACCENT;
     } else {
         switch (playback.state) {

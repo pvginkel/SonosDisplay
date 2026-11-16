@@ -21,3 +21,5 @@
 #define ICON_UPDATE "\xF3\xB0\x9A\xB0"  // U+F06B0
 #define ICON_ARROW_LEFT "\xF3\xB0\x81\x8D"  // U+F004D
 #define ICON_MUSIC_BOX_MULTIPLE "\xF3\xB0\x8C\xB3"  // U+F0333
+#define ICON_SHUFFLE_VARIANT "\xF3\xB0\x92\x9F"  // U+F049F
+#define ICON_PLAYLIST_PLUS "\xF3\xB0\x90\x92"  // U+F0412

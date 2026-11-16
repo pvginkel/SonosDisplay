@@ -566,6 +566,56 @@ void Application::group_change_answered(uint32_t change, bool adds, HttpResponse
     model_changed();
 }
 
+void Application::queue_item(const QueueRequest& request) {
+    ESP_LOGI(TAG, "Queueing item %s on %s", request.item_id.c_str(), _model.speaker_id.c_str());
+
+    const auto id = _model.queueing.sent(request.action, lv_tick_get());
+    model_changed();
+
+    // A body the heap cannot hold is a request not taken, as HttpClient answers a request it
+    // cannot take.
+    auto body = write_queue_request(request);
+    if (!body) {
+        ESP_LOGE(TAG, "Cannot build the body of the queueing of %s", request.item_id.c_str());
+        queue_answered(id, HttpResponse{.err = ESP_ERR_NO_MEM});
+        return;
+    }
+
+    // The answer is the request's own, whichever speaker is the chosen one by then.
+    _press_client->send(
+        HttpRequest{
+            .method = HTTP_METHOD_POST, .path = speaker_path(_model.speaker_id, "/queue"), .body = std::move(*body)},
+        _scope, [this, id](HttpResponse&& response) { queue_answered(id, std::move(response)); });
+}
+
+void Application::queue_answered(uint32_t request, HttpResponse&& response) {
+    auto& queueing = _model.queueing;
+    std::string task_id;
+    std::string error;
+
+    // The time limit settled the request.
+    if (!queueing.is_sending(request)) {
+        ESP_LOGW(TAG, "Ignoring the answer to a queueing that is settled");
+        return;
+    }
+
+    if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        queueing.not_taken(request);
+    } else if (const auto problem = read_queue_answer(response.status, (const char*)response.body.get(),
+                                                      response.length, task_id, error)) {
+        ESP_LOGW(TAG, "POST queue answered %d, %s: %s", response.status, problem, error.c_str());
+
+        queueing.not_taken(request);
+    } else {
+        ESP_LOGI(TAG, "Task %s queues the item", task_id.c_str());
+
+        queueing.taken(request, task_id);
+    }
+
+    model_changed();
+}
+
 // Reads a page of a list the backend gives in pages, as `read` reads its body.
 template <typename Item>
 using PageReader = const char* (*)(int status, const char* body, size_t length, Page<Item>& page);
@@ -687,6 +737,29 @@ void Application::event_received(const std::string& type, const cJSON* payload) 
                 refresh_volume();
             }
         }
+    } else if (type == "task_event") {
+        task_event_received(payload);
+    }
+}
+
+// Every connection receives the events of every task, so the display watches for its own.
+void Application::task_event_received(const cJSON* payload) {
+    std::optional<TaskEnd> end;
+    if (const auto problem = read_task_event(payload, end)) {
+        ESP_LOGW(TAG, "Event task_event: %s", problem);
+        return;
+    }
+
+    if (!end) {
+        return;
+    }
+
+    if (end->error) {
+        ESP_LOGI(TAG, "Task %s failed: %s", end->task_id.c_str(), end->error->c_str());
+    }
+
+    if (_model.queueing.task_ended(std::move(*end))) {
+        model_changed();
     }
 }
 
@@ -764,6 +837,12 @@ void Application::do_process() {
 
         model_changed();
         refresh_volume();
+    }
+
+    if (_model.queueing.timed_out(now)) {
+        ESP_LOGW(TAG, "A queueing had no answer within %d s", int(ANSWER_TIME_LIMIT_MS / 1000));
+
+        model_changed();
     }
 
     if (_shell) {

@@ -9,6 +9,7 @@
 // scenes come from bodies as the backend sends them.
 
 #include <cstddef>
+#include <optional>
 #include <string>
 
 #include "cJSON.h"
@@ -58,5 +59,14 @@ const char* read_tracks(int status, const char* body, size_t length, Page<AlbumT
 // read_artists() reads the artists.
 const char* read_playlists(int status, const char* body, size_t length, Page<Playlist>& page);
 
+// Reads the answer to POST /api/speakers/{speaker_id}/queue, which is a 202 with the id of the
+// task that queues the item when the backend took it, into `task_id`. `error` is what the backend
+// said went wrong, where it said so.
+const char* read_queue_answer(int status, const char* body, size_t length, std::string& task_id, std::string& error);
+
 // Reads the payload of an event that names a speaker into `speaker_id`.
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id);
+
+// Reads the payload of the event task_event into `end`: the task's end, with its failure in the
+// backend's words where it failed, or nothing for a task that goes on.
+const char* read_task_event(const cJSON* payload, std::optional<TaskEnd>& end);

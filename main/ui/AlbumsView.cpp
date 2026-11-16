@@ -36,9 +36,14 @@ void AlbumsView::build_row(lv_obj_t* row, size_t index) {
         lv_label_set_text(year, std::to_string(*album.year).c_str());
     }
 
+    create_queue_buttons(row, true);
     make_openable(row);
 }
 
 void AlbumsView::open_row(size_t index) {
     _shell->push(std::make_unique<TracksView>(_host, _shell, _albums.items[index]));
+}
+
+void AlbumsView::queue_row(size_t index, QueueAction action) {
+    _host->queue_item(QueueRequest{.kind = ItemKind::Album, .item_id = _albums.items[index].id, .action = action});
 }
