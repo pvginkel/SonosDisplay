@@ -5,6 +5,7 @@
 #include "ArtistsView.h"
 #include "Messages.h"
 #include "NowPlayingView.h"
+#include "QueueView.h"
 #include "SpeakerPickerView.h"
 #include "Theme.h"
 #include "log.h"
@@ -67,10 +68,12 @@ void Shell::push(std::unique_ptr<View> view) {
         current->set_visible(false);
     }
 
-    view->render(_content);
+    // The content area is sized for the view before it builds in it: one that scrolls as it builds
+    // scrolls in the room it has.
     _views.push_back(std::move(view));
-
     layout();
+
+    _views.back()->render(_content);
 }
 
 void Shell::pop() {
@@ -107,6 +110,8 @@ void Shell::show_first_view() {
 void Shell::open_speaker_picker() { push(std::make_unique<SpeakerPickerView>(_host, this)); }
 
 void Shell::open_library() { push(std::make_unique<ArtistsView>(_host, this)); }
+
+void Shell::open_queue() { push(std::make_unique<QueueView>(_host, this)); }
 
 void Shell::show_now_playing() {
     const auto found =

@@ -3,8 +3,8 @@
 // A screen of a list the backend gives in pages: a heading with a way back, and under it a row
 // for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
 // item's row, opens an item whose row it made openable, and queues an item whose row it gave the
-// queue's buttons. While the Shell's "Reconnecting" marker shows at the top right, the heading ends
-// before it.
+// queue's buttons; it may end the heading with its own, and say a line under it. While the Shell's
+// "Reconnecting" marker shows at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -25,6 +25,7 @@ class Shell;
 class ListView : public View {
     std::string _title;
     lv_obj_t* _heading{};
+    lv_obj_t* _note{};
     // Where the list, or what is said instead, is built.
     lv_obj_t* _content{};
     lv_obj_t* _list{};
@@ -67,8 +68,9 @@ protected:
     // scrolls with a drag that starts on it.
     void make_openable(lv_obj_t* row);
 
-    // A row's title, which takes the room the row has left and is cut where it ends.
-    static void create_row_title(lv_obj_t* row, const std::string& title);
+    // A row's title, which takes the room the row has left and is cut where it ends. Returns its
+    // label.
+    static lv_obj_t* create_row_title(lv_obj_t* row, const std::string& title);
 
     // Ends this row, which build_row() was handed, with buttons that play its item, shuffle it
     // where `shuffles`, and add it to the queue. A press on one calls queue_row(); a drag that
@@ -83,6 +85,10 @@ protected:
     virtual const char* get_loading_message() const = 0;
     virtual const char* get_empty_message() const = 0;
 
+    // Builds what the subclass shows at the heading's end, after its title, in `heading`, a flex
+    // row. Called once, before the list is first built.
+    virtual void do_render_heading(lv_obj_t* heading) {}
+
     // Builds what the subclass shows beside the list, in `body`, the row the list's `area` is in,
     // or over it, in `area`. Called once, before the list is first built.
     virtual void do_render_beside(lv_obj_t* body, lv_obj_t* area) {}
@@ -92,6 +98,13 @@ protected:
 
     // The pages changed: the next do_update() builds the list again.
     void list_changed() { _changed = true; }
+
+    // Asks again for the page of the row at the top of the list, or, while no row is built, for
+    // the first page held, or the list's first. The rows stay as they are until it comes.
+    void refresh();
+
+    // Says this in a line under the heading, or nothing with nullptr.
+    void show_note(const char* note);
 
     // How many rows are built, one for each item held when the list was last built.
     size_t count_rows() const { return _row_count; }

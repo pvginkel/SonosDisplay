@@ -588,6 +588,13 @@ struct PagedList : PageWindow {
         }
     }
 
+    // Drops every page held, with its items.
+    void clear() {
+        items.clear();
+        page_sizes.clear();
+        first_page = 0;
+    }
+
     void drop(bool first) override {
         if (first) {
             items.erase(items.begin(), items.begin() + ptrdiff_t(page_sizes.front()));
@@ -641,6 +648,22 @@ struct Playlist {
     std::string title;
 
     bool operator==(const Playlist&) const = default;
+};
+
+// An entry of the queue of the chosen speaker's group.
+struct QueueEntry {
+    std::string title;
+    std::string artist;
+
+    bool operator==(const QueueEntry&) const = default;
+};
+
+// A page of the queue of the chosen speaker's group, in the order the speaker plays the queue, as
+// the host read the answer, and where in the queue the group is.
+struct QueuePage : Page<QueueEntry> {
+    // The place in the queue, from 1, of the track that is loaded: none while the group plays from
+    // elsewhere than its queue, and for an empty queue.
+    std::optional<uint32_t> current_position;
 };
 
 // What an item of the library is, as the API names its kind.
@@ -859,11 +882,19 @@ struct Model {
     // The items asked to be played, shuffled or added.
     Queueing queueing;
 
-    // How many commands, volume changes, group changes and requests to queue an item were not
-    // taken.
+    // How many times the event stream said that the queue of the chosen speaker's group changed, or
+    // the track it has loaded. A view that shows the queue fetches it again when this moves.
+    uint32_t queue_changes{};
+
+    // How many requests to clear the queue were not taken: the backend answered an error, or could
+    // not be reached. A view says so once for each.
+    uint32_t clears_not_taken{};
+
+    // How many commands, volume changes, group changes, requests to queue an item and requests to
+    // clear the queue were not taken.
     uint32_t not_taken() const {
         return playback.commands_not_taken + volume.changes_not_taken + grouping.changes_not_taken +
-               queueing.requests_not_taken;
+               queueing.requests_not_taken + clears_not_taken;
     }
 
     // Whether the display is held on the speaker picker: no speaker is chosen, or the last list

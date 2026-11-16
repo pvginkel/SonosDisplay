@@ -41,3 +41,12 @@
 #define MSG_PLAYLISTS "Playlists"
 #define MSG_PLAYLISTS_LOADING "Looking up the playlists"
 #define MSG_PLAYLISTS_EMPTY "The library has no playlists"
+
+#define MSG_QUEUE "Queue"
+#define MSG_QUEUE_LOADING "Looking up the queue"
+#define MSG_QUEUE_EMPTY "The queue is empty"
+#define MSG_QUEUE_ELSEWHERE "Playing from another source, not the queue"
+#define MSG_CLEAR "Clear"
+#define MSG_CLEAR_QUEUE "Clear the queue?"
+#define MSG_CLEAR_QUEUE_STOPS "What plays from it stops"
+#define MSG_CANCEL "Cancel"

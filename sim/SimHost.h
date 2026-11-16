@@ -47,17 +47,17 @@ public:
     static constexpr int UNREACHABLE = 0;
 
     // A list the backend gives in pages: what the backend answers a request for one of its pages,
-    // and the requests the views made.
-    template <typename Item>
+    // and the requests the views made. A page is a Page, or one that holds more of the answer.
+    template <typename Item, typename PageOf = Page<Item>>
     class ListFixture {
     public:
-        using Reader = const char* (*)(int status, const char* body, size_t length, Page<Item>& page);
+        using Reader = const char* (*)(int status, const char* body, size_t length, PageOf& page);
 
     private:
         struct Request {
             uint32_t number;
             std::weak_ptr<void> scope;
-            std::function<void(Page<Item>)> done;
+            std::function<void(PageOf)> done;
         };
 
         const char* _name;
@@ -96,13 +96,13 @@ public:
         // The pages the views asked for, in order.
         const std::vector<uint32_t>& get_requests() const { return _requests; }
 
-        // The id of the artist or the album whose list each request was for, in order: empty for a
-        // list of the library's.
+        // The id of the artist, the album or the chosen speaker whose list each request was for, in
+        // order: empty for a list of the library's.
         const std::vector<std::string>& get_parent_ids() const { return _parent_ids; }
 
-        // A view asks for page `number` of the list of the artist or album with this id.
+        // A view asks for page `number` of the list of the artist, album or speaker with this id.
         void request(std::string parent_id, uint32_t number, std::weak_ptr<void> scope,
-                     std::function<void(Page<Item>)> done) {
+                     std::function<void(PageOf)> done) {
             _requests.push_back(number);
             _parent_ids.push_back(std::move(parent_id));
 
@@ -120,7 +120,7 @@ public:
                 return;
             }
 
-            Page<Item> page;
+            PageOf page;
             if (status == UNREACHABLE) {
                 page.state = LoadState::Unreachable;
             } else if (const auto problem = _read(status, body, strlen(body), page)) {
@@ -179,6 +179,11 @@ private:
     ListFixture<Album> _albums{"albums", read_albums};
     ListFixture<AlbumTrack> _tracks{"tracks", read_tracks};
     ListFixture<Playlist> _playlists{"playlists", read_playlists};
+    ListFixture<QueueEntry, QueuePage> _queue{"queue", read_queue};
+    std::optional<uint32_t> _queue_current_page;
+    std::vector<bool> _queue_locates;
+    std::vector<std::string> _clears;
+    std::optional<Answer> _clear_answer;
 
 public:
     // From one of a scene's touches to the next: what the first one changed is on screen by then.
@@ -204,6 +209,9 @@ public:
                         std::function<void(Page<AlbumTrack>)> done) override;
     void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                            std::function<void(Page<Playlist>)> done) override;
+    void request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
+                       std::function<void(QueuePage)> done) override;
+    void clear_queue() override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
@@ -300,6 +308,17 @@ public:
     // reads it.
     void send_task_event(const char* payload);
 
+    // The event playback_changed or queue_changed, `type`, with this payload, which names the
+    // speaker it is about, read as the device reads it.
+    void send_speaker_event(const char* type, const char* payload);
+
+    // What the backend answers every request to clear the queue from here on, read as the device
+    // reads it. Without it a request stays on its way.
+    void answer_clears(int status, const char* body) { _clear_answer = Answer{status, body}; }
+
+    // The speakers whose queue the views asked to clear, in order.
+    const std::vector<std::string>& get_clears() const { return _clears; }
+
     // The library's lists.
     ListFixture<Artist>& artists() { return _artists; }
     const ListFixture<Artist>& artists() const { return _artists; }
@@ -309,6 +328,18 @@ public:
     const ListFixture<AlbumTrack>& tracks() const { return _tracks; }
     ListFixture<Playlist>& playlists() { return _playlists; }
     const ListFixture<Playlist>& playlists() const { return _playlists; }
+
+    // The queue of the chosen speaker's group, a request for which is recorded with the page it
+    // was answered with: at the loaded track, the one set_queue_current_page() names.
+    ListFixture<QueueEntry, QueuePage>& queue() { return _queue; }
+    const ListFixture<QueueEntry, QueuePage>& queue() const { return _queue; }
+
+    // From here on a request at the loaded track is answered with this page, the one that holds
+    // it; without it, with the page asked for.
+    void set_queue_current_page(uint32_t page) { _queue_current_page = page; }
+
+    // Whether each request for the queue was at the loaded track, in order.
+    const std::vector<bool>& get_queue_locates() const { return _queue_locates; }
 
     // What the backend answers a request for artwork with: LVGL 9's binary image, a deterministic
     // pattern of two colours that the id decides, `size` by `size` pixels.

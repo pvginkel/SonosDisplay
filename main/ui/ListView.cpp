@@ -68,6 +68,17 @@ void ListView::do_render(lv_obj_t* parent) {
     lv_obj_set_style_text_font(title, Theme::FONT_HEADLINE, LV_PART_MAIN);
     lv_label_set_text(title, _title.c_str());
 
+    do_render_heading(_heading);
+
+    // One line, cut where it ends.
+    _note = lv_label_create(column);
+    lv_obj_set_size(_note, LV_PCT(100), Theme::GAP + lv_font_get_line_height(Theme::FONT_BODY_LARGE));
+    lv_obj_set_style_pad_top(_note, Theme::GAP, LV_PART_MAIN);
+    lv_label_set_long_mode(_note, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(_note, Theme::FONT_BODY_LARGE, LV_PART_MAIN);
+    lv_obj_set_style_text_color(_note, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
+    lv_obj_add_flag(_note, LV_OBJ_FLAG_HIDDEN);
+
     auto body = lv_container_create(column);
     lv_obj_set_width(body, LV_PCT(100));
     lv_obj_set_flex_grow(body, 1);
@@ -261,6 +272,18 @@ void ListView::build_loading() {
     lv_obj_set_style_text_color(label, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
 }
 
+// The backend's own words, which may be any length: they get two lines.
+static void create_detail(lv_obj_t* parent, const std::string& detail, int32_t width) {
+    auto label = lv_label_create(parent);
+    lv_obj_set_width(label, width);
+    lv_obj_set_style_max_height(label, NOTICE_DETAIL_LINES * lv_font_get_line_height(Theme::FONT_BODY), LV_PART_MAIN);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
+    lv_obj_set_style_text_font(label, Theme::FONT_BODY, LV_PART_MAIN);
+    lv_obj_set_style_text_color(label, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
+    lv_label_set_text(label, detail.c_str());
+}
+
 void ListView::build_notice(const char* icon, const char* message, const std::string& detail, bool retry) {
     auto column = create_centered_column(_content);
 
@@ -277,16 +300,7 @@ void ListView::build_notice(const char* icon, const char* message, const std::st
     lv_obj_set_style_text_font(message_label, Theme::FONT_BODY_LARGE, LV_PART_MAIN);
 
     if (!detail.empty()) {
-        // The backend's own words, which may be any length: they get two lines.
-        auto detail_label = lv_label_create(column);
-        lv_obj_set_width(detail_label, NOTICE_WIDTH);
-        lv_obj_set_style_max_height(detail_label, NOTICE_DETAIL_LINES * lv_font_get_line_height(Theme::FONT_BODY),
-                                    LV_PART_MAIN);
-        lv_label_set_long_mode(detail_label, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_align(detail_label, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-        lv_obj_set_style_text_font(detail_label, Theme::FONT_BODY, LV_PART_MAIN);
-        lv_obj_set_style_text_color(detail_label, Theme::color(Theme::TEXT_SECONDARY), LV_PART_MAIN);
-        lv_label_set_text(detail_label, detail.c_str());
+        create_detail(column, detail, NOTICE_WIDTH);
     }
 
     if (retry) {
@@ -341,7 +355,8 @@ void ListView::build_list() {
 }
 
 // A page past the rows: a spinner while it has not come, which it is asked for at within a
-// screen of it, and when it did not come, why, with a way to ask again.
+// screen of it, and when it did not come, why, in the backend's words where it said so, with a
+// way to ask again.
 void ListView::build_page_state(uint32_t page) {
     const auto& pages = get_pages();
 
@@ -364,6 +379,10 @@ void ListView::build_page_state(uint32_t page) {
     lv_obj_set_style_text_font(message, Theme::FONT_BODY_LARGE, LV_PART_MAIN);
     lv_label_set_text(message, pages.state == LoadState::Unreachable ? MSG_BACKEND_UNREACHABLE : MSG_BACKEND_FAILED);
 
+    if (!pages.error.empty()) {
+        create_detail(state, pages.error, LV_PCT(100));
+    }
+
     create_retry(state, retry_clicked, this);
 }
 
@@ -373,13 +392,15 @@ void ListView::make_openable(lv_obj_t* row) {
     lv_obj_add_event_cb(row, row_clicked, LV_EVENT_CLICKED, this);
 }
 
-void ListView::create_row_title(lv_obj_t* row, const std::string& title) {
+lv_obj_t* ListView::create_row_title(lv_obj_t* row, const std::string& title) {
     auto label = lv_label_create(row);
     lv_obj_set_flex_grow(label, 1);
     lv_obj_set_height(label, lv_font_get_line_height(Theme::FONT_BODY_LARGE));
     lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
     lv_obj_set_style_text_font(label, Theme::FONT_BODY_LARGE, LV_PART_MAIN);
     lv_label_set_text(label, title.c_str());
+
+    return label;
 }
 
 static void create_queue_button(lv_obj_t* parent, const char* icon, lv_event_cb_t clicked, void* user_data) {
@@ -418,6 +439,36 @@ void ListView::scroll_to_row(size_t index) {
 
     lv_obj_update_layout(_list);
     lv_obj_scroll_to_y(_list, lv_obj_get_y(row), LV_ANIM_OFF);
+}
+
+void ListView::refresh() {
+    const auto& pages = get_pages();
+    auto page = pages.is_held() ? pages.first_page : 1;
+
+    if (_list && _row_count) {
+        lv_obj_update_layout(_list);
+        const auto scrolled = lv_obj_get_scroll_y(_list);
+
+        size_t top = 0;
+        while (top + 1 < _row_count) {
+            const auto row = lv_obj_get_child(_list, int32_t(_first_row_child + top));
+            if (lv_obj_get_y(row) + lv_obj_get_height(row) > scrolled) {
+                break;
+            }
+            top++;
+        }
+
+        page = (_first_index + uint32_t(top)) / PAGE_SIZE + 1;
+    }
+
+    ask(page);
+}
+
+void ListView::show_note(const char* note) {
+    lv_obj_update_flag(_note, LV_OBJ_FLAG_HIDDEN, !note);
+    if (note) {
+        lv_label_set_text(_note, note);
+    }
 }
 
 // Within a screen of an end that has a page past it, that page is asked for, unless one is on its

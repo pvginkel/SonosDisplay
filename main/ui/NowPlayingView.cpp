@@ -94,6 +94,7 @@ void NowPlayingView::create_buttons(lv_obj_t* parent) {
 
     create_button(row, ICON_SPEAKER, speaker_clicked, this);
     create_button(row, ICON_MUSIC_BOX_MULTIPLE, library_clicked, this);
+    create_button(row, ICON_PLAYLIST_PLAY, queue_clicked, this);
 }
 
 void NowPlayingView::create_texts(lv_obj_t* parent) {
@@ -252,6 +253,12 @@ void NowPlayingView::library_clicked(lv_event_t* event) {
     auto self = (NowPlayingView*)lv_event_get_user_data(event);
 
     self->_shell->open_library();
+}
+
+void NowPlayingView::queue_clicked(lv_event_t* event) {
+    auto self = (NowPlayingView*)lv_event_get_user_data(event);
+
+    self->_shell->open_queue();
 }
 
 void NowPlayingView::retry_clicked(lv_event_t* event) {

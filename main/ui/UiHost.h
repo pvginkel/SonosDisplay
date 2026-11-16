@@ -80,6 +80,17 @@ public:
     virtual void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                                    std::function<void(Page<Playlist>)> done) = 0;
 
+    // Asks, as request_artists() does, for page `number` of the queue of the chosen speaker's group,
+    // or, `locate`, for the page that holds the track that is loaded, and page `number` while none
+    // is. A view asks only while a speaker is chosen.
+    virtual void request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
+                               std::function<void(QueuePage)> done) = 0;
+
+    // Empties the queue of the chosen speaker's group; the group stops if it plays from it. A view
+    // asks only while a speaker is chosen. What changed comes as the events that move
+    // Model::queue_changes.
+    virtual void clear_queue() = 0;
+
     // Asks for the picture with this id, `size` by `size` pixels. `done` runs with it once the
     // host has it, which is before this returns for one it has already, and may be much later:
     // nothing is fetched while the screen is dark. It runs with nullptr when the backend did not

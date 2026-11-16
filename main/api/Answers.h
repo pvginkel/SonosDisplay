@@ -59,6 +59,11 @@ const char* read_tracks(int status, const char* body, size_t length, Page<AlbumT
 // read_artists() reads the artists.
 const char* read_playlists(int status, const char* body, size_t length, Page<Playlist>& page);
 
+// Reads the answer to GET /api/speakers/{speaker_id}/queue, asked for with `per_page` PAGE_SIZE,
+// as read_artists() reads the artists, and where in the queue the group is: the entries in the
+// order the speaker plays them, and the place of the track that is loaded.
+const char* read_queue(int status, const char* body, size_t length, QueuePage& page);
+
 // Reads the answer to POST /api/speakers/{speaker_id}/queue, which is a 202 with the id of the
 // task that queues the item when the backend took it, into `task_id`. `error` is what the backend
 // said went wrong, where it said so.

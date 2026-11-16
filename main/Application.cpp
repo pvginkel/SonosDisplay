@@ -616,21 +616,24 @@ void Application::queue_answered(uint32_t request, HttpResponse&& response) {
     model_changed();
 }
 
-// Reads a page of a list the backend gives in pages, as `read` reads its body.
-template <typename Item>
-using PageReader = const char* (*)(int status, const char* body, size_t length, Page<Item>& page);
+// Reads a page of a list the backend gives in pages, a Page or one that holds more of the answer,
+// as `read` reads its body.
+template <typename PageOf>
+using PageReader = const char* (*)(int status, const char* body, size_t length, PageOf& page);
 
-// Asks for page `number` of the list at `path` on `client`, PAGE_SIZE to a page, and hands
-// `done` the page as `read` reads it, or why it did not come. The request goes as one with one
-// for the same page that still waits, a press on Try again among them.
-template <typename Item>
+// Asks for page `number` of the list at `path` on `client`, which may hold a query of its own,
+// PAGE_SIZE to a page, and hands `done` the page as `read` reads it, or why it did not come. The
+// request goes as one with one for the same page that still waits, a press on Try again among
+// them.
+template <typename PageOf>
 static void request_page(HttpClient& client, std::string path, uint32_t number, std::weak_ptr<void> scope,
-                         std::function<void(Page<Item>)> done, PageReader<Item> read) {
-    const auto query = path + "?page=" + std::to_string(number) + "&per_page=" + std::to_string(PAGE_SIZE);
+                         std::function<void(PageOf)> done, PageReader<PageOf> read) {
+    const auto query = path + (path.find('?') == std::string::npos ? "?" : "&") + "page=" + std::to_string(number) +
+                       "&per_page=" + std::to_string(PAGE_SIZE);
 
     client.send(HttpRequest{.path = query, .merges = true}, std::move(scope),
                 [path = std::move(path), number, done = std::move(done), read](HttpResponse&& response) {
-                    Page<Item> page;
+                    PageOf page;
 
                     if (response.err == ESP_ERR_INVALID_SIZE) {
                         // An answer over the client's limit, which HttpClient logged.
@@ -671,6 +674,39 @@ void Application::request_tracks(const std::string& album_id, uint32_t number, s
 void Application::request_playlists(uint32_t number, std::weak_ptr<void> scope,
                                     std::function<void(Page<Playlist>)> done) {
     request_page(*_api_client, "/api/library/playlists", number, std::move(scope), std::move(done), read_playlists);
+}
+
+void Application::request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
+                                std::function<void(QueuePage)> done) {
+    request_page(*_api_client, speaker_path(_model.speaker_id, locate ? "/queue?locate=current" : "/queue"), number,
+                 std::move(scope), std::move(done), read_queue);
+}
+
+void Application::clear_queue() {
+    ESP_LOGI(TAG, "Clearing the queue of %s", _model.speaker_id.c_str());
+
+    _press_client->send(HttpRequest{.method = HTTP_METHOD_DELETE, .path = speaker_path(_model.speaker_id, "/queue")},
+                        _scope, [this](HttpResponse&& response) { clear_answered(std::move(response)); });
+}
+
+// The queue's events say what a Clear the backend took changed. One that was not taken changed
+// nothing, and nothing waits on it: an answer that never comes leaves nothing on its way.
+void Application::clear_answered(HttpResponse&& response) {
+    std::string error;
+
+    if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        _model.clears_not_taken++;
+    } else if (const auto problem =
+                   read_command(response.status, (const char*)response.body.get(), response.length, error)) {
+        ESP_LOGW(TAG, "DELETE queue answered %d, %s: %s", response.status, problem, error.c_str());
+
+        _model.clears_not_taken++;
+    } else {
+        return;
+    }
+
+    model_changed();
 }
 
 void Application::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
@@ -715,13 +751,14 @@ void Application::artwork_answered(const ArtworkRequest& request, HttpResponse&&
 
 void Application::event_received(const std::string& type, const cJSON* payload) {
     const auto about_playback = type == "playback_changed";
+    const auto about_queue = type == "queue_changed";
 
     if (type == "speakers_changed") {
         refresh_speakers();
 
         // A speaker that joined or left the chosen speaker's group changed the group's volume.
         refresh_volume();
-    } else if (about_playback || type == "volume_changed") {
+    } else if (about_playback || about_queue || type == "volume_changed") {
         // Sent once for every speaker of a group, so the chosen speaker's own id is the whole
         // filter. An event that does not say whose it is may be the chosen speaker's.
         std::string speaker_id;
@@ -733,8 +770,15 @@ void Application::event_received(const std::string& type, const cJSON* payload) 
         if (problem || speaker_id == _model.speaker_id) {
             if (about_playback) {
                 refresh_playback();
-            } else {
+            } else if (!about_queue) {
                 refresh_volume();
+            }
+
+            // The view that shows the queue fetches it again: the queue changed, or the track it
+            // has loaded.
+            if (about_playback || about_queue) {
+                _model.queue_changes++;
+                model_changed();
             }
         }
     } else if (type == "task_event") {

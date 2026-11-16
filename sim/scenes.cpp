@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -20,6 +21,7 @@
 #include "Messages.h"
 #include "NowPlayingView.h"
 #include "PlaylistsView.h"
+#include "QueueView.h"
 #include "SpeakerPickerView.h"
 #include "Theme.h"
 #include "TracksView.h"
@@ -5279,6 +5281,790 @@ static const char* check_queue_failed_now_playing(const SimHost& host, const She
     return check_task_failed(host);
 }
 
+// An entry of a queue's fixture: its title, and its artist.
+using EntryFixture = std::pair<std::string, std::string>;
+
+// The Garage's queue: an album, then tracks of others, among them a title and an artist longer than
+// their places, a U+2010 hyphen, and a character the fonts do not draw (U+266B).
+static const std::vector<EntryFixture> QUEUE = {
+    {"Intro", "Sigur Rós"},
+    {"Svefn-g-englar", "Sigur Rós"},
+    {"Starálfur", "Sigur Rós"},
+    {"Flugufrelsarinn", "Sigur Rós"},
+    {"Ný batterí", "Sigur Rós"},
+    {"Hjartað hamast (bamm bamm bamm)", "Sigur Rós"},
+    {"Viðrar vel til loftárása", "Sigur Rós"},
+    {"Olsen Olsen", "Sigur Rós"},
+    {"Ágætis byrjun", "Sigur Rós"},
+    {"Avalon", "Sigur Rós"},
+    {"Near Light", "Ólafur Arnalds"},
+    {"Orfeo ed Euridice, Act II: “Che puro ciel, che chiaro sol” – Ballet des ombres heureuses",
+     "Anne Sofie von Otter, Les Musiciens du Louvre, Marc Minkowski"},
+    {"Run‐away♫", "Jay‐Z"},
+};
+
+// The place of the loaded track in QUEUE, near its end: the screen opens scrolled to the end.
+static constexpr uint32_t QUEUE_CURRENT = 11;
+
+// How many entries the queue has in the scenes that page, and where its loaded track is: in the
+// middle of the second page, and in the third.
+static constexpr size_t TWO_PAGES_OF_ENTRIES = 150;
+static constexpr uint32_t MID_PAGE_CURRENT = 140;
+static constexpr size_t THREE_PAGES_OF_ENTRIES = 250;
+static constexpr uint32_t THIRD_PAGE_CURRENT = 230;
+
+// Entries enough to page through, as an artist's albums queued whole are, each named for its place
+// in the queue from 1.
+static std::vector<EntryFixture> make_long_queue(size_t count) {
+    static const char* const ARTISTS[] = {"Sigur Rós", "Ólafur Arnalds", "Hania Rani"};
+
+    std::vector<EntryFixture> entries;
+    for (size_t i = 0; i < count; i++) {
+        char title[32];
+        snprintf(title, sizeof(title), "Track %03zu", i + 1);
+        entries.emplace_back(title, ARTISTS[i * 3 / count]);
+    }
+
+    return entries;
+}
+
+// The answer to GET /api/speakers/{speaker_id}/queue for page `number` of `entries`, its data the
+// `count` entries from `first`, with the loaded track at `current`. Every fourth entry is not from
+// the Plex library: it has no album, picture or track id.
+static std::string make_queue_body(const std::vector<EntryFixture>& entries, size_t first, size_t count,
+                                   uint32_t number, std::optional<uint32_t> current) {
+    const auto data = cJSON_CreateArray();
+    for (auto i = first; i < first + count; i++) {
+        const auto entry = cJSON_CreateObject();
+        const auto from_plex = i % 4 != 3;
+
+        if (from_plex) {
+            cJSON_AddStringToObject(entry, "album", "Ágætis byrjun");
+            cJSON_AddStringToObject(entry, "artwork_id", ("dHJhY2sv" + std::to_string(i)).c_str());
+        } else {
+            cJSON_AddNullToObject(entry, "album");
+            cJSON_AddNullToObject(entry, "artwork_id");
+        }
+        cJSON_AddStringToObject(entry, "artist", entries[i].second.c_str());
+        cJSON_AddNumberToObject(entry, "duration_ms", double(240000 + i * 1000));
+        cJSON_AddNumberToObject(entry, "position", double(i + 1));
+        cJSON_AddStringToObject(entry, "title", entries[i].first.c_str());
+        if (from_plex) {
+            cJSON_AddStringToObject(entry, "track_id", std::to_string(5000 + i).c_str());
+        } else {
+            cJSON_AddNullToObject(entry, "track_id");
+        }
+        cJSON_AddItemToArray(data, entry);
+    }
+
+    const auto root = cJSON_Parse(make_page_body(data, number, entries.size(), "position", "asc").c_str());
+    if (current) {
+        cJSON_AddNumberToObject(root, "current_position", *current);
+    } else {
+        cJSON_AddNullToObject(root, "current_position");
+    }
+
+    const auto text = cJSON_PrintUnformatted(root);
+    std::string body(text);
+    cJSON_free(text);
+    cJSON_Delete(root);
+
+    return body;
+}
+
+// Every page of `entries`, as the backend answers each, with the loaded track at `current`, and
+// after them `past` pages past the queue's end, as a queue grown shorter answers them.
+static std::vector<std::string> make_queue_pages(const std::vector<EntryFixture>& entries,
+                                                 std::optional<uint32_t> current, size_t past = 0) {
+    std::vector<std::string> pages;
+    for (size_t first = 0; first < entries.size() || pages.empty(); first += PAGE_SIZE) {
+        pages.push_back(make_queue_body(entries, first, std::min(size_t(PAGE_SIZE), entries.size() - first),
+                                        uint32_t(pages.size() + 1), current));
+    }
+    for (size_t i = 0; i < past; i++) {
+        pages.push_back(make_queue_body(entries, 0, 0, uint32_t(pages.size() + 1), current));
+    }
+
+    return pages;
+}
+
+// A listing the backend could not finish: Plex did not give the pictures of the page's tracks.
+static const char ERROR_PLEX_PICTURES[] =
+    R"({"code":null,"correlationId":null,"details":{"message":"The request could not be completed"},)"
+    R"("error":"Plex failed to give the pictures of the page's tracks"})";
+static const char PLEX_PICTURES[] = "Plex failed to give the pictures of the page's tracks";
+
+// Pages of the queue the API's document does not allow, by its current_position or an entry.
+static const char* const UNREADABLE_QUEUES[] = {
+    R"({"data":[],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"current_position":0,"data":[],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"current_position":-1,"data":[],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"current_position":1.5,"data":[],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"current_position":"1","data":[],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"current_position":1e30,"data":[],"meta":{"page":1,"per_page":100,"total":0}})",
+    R"({"current_position":null,"data":["Intro"],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"current_position":null,"data":[{"artist":"Sigur Rós"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"current_position":null,"data":[{"artist":"Sigur Rós","title":null}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"current_position":null,"data":[{"title":"Intro"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"current_position":null,"data":[{"artist":7,"title":"Intro"}],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"current_position":null,"data":[{"artist":"Sigur Rós","title":"Intro"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":0}})",
+};
+
+// The answers to GET /api/speakers/{speaker_id}/queue as the device reads them: what is not shown
+// is not read, a position past the queue's end is taken, and so is a page past it, as is one of
+// the library's lists; what the API's document does not allow is refused whole.
+static void expect_queue_reader_rules() {
+    static const char ALLOWED[] =
+        R"({"current_position":null,"data":[{"album":null,"artist":"Sigur Rós","artwork_id":null,)"
+        R"("duration_ms":null,"position":1,"title":"Intro","track_id":null}],)"
+        R"("meta":{"page":1,"per_page":100,"sort_by":"position","sort_dir":"asc","total":1,"total_pages":1}})";
+    const QueueEntry intro{.title = "Intro", .artist = "Sigur Rós"};
+    QueuePage page;
+    expect(!read_queue(200, ALLOWED, strlen(ALLOWED), page) && page.state == LoadState::Loaded &&
+               page.items.size() == 1 && page.items[0] == intro && !page.current_position,
+           "a page of the queue was refused for what the display does not show");
+
+    static const char PAST_ITS_END[] =
+        R"({"current_position":40,"data":[],"meta":{"page":3,"per_page":100,"total":12}})";
+    page = {};
+    expect(!read_queue(200, PAST_ITS_END, strlen(PAST_ITS_END), page) && page.state == LoadState::Loaded &&
+               page.items.empty() && page.number == 3 && page.total == 12 && page.current_position == 40u,
+           "a page past the queue's end, or a position past it, was refused");
+
+    static const char ARTISTS_PAST_THEIR_END[] = R"({"data":[],"meta":{"page":3,"per_page":100,"total":150}})";
+    Page<Artist> artists;
+    expect(!read_artists(200, ARTISTS_PAST_THEIR_END, strlen(ARTISTS_PAST_THEIR_END), artists) &&
+               artists.state == LoadState::Loaded && artists.items.empty(),
+           "a page past the end of a list of the library's was refused");
+
+    for (const auto body : UNREADABLE_QUEUES) {
+        page = {};
+        expect(read_queue(200, body, strlen(body), page) && page.state == LoadState::Failed && page.items.empty() &&
+                   page.error.empty(),
+               "an unreadable page of the queue was not refused");
+    }
+
+    page = {};
+    expect(read_queue(502, ERROR_PLEX_PICTURES, strlen(ERROR_PLEX_PICTURES), page) && page.state == LoadState::Failed &&
+               page.error == PLEX_PICTURES,
+           "a listing that failed is not read with the backend's words");
+}
+
+// Where the now-playing screen's queue button is.
+static constexpr lv_point_t QUEUE_BUTTON = {648, 56};
+
+static const char SPEAKER_EVENT[] = R"({"speaker_id":"speaker-garage"})";
+static const char OTHER_SPEAKER_EVENT[] = R"({"speaker_id":"speaker-kitchen"})";
+
+// The queue as the now-playing screen opens it: `entries`, with the loaded track at `current`,
+// which the answer at the loaded track holds.
+static void open_queue(SimHost& host, Shell& shell, const std::vector<EntryFixture>& entries,
+                       std::optional<uint32_t> current) {
+    host.queue().serve(200, make_queue_pages(entries, current));
+    if (current) {
+        host.set_queue_current_page((*current - 1) / PAGE_SIZE + 1);
+    }
+    open_now_playing(host, shell, PLAYING);
+
+    shell.open_queue();
+}
+
+static const char* check_queue_screen(const Shell& shell) {
+    if (const auto problem = check_screen<QueueView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_heading(MSG_QUEUE);
+}
+
+// The queue was asked for as `pages` and `locates` say, each for the chosen speaker's group.
+static const char* check_queue_asked(const SimHost& host, const std::vector<uint32_t>& pages,
+                                     const std::vector<bool>& locates) {
+    if (host.queue().get_requests() != pages || host.get_queue_locates() != locates) {
+        return "the queue was not asked for at the loaded track first, and then by its pages";
+    }
+
+    const auto& ids = host.queue().get_parent_ids();
+    return std::all_of(ids.begin(), ids.end(), [](const auto& id) { return id == "speaker-garage"; })
+               ? nullptr
+               : "the queue of another speaker than the chosen one was asked for";
+}
+
+// The rows of the list are the entries of `entries` from `first`, `count` of them, each its title
+// and its artist.
+static const char* check_queue_rows(const std::vector<EntryFixture>& entries, size_t first, size_t count) {
+    std::vector<std::string> titles;
+    for (const auto& entry : entries) {
+        titles.push_back(entry.first);
+    }
+    if (const auto problem = check_titles(titles, first, count)) {
+        return problem;
+    }
+
+    const auto rows = get_rows(find_list());
+    for (size_t i = 0; i < count; i++) {
+        if (lv_obj_get_child_count(rows[i]) != 2 ||
+            !shows_title(lv_label_get_text(lv_obj_get_child(rows[i], 1)), entries[first + i].second)) {
+            return "a row does not show its entry's artist";
+        }
+    }
+
+    return nullptr;
+}
+
+// The row of the loaded track, `title`, is the one row marked, in the accent, and is in view, at
+// the list's top where `at_top`; with no title, no row is marked.
+static const char* check_marked(const char* title, bool at_top = false) {
+    const auto list = find_list();
+    if (!list) {
+        return "the queue is not listed";
+    }
+
+    lv_obj_t* marked = nullptr;
+    for (const auto row : get_rows(list)) {
+        if (lv_obj_get_style_border_width(row, LV_PART_MAIN)) {
+            if (marked) {
+                return "two rows are marked";
+            }
+            marked = row;
+        }
+    }
+
+    if (!title) {
+        return marked ? "a row is marked while no track of the queue is loaded" : nullptr;
+    }
+    if (!marked || !shows_title(get_row_title(marked), title)) {
+        return "the loaded track's row is not marked";
+    }
+    if (!lv_color_eq(lv_obj_get_style_text_color(lv_obj_get_child(marked, 0), LV_PART_MAIN),
+                     Theme::color(Theme::ACCENT))) {
+        return "the loaded track's title is not in the accent";
+    }
+
+    lv_obj_update_layout(lv_screen_active());
+    lv_area_t shown;
+    lv_obj_get_coords(list, &shown);
+    lv_area_t row;
+    lv_obj_get_coords(marked, &row);
+    if (row.y1 < shown.y1 || row.y2 > shown.y2) {
+        return "the loaded track's row is not in view";
+    }
+
+    return !at_top || row.y1 == shown.y1 ? nullptr : "the loaded track's row is not at the top of the list";
+}
+
+// The now-playing screen's queue button opens the queue of the chosen speaker's group over it, at
+// the loaded track, whose row is marked; near the queue's end the list shows its end. Each row is
+// its entry's title and artist, the longer ones cut.
+static void queue_screen(SimHost& host, Shell& shell) {
+    expect_queue_reader_rules();
+
+    host.queue().serve(200, make_queue_pages(QUEUE, QUEUE_CURRENT));
+    host.set_queue_current_page(1);
+    open_now_playing(host, shell, PLAYING);
+
+    host.tap(QUEUE_BUTTON.x, QUEUE_BUTTON.y);
+}
+
+static const char* check_queue_screen_open(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {1}, {true})) {
+        return problem;
+    }
+    if (const auto problem = check_queue_rows(QUEUE, 0, QUEUE.size())) {
+        return problem;
+    }
+    if (lv_obj_get_scroll_bottom(find_list()) != 0) {
+        return "the list does not show its end, where the loaded track is";
+    }
+    if (says(MSG_QUEUE_ELSEWHERE) || !says(MSG_CLEAR)) {
+        return "the queue that plays says it does not, or offers no Clear";
+    }
+
+    return check_marked("Near Light");
+}
+
+// The loaded track in the middle of the second page: the screen opens on that page, the track's
+// row at the top.
+static void queue_screen_mid_page(SimHost& host, Shell& shell) {
+    open_queue(host, shell, make_long_queue(TWO_PAGES_OF_ENTRIES), MID_PAGE_CURRENT);
+}
+
+static const char* check_queue_screen_mid_page(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {2}, {true})) {
+        return problem;
+    }
+    if (const auto problem = check_queue_rows(make_long_queue(TWO_PAGES_OF_ENTRIES), 100, 50)) {
+        return problem;
+    }
+
+    return check_marked("Track 140", true);
+}
+
+// A queue of more than 200, opened in its third page, scrolled to its start: the pages before
+// come one by one, and the third goes as the first comes.
+static void queue_screen_long(SimHost& host, Shell& shell) {
+    open_queue(host, shell, make_long_queue(THREE_PAGES_OF_ENTRIES), THIRD_PAGE_CURRENT);
+    shell.update();
+    expect(!check_marked("Track 230", true), "the queue did not open at its loaded track");
+
+    expect_in_place(scroll_list(shell, false), "the row at the top moved as the second page came");
+    expect_in_place(scroll_list(shell, false), "the row at the top moved as the first page came");
+}
+
+static const char* check_queue_screen_long(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {3, 2, 1}, {true, false, false})) {
+        return problem;
+    }
+
+    return check_queue_rows(make_long_queue(THREE_PAGES_OF_ENTRIES), 0, 200);
+}
+
+static void queue_screen_empty(SimHost& host, Shell& shell) { open_queue(host, shell, {}, std::nullopt); }
+
+static const char* check_queue_screen_empty(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (!says(MSG_QUEUE_EMPTY) || find_list()) {
+        return "the empty queue is not said to be empty";
+    }
+
+    return says(MSG_CLEAR) || says(MSG_QUEUE_ELSEWHERE) ? "the empty queue offers Clear, or says more" : nullptr;
+}
+
+// The group plays from another source: no row is marked, and a line under the heading says so.
+static void queue_screen_elsewhere(SimHost& host, Shell& shell) { open_queue(host, shell, QUEUE, std::nullopt); }
+
+static const char* check_queue_screen_elsewhere(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_rows(QUEUE, 0, QUEUE.size())) {
+        return problem;
+    }
+    if (!says(MSG_QUEUE_ELSEWHERE) || !says(MSG_CLEAR)) {
+        return "the screen does not say that the group plays from another source";
+    }
+
+    return check_marked(nullptr);
+}
+
+// The listing answered 502: the screen says so, in the backend's words, and the bar under it stays
+// live.
+static void queue_screen_error(SimHost& host, Shell& shell) {
+    host.queue().serve(502, {ERROR_PLEX_PICTURES});
+    open_now_playing(host, shell, PLAYING);
+
+    shell.open_queue();
+}
+
+static const char* check_queue_screen_error(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_says_failed()) {
+        return problem;
+    }
+
+    return says(PLEX_PICTURES) ? nullptr : "the screen does not say what the backend said";
+}
+
+// Try again, once the backend answers: the queue is asked for at the loaded track again.
+static void queue_screen_retry(SimHost& host, Shell& shell) {
+    queue_screen_error(host, shell);
+
+    host.queue().serve(200, make_queue_pages(QUEUE, QUEUE_CURRENT));
+    host.set_queue_current_page(1);
+    tap_label(host, shell, MSG_TRY_AGAIN);
+}
+
+static const char* check_queue_screen_retry(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {1, 1}, {true, true})) {
+        return problem;
+    }
+
+    return check_marked("Near Light");
+}
+
+static void queue_screen_unreachable(SimHost& host, Shell& shell) {
+    host.queue().serve(SimHost::UNREACHABLE, {""});
+    open_now_playing(host, shell, PLAYING);
+
+    shell.open_queue();
+}
+
+static const char* check_queue_screen_unreachable(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+
+    return check_says_unreachable();
+}
+
+static void queue_screen_unreadable(SimHost& host, Shell& shell) {
+    host.queue().serve(200, {UNREADABLE_QUEUES[0]});
+    open_now_playing(host, shell, PLAYING);
+
+    shell.open_queue();
+}
+
+static const char* check_queue_screen_unreadable(const SimHost&, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+
+    return check_says_failed();
+}
+
+static void queue_screen_loading(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+
+    shell.open_queue();
+}
+
+static const char* check_queue_screen_loading(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (!says(MSG_QUEUE_LOADING) || count_spinners(lv_screen_active()) != 1) {
+        return "the screen does not say that the queue is on its way";
+    }
+
+    return check_queue_asked(host, {1}, {true});
+}
+
+// A page before the rows does not come, with a 502: the list's start says so in the backend's
+// words, with a way to ask again.
+static void queue_screen_page_error(SimHost& host, Shell& shell) {
+    const auto pages = make_queue_pages(make_long_queue(THREE_PAGES_OF_ENTRIES), THIRD_PAGE_CURRENT);
+    host.set_queue_current_page(3);
+    open_now_playing(host, shell, PLAYING);
+    shell.open_queue();
+    host.queue().answer(200, pages[2].c_str());
+    shell.update();
+
+    scroll_list(shell, false);
+    host.queue().answer(502, ERROR_PLEX_PICTURES);
+    shell.update();
+    scroll_list(shell, false);
+}
+
+static const char* check_queue_screen_page_error(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {3, 2}, {true, false})) {
+        return problem;
+    }
+    if (!says(MSG_BACKEND_FAILED) || !says(PLEX_PICTURES) || !says(MSG_TRY_AGAIN)) {
+        return "the list's start does not say why the page did not come, in the backend's words";
+    }
+
+    return check_queue_rows(make_long_queue(THREE_PAGES_OF_ENTRIES), 200, 50);
+}
+
+// While the queue shows, the events of the chosen speaker ask for it again, a burst of them once,
+// and those of another speaker do not: the entry added shows, and the next track is marked.
+static void queue_screen_changed(SimHost& host, Shell& shell) {
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+    shell.update();
+
+    host.send_speaker_event("queue_changed", OTHER_SPEAKER_EVENT);
+    host.send_speaker_event("playback_changed", OTHER_SPEAKER_EVENT);
+    shell.update();
+    expect(host.queue().get_requests().size() == 1, "an event of another speaker asked for the queue again");
+
+    auto changed = QUEUE;
+    changed.emplace_back("Stopp", "Eivør");
+    host.queue().serve(200, make_queue_pages(changed, QUEUE_CURRENT + 1));
+    host.send_speaker_event("queue_changed", SPEAKER_EVENT);
+    host.send_speaker_event("queue_changed", SPEAKER_EVENT);
+    host.send_speaker_event("playback_changed", SPEAKER_EVENT);
+}
+
+static const char* check_queue_screen_changed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {1, 1}, {true, false})) {
+        return problem;
+    }
+
+    auto changed = QUEUE;
+    changed.emplace_back("Stopp", "Eivør");
+    if (const auto problem = check_queue_rows(changed, 0, changed.size())) {
+        return problem;
+    }
+
+    return check_marked(changed[QUEUE_CURRENT].first.c_str());
+}
+
+// Two pages held, the second and the third, the row at the top in the third: an event asks for the
+// third again, which takes the place of both, and that row stays where it is.
+static void queue_screen_changed_pages(SimHost& host, Shell& shell) {
+    open_queue(host, shell, make_long_queue(THREE_PAGES_OF_ENTRIES), THIRD_PAGE_CURRENT);
+    shell.update();
+    scroll_list(shell, false);
+
+    const auto row = find_row("Track 205");
+    expect(row, "the third page's rows are not listed");
+    lv_obj_scroll_to_y(find_list(), lv_obj_get_y(row), LV_ANIM_OFF);
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+    expect(get_place(row).top == LIST_TOP, "the row to keep in place is not at the top");
+
+    host.send_speaker_event("queue_changed", SPEAKER_EVENT);
+}
+
+static const char* check_queue_screen_changed_pages(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {3, 2, 3}, {true, false, false})) {
+        return problem;
+    }
+
+    const auto row = find_row("Track 205");
+    if (!row || get_place(row).top != LIST_TOP) {
+        return "the row at the top moved as its page came again";
+    }
+
+    return check_queue_rows(make_long_queue(THREE_PAGES_OF_ENTRIES), 200, 50);
+}
+
+// How many entries the queue has after a Play replaced the queue of 250 with a shorter one, and
+// where its loaded track is: in its last page, the one before the third.
+static constexpr size_t SHORTER_QUEUE = 120;
+static constexpr uint32_t SHORTER_QUEUE_CURRENT = 110;
+
+// A Play replaced the queue of 250 while its third page showed: that page, asked for again, is past
+// the new queue's end, and the page at the loaded track takes its place, that track's row at the
+// top.
+static void queue_screen_shrunk(SimHost& host, Shell& shell) {
+    open_queue(host, shell, make_long_queue(THREE_PAGES_OF_ENTRIES), THIRD_PAGE_CURRENT);
+    shell.update();
+
+    host.queue().serve(200, make_queue_pages(make_long_queue(SHORTER_QUEUE), SHORTER_QUEUE_CURRENT, 1));
+    host.set_queue_current_page(2);
+    host.send_speaker_event("queue_changed", SPEAKER_EVENT);
+}
+
+static const char* check_queue_screen_shrunk(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {3, 3, 2}, {true, false, true})) {
+        return problem;
+    }
+    if (const auto problem = check_queue_rows(make_long_queue(SHORTER_QUEUE), 100, 20)) {
+        return problem;
+    }
+
+    return check_marked("Track 110", true);
+}
+
+// The answer at the loaded track is past the new queue's end too, its position read before the
+// queue changed: the queue's last page takes the place of the pages held, and the page before it,
+// within a screen of the list's start, comes beside it.
+static void queue_screen_shrunk_early(SimHost& host, Shell& shell) {
+    open_queue(host, shell, make_long_queue(THREE_PAGES_OF_ENTRIES), THIRD_PAGE_CURRENT);
+    shell.update();
+
+    host.queue().serve(200, make_queue_pages(make_long_queue(SHORTER_QUEUE), THIRD_PAGE_CURRENT, 1));
+    host.send_speaker_event("queue_changed", SPEAKER_EVENT);
+}
+
+static const char* check_queue_screen_shrunk_early(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {3, 3, 3, 2, 1}, {true, false, true, false, false})) {
+        return problem;
+    }
+
+    return check_queue_rows(make_long_queue(SHORTER_QUEUE), 0, SHORTER_QUEUE);
+}
+
+// Clear at the heading's end asks, over the list, to be confirmed.
+static void queue_screen_clear_confirm(SimHost& host, Shell& shell) {
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    tap_label(host, shell, MSG_CLEAR);
+}
+
+static const char* check_queue_screen_clear_confirm(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (!says(MSG_CLEAR_QUEUE) || !says(MSG_CLEAR_QUEUE_STOPS) || !says(MSG_CANCEL)) {
+        return "Clear did not ask to be confirmed";
+    }
+
+    return host.get_clears().empty() ? nullptr : "Clear cleared the queue before it was confirmed";
+}
+
+// The confirmation's Clear, which shows over the list once Clear at the heading's end is touched,
+// and which is the second label that says so.
+static void tap_confirm_clear(SimHost& host, Shell& shell) {
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+
+    std::vector<lv_point_t> found;
+    std::function<void(lv_obj_t*)> find = [&found, &find](lv_obj_t* obj) {
+        if (lv_obj_check_type(obj, &lv_label_class) && !strcmp(lv_label_get_text(obj), MSG_CLEAR)) {
+            lv_area_t area;
+            lv_obj_get_coords(lv_obj_get_parent(obj), &area);
+            found.push_back(lv_point_t{(area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2});
+        }
+        for (uint32_t i = 0; i < lv_obj_get_child_count(obj); i++) {
+            find(lv_obj_get_child(obj, int32_t(i)));
+        }
+    };
+    find(lv_screen_active());
+    expect(found.size() == 2, "the confirmation has no Clear");
+
+    host.tap(found[1].x, found[1].y);
+}
+
+// Clear, confirmed: the request goes for the chosen speaker's group, and the queue's events, which
+// follow it, ask for the queue again, which is empty.
+static void queue_screen_clear(SimHost& host, Shell& shell) {
+    host.answer_clears(204, "");
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    tap_label(host, shell, MSG_CLEAR);
+    tap_confirm_clear(host, shell);
+    host.answer_after(after_touches_ms(2) - 200, [&host]() {
+        host.queue().serve(200, make_queue_pages({}, std::nullopt));
+        host.send_speaker_event("queue_changed", SPEAKER_EVENT);
+        host.send_speaker_event("playback_changed", SPEAKER_EVENT);
+    });
+}
+
+static const char* check_queue_screen_clear(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (host.get_clears() != std::vector<std::string>{"speaker-garage"}) {
+        return "the confirmed Clear did not clear the chosen speaker's queue, once";
+    }
+    if (const auto problem = check_queue_asked(host, {1, 1}, {true, false})) {
+        return problem;
+    }
+    if (!says(MSG_QUEUE_EMPTY) || says(MSG_CLEAR_QUEUE) || says(MSG_CLEAR)) {
+        return "the cleared queue is not said to be empty, or the confirmation or Clear still shows";
+    }
+
+    return host.get_model().clears_not_taken || says(MSG_COMMAND_NOT_TAKEN) ? "the Clear taken was said not to be"
+                                                                            : nullptr;
+}
+
+// Cancel closes the confirmation, and nothing is cleared.
+static void queue_screen_clear_cancel(SimHost& host, Shell& shell) {
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    tap_label(host, shell, MSG_CLEAR);
+    tap_label(host, shell, MSG_CANCEL, true);
+}
+
+static const char* check_queue_screen_clear_cancel(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (says(MSG_CLEAR_QUEUE) || !host.get_clears().empty()) {
+        return "Cancel did not close the confirmation, or the queue was cleared";
+    }
+
+    return check_marked("Near Light");
+}
+
+// The backend refuses the Clear: the confirmation closes at the press, the bar says it did not go
+// through, and the queue stays listed.
+static void queue_screen_clear_not_taken(SimHost& host, Shell& shell) {
+    host.answer_clears(502, ERROR_ENVELOPE);
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    tap_label(host, shell, MSG_CLEAR);
+    tap_confirm_clear(host, shell);
+}
+
+static const char* check_queue_screen_clear_not_taken(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (host.get_clears().size() != 1 || host.get_model().clears_not_taken != 1) {
+        return "the Clear refused was not counted once as not taken";
+    }
+    if (says(MSG_CLEAR_QUEUE)) {
+        return "the confirmation did not close at the press";
+    }
+    if (!says(MSG_COMMAND_NOT_TAKEN)) {
+        return "the bar does not say that the Clear did not go through";
+    }
+
+    return check_queue_rows(QUEUE, 0, QUEUE.size());
+}
+
+// The bar under the queue brings the now-playing screen back to the top, from its cover and from
+// its texts.
+static void queue_screen_bar_cover(SimHost& host, Shell& shell) {
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    host.tap(BAR_COVER.x, BAR_COVER.y);
+}
+
+static void queue_screen_bar_texts(SimHost& host, Shell& shell) {
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+// The "Reconnecting" marker at the heading's right: Clear ends a gap before it.
+static void queue_screen_reconnecting(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+}
+
+static const char* check_queue_screen_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_marker(true)) {
+        return problem;
+    }
+
+    std::vector<lv_obj_t*> clear;
+    find_labels(lv_screen_active(), MSG_CLEAR, clear);
+    std::vector<lv_obj_t*> marker;
+    find_labels(lv_screen_active(), MSG_RECONNECTING, marker);
+    if (clear.size() != 1) {
+        return "Clear does not show";
+    }
+
+    lv_area_t clear_area;
+    lv_obj_get_coords(lv_obj_get_parent(clear[0]), &clear_area);
+    lv_area_t marker_area;
+    lv_obj_get_coords(lv_obj_get_parent(marker[0]), &marker_area);
+
+    return clear_area.x2 + 1 + Theme::GAP <= marker_area.x1 ? nullptr : "Clear runs under the marker";
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -5444,6 +6230,30 @@ const std::vector<Scene>& get_scenes() {
         {"queue-failed-other", queue_failed_other, check_queue_failed_other, 800},
         {"queue-no-answer", queue_no_answer, check_queue_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
         {"queue-failed-now-playing", queue_failed_now_playing, check_queue_failed_now_playing, 1000},
+        {"queue-screen", queue_screen, check_queue_screen_open, after_touches_ms(1)},
+        {"queue-screen-mid-page", queue_screen_mid_page, check_queue_screen_mid_page},
+        {"queue-screen-long", queue_screen_long, check_queue_screen_long},
+        {"queue-screen-empty", queue_screen_empty, check_queue_screen_empty},
+        {"queue-screen-elsewhere", queue_screen_elsewhere, check_queue_screen_elsewhere},
+        {"queue-screen-error", queue_screen_error, check_queue_screen_error},
+        {"queue-screen-retry", queue_screen_retry, check_queue_screen_retry, after_touches_ms(1)},
+        {"queue-screen-unreachable", queue_screen_unreachable, check_queue_screen_unreachable},
+        {"queue-screen-unreadable", queue_screen_unreadable, check_queue_screen_unreadable},
+        {"queue-screen-loading", queue_screen_loading, check_queue_screen_loading},
+        {"queue-screen-page-error", queue_screen_page_error, check_queue_screen_page_error},
+        {"queue-screen-changed", queue_screen_changed, check_queue_screen_changed},
+        {"queue-screen-changed-pages", queue_screen_changed_pages, check_queue_screen_changed_pages},
+        {"queue-screen-shrunk", queue_screen_shrunk, check_queue_screen_shrunk},
+        {"queue-screen-shrunk-early", queue_screen_shrunk_early, check_queue_screen_shrunk_early},
+        {"queue-screen-clear-confirm", queue_screen_clear_confirm, check_queue_screen_clear_confirm,
+         after_touches_ms(1)},
+        {"queue-screen-clear", queue_screen_clear, check_queue_screen_clear, after_touches_ms(2)},
+        {"queue-screen-clear-cancel", queue_screen_clear_cancel, check_queue_screen_clear_cancel, after_touches_ms(2)},
+        {"queue-screen-clear-not-taken", queue_screen_clear_not_taken, check_queue_screen_clear_not_taken,
+         after_touches_ms(2)},
+        {"queue-screen-bar-cover", queue_screen_bar_cover, check_bar_opened, after_touches_ms(1)},
+        {"queue-screen-bar-texts", queue_screen_bar_texts, check_bar_opened, after_touches_ms(1)},
+        {"queue-screen-reconnecting", queue_screen_reconnecting, check_queue_screen_reconnecting},
     };
 
     return scenes;

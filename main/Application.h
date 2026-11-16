@@ -56,6 +56,9 @@ public:
                         std::function<void(Page<AlbumTrack>)> done) override;
     void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                            std::function<void(Page<Playlist>)> done) override;
+    void request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
+                       std::function<void(QueuePage)> done) override;
+    void clear_queue() override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
@@ -78,6 +81,7 @@ private:
     void send_group_change(const std::string& speaker_id, bool adds);
     void group_change_answered(uint32_t change, bool adds, HttpResponse&& response);
     void queue_answered(uint32_t request, HttpResponse&& response);
+    void clear_answered(HttpResponse&& response);
     void task_event_received(const cJSON* payload);
     void fetch_artwork(ArtworkRequest&& request);
     void artwork_answered(const ArtworkRequest& request, HttpResponse&& response);

@@ -447,7 +447,8 @@ static bool read_count(const cJSON* object, const char* name, int least, uint32_
 
 // A page of a list: `data`, each item read by `read_item`, and of `meta` the page's number, its
 // size, which is the PAGE_SIZE asked for, and the list's total, which the items up to this page
-// do not pass. `sort_by`, `sort_dir` and `total_pages` are not used, so they are not read.
+// do not pass: a page past the list's end, which a list grown shorter answers, holds none.
+// `sort_by`, `sort_dir` and `total_pages` are not used, so they are not read.
 template <typename Item>
 static const char* read_page_fields(const cJSON* root, Page<Item>& page,
                                     const char* (*read_item)(const cJSON* item, Item& read)) {
@@ -482,7 +483,7 @@ static const char* read_page_fields(const cJSON* root, Page<Item>& page,
     if (size > PAGE_SIZE) {
         return "data holds more items than a page";
     }
-    if (uint64_t(page.number - 1) * PAGE_SIZE + size > page.total) {
+    if (size && uint64_t(page.number - 1) * PAGE_SIZE + size > page.total) {
         return "data holds more items than meta.total leaves for the page";
     }
 
@@ -499,9 +500,12 @@ static const char* read_page_fields(const cJSON* root, Page<Item>& page,
     return nullptr;
 }
 
-template <typename Item>
-static const char* read_page(int status, const char* body, size_t length, Page<Item>& page,
-                             const char* (*read_item)(const cJSON* item, Item& read)) {
+// Reads a page of a list into `page`, a Page or one that holds more of the answer, which
+// `read_more` reads where it is given.
+template <typename PageOf, typename Item>
+static const char* read_page(int status, const char* body, size_t length, PageOf& page,
+                             const char* (*read_item)(const cJSON* item, Item& read),
+                             const char* (*read_more)(const cJSON* root, PageOf& page) = nullptr) {
     const auto root = parse(body, length);
 
     if (status != 200) {
@@ -511,8 +515,14 @@ static const char* read_page(int status, const char* body, size_t length, Page<I
         return "not a 200";
     }
 
-    Page<Item> answered{.state = LoadState::Loaded};
-    if (const auto problem = read_page_fields(root.get(), answered, read_item)) {
+    PageOf answered;
+    answered.state = LoadState::Loaded;
+
+    auto problem = read_page_fields(root.get(), answered, read_item);
+    if (!problem && read_more) {
+        problem = read_more(root.get(), answered);
+    }
+    if (problem) {
         page.state = LoadState::Failed;
         page.error.clear();
 
@@ -624,6 +634,49 @@ static const char* read_playlist(const cJSON* item, Playlist& playlist) {
 
 const char* read_playlists(int status, const char* body, size_t length, Page<Playlist>& page) {
     return read_page(status, body, length, page, read_playlist);
+}
+
+// An entry's `position` is its place in the page, and its `album`, `duration_ms`, `artwork_id` and
+// `track_id` are not shown, so they are not read.
+static const char* read_queue_entry(const cJSON* item, QueueEntry& entry) {
+    if (!cJSON_IsObject(item)) {
+        return "an entry is not an object";
+    }
+
+    const auto title = get_string(item, "title");
+    if (!title) {
+        return "an entry has no title";
+    }
+
+    const auto artist = get_string(item, "artist");
+    if (!artist) {
+        return "an entry has no artist";
+    }
+
+    entry = QueueEntry{.title = read_text(title), .artist = read_text(artist)};
+
+    return nullptr;
+}
+
+// A position past the queue's end is taken: the backend reads it apart from the entries, which a
+// change can make fewer in between.
+static const char* read_current_position(const cJSON* root, QueuePage& page) {
+    if (cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(root, "current_position"))) {
+        return nullptr;
+    }
+
+    uint32_t position;
+    if (!read_count(root, "current_position", 1, position)) {
+        return "current_position is neither a whole number from 1 nor null";
+    }
+
+    page.current_position = position;
+
+    return nullptr;
+}
+
+const char* read_queue(int status, const char* body, size_t length, QueuePage& page) {
+    return read_page(status, body, length, page, read_queue_entry, read_current_position);
 }
 
 const char* read_speaker_event(const cJSON* payload, std::string& speaker_id) {

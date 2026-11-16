@@ -241,6 +241,31 @@ void SimHost::send_task_event(const char* payload) {
     }
 }
 
+void SimHost::send_speaker_event(const char* type, const char* payload) {
+    const auto json = cJSON_Parse(payload);
+    if (!json) {
+        fprintf(stderr, "render: a %s's payload is not JSON\n", type);
+        exit(1);
+    }
+
+    std::string speaker_id;
+    const auto problem = read_speaker_event(json, speaker_id);
+    cJSON_Delete(json);
+
+    if (problem) {
+        printf("W (SimHost) Event %s: %s\n", type, problem);
+    } else if (speaker_id != _model.speaker_id) {
+        return;
+    }
+
+    if (!strcmp(type, "playback_changed")) {
+        refresh_playback();
+    }
+
+    _model.queue_changes++;
+    _model.revision++;
+}
+
 void SimHost::answer_after(uint32_t ms, std::function<void()> answer) {
     _later.emplace_back(lv_tick_get() + ms, std::move(answer));
 }
@@ -293,6 +318,32 @@ void SimHost::request_tracks(const std::string& album_id, uint32_t number, std::
 
 void SimHost::request_playlists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Playlist>)> done) {
     _playlists.request({}, number, std::move(scope), std::move(done));
+}
+
+void SimHost::request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
+                            std::function<void(QueuePage)> done) {
+    _queue_locates.push_back(locate);
+
+    _queue.request(_model.speaker_id, locate && _queue_current_page ? *_queue_current_page : number, std::move(scope),
+                   std::move(done));
+}
+
+void SimHost::clear_queue() {
+    _clears.push_back(_model.speaker_id);
+
+    if (!_clear_answer) {
+        return;
+    }
+
+    std::string error;
+    const auto problem =
+        read_command(_clear_answer->status, _clear_answer->body.c_str(), _clear_answer->body.length(), error);
+    if (problem) {
+        printf("W (SimHost) DELETE queue answered %d, %s: %s\n", _clear_answer->status, problem, error.c_str());
+
+        _model.clears_not_taken++;
+        _model.revision++;
+    }
 }
 
 void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,

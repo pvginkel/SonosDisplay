@@ -63,6 +63,9 @@ public:
     // Shows the library's artists on top of the stack.
     void open_library();
 
+    // Shows the queue of the chosen speaker's group on top of the stack.
+    void open_queue();
+
     // Goes back to the view under the top one at the next update(), so a view may ask from inside
     // one of its own events. Nothing happens when the top view is the only one.
     void back() { _back_requested = true; }
