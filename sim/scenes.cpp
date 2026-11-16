@@ -6432,21 +6432,28 @@ static const char* check_albums_favourite_copies(const SimHost& host, const Shel
     return check_marks({});
 }
 
-// A mark of Sigur Rós, and a press on its row, which opens its albums. The mark is answered while
-// the albums show, and back on the artists Sigur Rós shows marked, at rest.
+// Where Portishead, which a favourite marks, is in LIBRARY: two rows above Sigur Rós.
+static constexpr size_t PORTISHEAD = SIGUR_ROS - 2;
+
+// A mark of Sigur Rós, an unmark of Portishead, and a press on Sigur Rós's row, which opens its
+// albums. Both changes are answered while the albums show, and back on the artists each shows on its
+// toggle, at rest.
 static void artists_favourite_back(SimHost& host, Shell& shell) {
     host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
     open_library(host, shell, LIBRARY);
 
     const auto title = LIBRARY[SIGUR_ROS].first.c_str();
     tap_favourite_toggle(host, shell, title);
+    tap_favourite_toggle(host, shell, LIBRARY[PORTISHEAD].first.c_str());
     tap_row(host, shell, title);
     host.wait(2 * SimHost::TAP_INTERVAL_MS);
     host.tap(BACK.x, BACK.y);
 
     // Once the albums show, and before the touch on the way back.
-    host.answer_after(3 * SimHost::TAP_INTERVAL_MS + 100,
-                      [&host]() { host.answer_favourite_change(201, FAVOURITE_SIGUR_ROS); });
+    host.answer_after(4 * SimHost::TAP_INTERVAL_MS + 100, [&host]() {
+        host.answer_favourite_change(201, FAVOURITE_SIGUR_ROS);
+        host.answer_favourite_change(204, "");
+    });
 }
 
 static const char* check_artists_favourite_back(const SimHost& host, const Shell& shell) {
@@ -6456,10 +6463,20 @@ static const char* check_artists_favourite_back(const SimHost& host, const Shell
     if (host.albums().get_requests() != std::vector<uint32_t>{1}) {
         return "the artist's albums did not open";
     }
-    if (const auto problem = check_favourites_taken(host, 1)) {
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Artist, .item_id = "artist-29"},
+                                         {.kind = ItemKind::Artist, .item_id = "artist-27", .favourite_id = 126},
+                                     },
+                                     {R"({"kind":"artist","item_id":"artist-29"})", ""})) {
         return problem;
     }
-    if (const auto problem = check_marks(with(get_marked(get_titles(LIBRARY)), {LIBRARY[SIGUR_ROS].first}))) {
+    if (const auto problem = check_favourites_taken(host, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_marks(
+            with(get_marked(get_titles(LIBRARY)), {LIBRARY[SIGUR_ROS].first}, {LIBRARY[PORTISHEAD].first}))) {
         return problem;
     }
 
@@ -7619,7 +7636,7 @@ const std::vector<Scene>& get_scenes() {
         {"albums-favourite-timed-out", albums_favourite_timed_out, check_albums_favourite_timed_out,
          ANSWER_TIME_LIMIT_MS + 1000},
         {"albums-favourite-copies", albums_favourite_copies, check_albums_favourite_copies, after_touches_ms(1)},
-        {"artists-favourite-back", artists_favourite_back, check_artists_favourite_back, after_touches_ms(5)},
+        {"artists-favourite-back", artists_favourite_back, check_artists_favourite_back, after_touches_ms(6)},
         {"artists-favourite-page", artists_favourite_page, check_artists_favourite_page, after_touches_ms(2) + 300},
         {"albums-favourite-under", albums_favourite_under, check_albums_favourite_under, after_touches_ms(2)},
         {"albums-favourite-missed", albums_favourite_missed, check_albums_favourite_missed,
