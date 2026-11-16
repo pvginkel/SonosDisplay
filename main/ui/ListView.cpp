@@ -1,9 +1,12 @@
 #include "ListView.h"
 
+#include <algorithm>
 #include <optional>
+#include <span>
 #include <utility>
 
 #include "Messages.h"
+#include "PressButton.h"
 #include "Shell.h"
 #include "Theme.h"
 #include "lv_support.h"
@@ -22,9 +25,8 @@ static constexpr int32_t BUTTON_PADDING = 40;
 static constexpr int32_t SPINNER_SIZE = 56;
 static constexpr int32_t SPINNER_ARC_WIDTH = 6;
 // The queue's buttons at a row's end, as far from its end as from its top and bottom.
-static constexpr int32_t QUEUE_BUTTON_SIZE = 64;
 static constexpr int32_t QUEUE_BUTTON_GAP = 8;
-static constexpr int32_t QUEUE_BUTTONS_END = (ListView::ROW_HEIGHT - QUEUE_BUTTON_SIZE) / 2;
+static constexpr int32_t QUEUE_BUTTONS_END = (ListView::ROW_HEIGHT - PressButton::SIZE) / 2;
 static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
@@ -104,11 +106,11 @@ void ListView::do_update() {
     fit_heading();
 
     // Not under a finger that scrolls the list: its rows would go, and the scroll with them.
-    if (!_changed || (_list && lv_obj_is_scrolling(_list))) {
-        return;
+    if (_changed && !(_list && lv_obj_is_scrolling(_list))) {
+        build();
+    } else {
+        show_presses();
     }
-
-    build();
 }
 
 // The heading ends a gap before the marker, whose reach is from the screen's edge, where the
@@ -186,6 +188,8 @@ void ListView::build() {
     lv_obj_clean(_content);
     _list = nullptr;
     _row_count = 0;
+    _queue_items.clear();
+    _shown_presses.clear();
 
     if (!pages.is_held()) {
         switch (pages.state) {
@@ -217,6 +221,7 @@ void ListView::build() {
     }
 
     do_list_built();
+    show_presses();
 
     // What ask_near_ends() held back while a page that came was not built yet is asked for here.
     if (_list) {
@@ -403,35 +408,70 @@ lv_obj_t* ListView::create_row_title(lv_obj_t* row, const std::string& title) {
     return label;
 }
 
-static void create_queue_button(lv_obj_t* parent, const char* icon, lv_event_cb_t clicked, void* user_data) {
-    auto button = lv_container_create(parent);
-    lv_obj_set_size(button, QUEUE_BUTTON_SIZE, QUEUE_BUTTON_SIZE);
-    lv_obj_add_flag(button, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(button, Theme::color(Theme::BACKGROUND), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(button, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
-    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(button, LV_RADIUS_CIRCLE, LV_PART_MAIN);
-    lv_obj_add_event_cb(button, clicked, LV_EVENT_CLICKED, user_data);
+// The queue's buttons of an item's row, in order: a track is never shuffled.
+static std::span<const QueueAction> get_queue_actions(ItemKind kind) {
+    static constexpr QueueAction ALL[] = {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add};
+    static constexpr QueueAction UNSHUFFLED[] = {QueueAction::Play, QueueAction::Add};
 
-    auto icon_label = lv_label_create(button);
-    lv_label_set_text(icon_label, icon);
-    lv_obj_set_style_text_font(icon_label, Theme::FONT_ICON, LV_PART_MAIN);
-    lv_obj_set_style_text_color(icon_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
-    lv_obj_center(icon_label);
+    if (kind == ItemKind::Track) {
+        return UNSHUFFLED;
+    }
+
+    return ALL;
 }
 
-void ListView::create_queue_buttons(lv_obj_t* row, bool shuffles) {
+static const char* get_queue_icon(QueueAction action) {
+    switch (action) {
+        case QueueAction::Play:
+            return ICON_PLAY;
+        case QueueAction::Shuffle:
+            return ICON_SHUFFLE_VARIANT;
+        case QueueAction::Add:
+            return ICON_PLAYLIST_PLUS;
+    }
+
+    return ICON_PLAY;
+}
+
+void ListView::create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id) {
     lv_obj_set_style_pad_right(row, QUEUE_BUTTONS_END, LV_PART_MAIN);
 
     auto buttons = lv_container_create(row);
     lv_obj_set_style_pad_column(buttons, QUEUE_BUTTON_GAP, LV_PART_MAIN);
     lv_obj_set_flex_flow(buttons, LV_FLEX_FLOW_ROW);
 
-    create_queue_button(buttons, ICON_PLAY, play_clicked, this);
-    if (shuffles) {
-        create_queue_button(buttons, ICON_SHUFFLE_VARIANT, shuffle_clicked, this);
+    for (const auto action : get_queue_actions(kind)) {
+        PressButton::create(buttons, get_queue_icon(action), queue_clicked, this);
     }
-    create_queue_button(buttons, ICON_PLAYLIST_PLUS, add_clicked, this);
+
+    _queue_items.push_back(QueueItem{.kind = kind, .id = item_id, .buttons = buttons});
+}
+
+// Each queue's button built shows whether a request for its item and action is on its way, once
+// the requests on their way changed since the buttons last showed them.
+void ListView::show_presses() {
+    const auto& queueing = _host->get_model().queueing;
+    const auto& sending = queueing.sending;
+    if (std::equal(sending.begin(), sending.end(), _shown_presses.begin(), _shown_presses.end(),
+                   [](const Queueing::Sent& sent, uint32_t id) { return sent.id == id; })) {
+        return;
+    }
+
+    _shown_presses.clear();
+    for (const auto& sent : sending) {
+        _shown_presses.push_back(sent.id);
+    }
+
+    for (const auto& item : _queue_items) {
+        const auto actions = get_queue_actions(item.kind);
+
+        for (size_t i = 0; i < actions.size(); i++) {
+            const auto on_its_way =
+                queueing.is_on_its_way(QueueRequest{.kind = item.kind, .item_id = item.id, .action = actions[i]});
+
+            PressButton::show_on_its_way(lv_obj_get_child(item.buttons, int32_t(i)), on_its_way);
+        }
+    }
 }
 
 void ListView::scroll_to_row(size_t index) {
@@ -520,19 +560,23 @@ void ListView::row_clicked(lv_event_t* event) {
     self->open_row(self->find_item(lv_event_get_current_target_obj(event)));
 }
 
-// The button is in the buttons' row, which is in the item's row.
-void ListView::queue_clicked(lv_event_t* event, QueueAction action) {
+// The button is in the buttons' row, which is in the item's row, whose place among the rows built
+// is its item's in _queue_items. A press whose request is on its way sends nothing; the item's
+// other buttons still send theirs. The host changes the model, and the next do_update() shows the
+// press on its way.
+void ListView::queue_clicked(lv_event_t* event) {
     auto self = (ListView*)lv_event_get_user_data(event);
-    const auto row = lv_obj_get_parent(lv_obj_get_parent(lv_event_get_current_target_obj(event)));
+    const auto button = lv_event_get_current_target_obj(event);
+    const auto row = lv_obj_get_parent(lv_obj_get_parent(button));
+    const auto& item = self->_queue_items[size_t(lv_obj_get_index(row)) - self->_first_row_child];
+    const QueueRequest request{.kind = item.kind,
+                               .item_id = item.id,
+                               .action = get_queue_actions(item.kind)[size_t(lv_obj_get_index(button))]};
 
-    self->queue_row(self->find_item(row), action);
+    if (!self->_host->get_model().queueing.is_on_its_way(request)) {
+        self->_host->queue_item(request);
+    }
 }
-
-void ListView::play_clicked(lv_event_t* event) { queue_clicked(event, QueueAction::Play); }
-
-void ListView::shuffle_clicked(lv_event_t* event) { queue_clicked(event, QueueAction::Shuffle); }
-
-void ListView::add_clicked(lv_event_t* event) { queue_clicked(event, QueueAction::Add); }
 
 void ListView::scrolled(lv_event_t* event) {
     auto self = (ListView*)lv_event_get_user_data(event);

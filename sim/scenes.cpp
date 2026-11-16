@@ -4855,12 +4855,22 @@ static void expect_queue_rules() {
 
     static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
     Queueing queueing;
+    const auto press = [](QueueAction action) {
+        return QueueRequest{.kind = ItemKind::Album, .item_id = "album-1", .action = action};
+    };
 
     // An add the backend took, whose task then fails and another task's too.
-    auto id = queueing.sent(QueueAction::Add, 1000);
+    auto id = queueing.sent(press(QueueAction::Add), 1000);
+    expect(queueing.is_on_its_way(press(QueueAction::Add)) && !queueing.is_on_its_way(press(QueueAction::Play)) &&
+               !queueing.is_on_its_way(
+                   QueueRequest{.kind = ItemKind::Artist, .item_id = "album-1", .action = QueueAction::Add}) &&
+               !queueing.is_on_its_way(
+                   QueueRequest{.kind = ItemKind::Album, .item_id = "album-2", .action = QueueAction::Add}),
+           "a request on its way was not told by its item and action alone");
     expect(!queueing.task_ended(TaskEnd{.task_id = "task-9", .error = "other"}) && queueing.ended.size() == 1,
            "an end that came while a request was on its way was not held");
     queueing.taken(id, "task-7");
+    expect(!queueing.is_on_its_way(press(QueueAction::Add)), "a request taken is still on its way");
     expect(queueing.adds_taken == 1 && queueing.running == std::vector<std::string>{"task-7"} &&
                queueing.ended.empty() && !queueing.tasks_failed,
            "an add taken was not counted, its task not watched, or another task's end held on");
@@ -4872,50 +4882,104 @@ static void expect_queue_rules() {
            "the failure of the display's task was not said, or its task watched on");
 
     // A play whose task completes before the answer comes.
-    id = queueing.sent(QueueAction::Play, 2000);
+    id = queueing.sent(press(QueueAction::Play), 2000);
     queueing.task_ended(TaskEnd{.task_id = "task-10"});
     queueing.taken(id, "task-10");
     expect(queueing.running.empty() && queueing.ended.empty() && queueing.adds_taken == 1 && queueing.tasks_failed == 1,
            "a task that completed before its answer is watched, or a play counted as an add");
 
     // The ends held, and the tasks watched, are bounded.
-    id = queueing.sent(QueueAction::Play, 3000);
+    id = queueing.sent(press(QueueAction::Play), 3000);
     for (size_t i = 0; i < Queueing::MAX_TASKS + 1; i++) {
         queueing.task_ended(TaskEnd{.task_id = "other-" + std::to_string(i)});
     }
     expect(queueing.ended.size() == Queueing::MAX_TASKS && queueing.ended[0].task_id == "other-1",
            "the ends held are not bounded, or the oldest did not give way");
     queueing.not_taken(id);
+    expect(!queueing.is_on_its_way(press(QueueAction::Play)), "a request not taken is still on its way");
     expect(queueing.ended.empty() && queueing.requests_not_taken == 1,
            "the ends held stayed once no request was on its way");
 
     for (size_t i = 0; i < Queueing::MAX_TASKS + 1; i++) {
-        queueing.taken(queueing.sent(QueueAction::Play, 4000), "task-" + std::to_string(20 + i));
+        queueing.taken(queueing.sent(press(QueueAction::Play), 4000), "task-" + std::to_string(20 + i));
     }
     expect(queueing.running.size() == Queueing::MAX_TASKS && queueing.running[0] == "task-21",
            "the tasks watched are not bounded, or the oldest did not give way");
 
     // The time limit, across the tick's wrap too.
-    id = queueing.sent(QueueAction::Add, UINT32_MAX - 99);
+    id = queueing.sent(press(QueueAction::Add), UINT32_MAX - 99);
     queueing.task_ended(TaskEnd{.task_id = "task-30"});
     expect(!queueing.timed_out(LIMIT - 101) && queueing.is_sending(id), "a request was settled before its time limit");
-    expect(queueing.timed_out(LIMIT - 100) && !queueing.is_sending(id) && queueing.requests_not_taken == 2 &&
+    expect(queueing.timed_out(LIMIT - 100) && !queueing.is_sending(id) &&
+               !queueing.is_on_its_way(press(QueueAction::Add)) && queueing.requests_not_taken == 2 &&
                queueing.ended.empty() && queueing.adds_taken == 1,
            "the time limit did not settle a request as not taken, or kept the ends held");
     expect(!queueing.timed_out(LIMIT), "a request was settled twice");
 }
 
-// Touches the button that does `action` at the end of the row whose title is this, scrolled into
-// view first: Play first, then Shuffle where the row has it, and Add to queue last.
-static void tap_queue_button(SimHost& host, Shell& shell, const char* title, QueueAction action) {
-    const auto buttons = find_queue_buttons(show_row(shell, title));
+// The button that does `action` at the end of this row: Play first, then Shuffle where the row has
+// it, and Add to queue last.
+static lv_obj_t* find_queue_button(const lv_obj_t* row, QueueAction action) {
+    const auto buttons = find_queue_buttons(row);
     expect(buttons, "the row does not end in the queue's buttons");
 
     const auto count = int32_t(lv_obj_get_child_count(buttons));
     expect(action != QueueAction::Shuffle || count == 3, "the row has no Shuffle");
 
     const auto index = action == QueueAction::Play ? 0 : action == QueueAction::Shuffle ? 1 : count - 1;
-    tap_center(host, lv_obj_get_child(buttons, index));
+    return lv_obj_get_child(buttons, index);
+}
+
+// Touches the button that does `action` at the end of the row whose title is this, scrolled into
+// view first.
+static void tap_queue_button(SimHost& host, Shell& shell, const char* title, QueueAction action) {
+    tap_center(host, find_queue_button(show_row(shell, title), action));
+}
+
+// Whether a queue's button shows its press on its way: a spinner turns where its icon was.
+static bool shows_on_its_way(const lv_obj_t* button) {
+    const auto last = lv_obj_get_child(button, -1);
+
+    return lv_obj_has_flag(lv_obj_get_child(button, 0), LV_OBJ_FLAG_HIDDEN) && last &&
+           lv_obj_check_type(last, &lv_spinner_class);
+}
+
+// The rows that show presses on their way, by title, and the actions of those presses.
+using Presses = std::vector<std::pair<std::string, std::vector<QueueAction>>>;
+
+// Of the queue's buttons of the list on screen, exactly those of `presses` show their press on its
+// way, and every other one is at rest.
+static const char* check_presses(const Presses& presses) {
+    const auto list = find_list();
+    if (!list) {
+        return "the items are not listed";
+    }
+
+    size_t found = 0;
+    for (const auto row : get_rows(list)) {
+        const auto pressed = std::find_if(presses.begin(), presses.end(), [row](const auto& press) {
+            return shows_title(get_row_title(row), press.first);
+        });
+        if (pressed != presses.end()) {
+            found++;
+        }
+
+        for (const auto action : {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add}) {
+            if (action == QueueAction::Shuffle && lv_obj_get_child_count(find_queue_buttons(row)) != 3) {
+                continue;
+            }
+
+            const auto on_its_way =
+                pressed != presses.end() &&
+                std::find(pressed->second.begin(), pressed->second.end(), action) != pressed->second.end();
+            if (shows_on_its_way(find_queue_button(row, action)) != on_its_way) {
+                return on_its_way ? "a press on its way does not show on its button"
+                                  : "a button whose press is not on its way shows one";
+            }
+        }
+    }
+
+    return found == presses.size() ? nullptr : "a row pressed is not listed";
 }
 
 // The requests the presses sent, and their bodies, as the device writes them.
@@ -4938,7 +5002,8 @@ static const char* check_added(const SimHost& host) {
     return says(MSG_ADDED_TO_QUEUE) ? nullptr : "the bar does not say that the add went";
 }
 
-// Every row of the list on screen ends in the queue's buttons, three, or two without Shuffle.
+// Every row of the list on screen ends in the queue's buttons, three, or two without Shuffle, each
+// at rest: no press is on its way.
 static const char* check_queue_buttons(size_t count) {
     for (const auto row : get_rows(find_list())) {
         const auto buttons = find_queue_buttons(row);
@@ -4948,7 +5013,7 @@ static const char* check_queue_buttons(size_t count) {
         }
     }
 
-    return nullptr;
+    return check_presses({});
 }
 
 // A press on an artist's Play, Shuffle and Add to queue, each on the artist of its row: Play and
@@ -5192,6 +5257,9 @@ static const char* check_queue_not_taken(const SimHost& host, const Shell& shell
     if (queueing.requests_not_taken != 1 || queueing.adds_taken || !queueing.running.empty()) {
         return "the add refused was taken";
     }
+    if (const auto problem = check_presses({})) {
+        return problem;
+    }
 
     return says(MSG_COMMAND_NOT_TAKEN) && !says(MSG_ADDED_TO_QUEUE) ? nullptr
                                                                     : "the bar does not say that it did not go through";
@@ -5286,6 +5354,9 @@ static const char* check_queue_no_answer(const SimHost& host, const Shell& shell
         !queueing.sending.empty()) {
         return "the time limit did not settle the request as not taken, or the late answer changed it";
     }
+    if (const auto problem = check_presses({})) {
+        return problem;
+    }
 
     return says(MSG_COMMAND_NOT_TAKEN) && !says(MSG_ADDED_TO_QUEUE) ? nullptr
                                                                     : "the bar does not say that it did not go through";
@@ -5308,6 +5379,361 @@ static const char* check_queue_failed_now_playing(const SimHost& host, const She
     }
 
     return check_task_failed(host);
+}
+
+// What the presses on Play, Shuffle and Add to queue of Átta send, in that order, and their bodies.
+static const std::vector<QueueRequest> ATTA_PRESSES = {
+    {.kind = ItemKind::Album, .item_id = "album-1", .action = QueueAction::Play},
+    {.kind = ItemKind::Album, .item_id = "album-1", .action = QueueAction::Shuffle},
+    {.kind = ItemKind::Album, .item_id = "album-1", .action = QueueAction::Add},
+};
+static const std::vector<std::string> ATTA_BODIES = {
+    R"({"kind":"album","item_id":"album-1","action":"play"})",
+    R"({"kind":"album","item_id":"album-1","action":"shuffle"})",
+    R"({"kind":"album","item_id":"album-1","action":"add"})",
+};
+
+// A press on Átta's Play, Shuffle and Add to queue, none of them answered yet.
+static void press_atta(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    tap_queue_button(host, shell, "Átta", QueueAction::Shuffle);
+    tap_queue_button(host, shell, "Átta", QueueAction::Add);
+}
+
+// Nothing is said yet of a press on its way: the bar shows what plays.
+static const char* check_nothing_said() {
+    if (says(MSG_COMMAND_NOT_TAKEN) || says(MSG_ADDED_TO_QUEUE)) {
+        return "the bar says what came of a press on its way";
+    }
+
+    return says("Svefn-g-englar") ? nullptr : "the bar does not say what plays";
+}
+
+// A press on an artist's Play and another's Shuffle, none answered yet: each row shows its own
+// press on its way, and its other buttons at rest. A second press on the first artist's Play sends
+// nothing and opens nothing, and its Add to queue still sends.
+static void artists_queue_on_its_way(SimHost& host, Shell& shell) {
+    open_library(host, shell, LIBRARY);
+
+    tap_queue_button(host, shell, LIBRARY[0].first.c_str(), QueueAction::Play);
+    tap_queue_button(host, shell, LIBRARY[1].first.c_str(), QueueAction::Shuffle);
+    tap_queue_button(host, shell, LIBRARY[0].first.c_str(), QueueAction::Play);
+    tap_queue_button(host, shell, LIBRARY[0].first.c_str(), QueueAction::Add);
+}
+
+static const char* check_artists_queue_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.albums().get_requests().empty()) {
+        return "a press on a button opened its artist";
+    }
+    if (const auto problem =
+            check_queue_requests(host,
+                                 {
+                                     {.kind = ItemKind::Artist, .item_id = "artist-1", .action = QueueAction::Play},
+                                     {.kind = ItemKind::Artist, .item_id = "artist-2", .action = QueueAction::Shuffle},
+                                     {.kind = ItemKind::Artist, .item_id = "artist-1", .action = QueueAction::Add},
+                                 },
+                                 {
+                                     R"({"kind":"artist","item_id":"artist-1","action":"play","order":"newest_first"})",
+                                     R"({"kind":"artist","item_id":"artist-2","action":"shuffle"})",
+                                     R"({"kind":"artist","item_id":"artist-1","action":"add","order":"newest_first"})",
+                                 })) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+
+    return check_presses(
+        {{LIBRARY[0].first, {QueueAction::Play, QueueAction::Add}}, {LIBRARY[1].first, {QueueAction::Shuffle}}});
+}
+
+// A press on each of an album's buttons, none answered yet, and a second press on its Play: every
+// button of its row shows its press on its way, the second press sends nothing and opens nothing,
+// and the other albums' buttons are at rest.
+static void albums_queue_on_its_way(SimHost& host, Shell& shell) {
+    press_atta(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+}
+
+static const char* check_albums_queue_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.tracks().get_requests().empty()) {
+        return "a press on a button opened its album";
+    }
+    if (const auto problem = check_queue_requests(host, ATTA_PRESSES, ATTA_BODIES)) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+
+    return check_presses({{"Átta", {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add}}});
+}
+
+// A press on a track's Play and Add to queue, none answered yet, and a second press on its Add:
+// both buttons show their press on its way, and the second press sends nothing.
+static void tracks_queue_on_its_way(SimHost& host, Shell& shell) {
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_tracks(host, shell);
+
+    tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Play);
+    tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Add);
+    tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Add);
+}
+
+static const char* check_tracks_queue_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_queue_requests(host,
+                                 {
+                                     {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Play},
+                                     {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Add},
+                                 },
+                                 {
+                                     R"({"kind":"track","item_id":"track-1","action":"play"})",
+                                     R"({"kind":"track","item_id":"track-1","action":"add"})",
+                                 })) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+
+    return check_presses({{KVEIKUR[0], {QueueAction::Play, QueueAction::Add}}});
+}
+
+// A press on a playlist's Shuffle, not answered yet, and a second one: the button shows its press
+// on its way, and the second press sends nothing.
+static void playlists_queue_on_its_way(SimHost& host, Shell& shell) {
+    host.playlists().serve(200, make_pages(PLAYLISTS, make_playlists_body));
+    open_playlists(host, shell);
+
+    tap_queue_button(host, shell, PLAYLISTS[1].c_str(), QueueAction::Shuffle);
+    tap_queue_button(host, shell, PLAYLISTS[1].c_str(), QueueAction::Shuffle);
+}
+
+static const char* check_playlists_queue_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_requests(
+            host, {{.kind = ItemKind::Playlist, .item_id = "playlist-2", .action = QueueAction::Shuffle}},
+            {R"({"kind":"playlist","item_id":"playlist-2","action":"shuffle"})"})) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+
+    return check_presses({{PLAYLISTS[1], {QueueAction::Shuffle}}});
+}
+
+// When the presses on Átta's buttons are answered, after the last press.
+static constexpr uint32_t ATTA_ANSWER_MS = after_touches_ms(3);
+
+// The three presses on Átta, answered once all three are on their way: every button is at rest
+// again, and the bar says that the add went.
+static void albums_queue_answered(SimHost& host, Shell& shell) {
+    press_atta(host, shell);
+
+    host.answer_after(ATTA_ANSWER_MS, [&host]() {
+        for (size_t i = 0; i < ATTA_PRESSES.size(); i++) {
+            host.answer_queue_request(202, QUEUE_TAKEN);
+        }
+    });
+}
+
+static const char* check_albums_queue_answered(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_queue_requests()) {
+        return "the answers did not come";
+    }
+    if (const auto problem = check_queue_requests(host, ATTA_PRESSES, ATTA_BODIES)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_buttons(3)) {
+        return problem;
+    }
+
+    return check_added(host);
+}
+
+// A press on Átta's Play and Add to queue, of which only the Play is answered: the Play is at rest
+// again, and the Add to queue still shows its press on its way.
+static void albums_queue_answered_one(SimHost& host, Shell& shell) {
+    open_albums_screen(host, shell);
+
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    tap_queue_button(host, shell, "Átta", QueueAction::Add);
+    host.answer_after(after_touches_ms(2), [&host]() { host.answer_queue_request(202, QUEUE_TAKEN); });
+}
+
+static const char* check_albums_queue_answered_one(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_queue_requests() != 1) {
+        return "the Play was not answered alone";
+    }
+
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.adds_taken || queueing.requests_not_taken || queueing.sending.size() != 1) {
+        return "the Play's answer settled more than the Play";
+    }
+
+    return check_presses({{"Átta", {QueueAction::Add}}});
+}
+
+// The three presses on Átta, refused once all three are on their way: every button is at rest
+// again, and the bar says that a press did not go through.
+static void albums_queue_refused(SimHost& host, Shell& shell) {
+    press_atta(host, shell);
+
+    host.answer_after(ATTA_ANSWER_MS, [&host]() {
+        for (size_t i = 0; i < ATTA_PRESSES.size(); i++) {
+            host.answer_queue_request(404, ERROR_ITEM_NOT_FOUND);
+        }
+    });
+}
+
+// Every press on Átta's buttons was not taken, and the bar says so.
+static const char* check_atta_not_taken(const SimHost& host) {
+    const auto& queueing = host.get_model().queueing;
+    if (queueing.requests_not_taken != ATTA_PRESSES.size() || queueing.adds_taken || !queueing.sending.empty()) {
+        return "the presses were not settled as not taken";
+    }
+    if (const auto problem = check_queue_buttons(3)) {
+        return problem;
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) && !says(MSG_ADDED_TO_QUEUE) ? nullptr
+                                                                    : "the bar does not say that it did not go through";
+}
+
+static const char* check_albums_queue_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_queue_requests()) {
+        return "the answers did not come";
+    }
+
+    return check_atta_not_taken(host);
+}
+
+// The three presses on Átta, never answered: once their time limit has passed every button is at
+// rest again, and the bar says that a press did not go through.
+static void albums_queue_timed_out(SimHost& host, Shell& shell) { press_atta(host, shell); }
+
+static const char* check_albums_queue_timed_out(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+
+    return check_atta_not_taken(host);
+}
+
+// A press on Sigur Rós's Play and Add to queue, and a press on its row, which opens its albums.
+// The Play is answered while the albums show, and back on the artists the Play is at rest and the
+// Add to queue still shows its press on its way.
+static void artists_queue_back(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_library(host, shell, LIBRARY);
+
+    const auto title = LIBRARY[SIGUR_ROS].first.c_str();
+    tap_queue_button(host, shell, title, QueueAction::Play);
+    tap_queue_button(host, shell, title, QueueAction::Add);
+    tap_row(host, shell, title);
+    host.wait(2 * SimHost::TAP_INTERVAL_MS);
+    host.tap(BACK.x, BACK.y);
+
+    // Once the albums show, and before the touch on the way back.
+    host.answer_after(3 * SimHost::TAP_INTERVAL_MS + 100, [&host]() { host.answer_queue_request(202, QUEUE_TAKEN); });
+}
+
+static const char* check_artists_queue_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<ArtistsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1}) {
+        return "the artist's albums did not open";
+    }
+    if (host.count_unanswered_queue_requests() != 1) {
+        return "the Play was not answered alone";
+    }
+
+    return check_presses({{LIBRARY[SIGUR_ROS].first, {QueueAction::Add}}});
+}
+
+// A press on Átta's Play on Sigur Rós's albums, opened over the artists, then back, and the albums
+// opened again before the press is answered: the albums screen built anew shows it on its way.
+static void albums_queue_reopened(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_library(host, shell, LIBRARY);
+
+    lv_area_t artist;
+    lv_obj_get_coords(show_row(shell, LIBRARY[SIGUR_ROS].first.c_str()), &artist);
+
+    shell.push(std::make_unique<AlbumsView>(
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+    tap_queue_button(host, shell, "Átta", QueueAction::Play);
+    host.tap(BACK.x, BACK.y);
+    host.tap((artist.x1 + artist.x2) / 2, (artist.y1 + artist.y2) / 2);
+}
+
+static const char* check_albums_queue_reopened(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums were not opened again";
+    }
+    if (const auto problem = check_queue_requests(host, {ATTA_PRESSES[0]}, {ATTA_BODIES[0]})) {
+        return problem;
+    }
+
+    return check_presses({{"Átta", {QueueAction::Play}}});
+}
+
+// A press on the Play of the first page's last artist, not answered yet, and the second page
+// comes: the list is built again with both pages, and the artist's row shows the press on its way
+// still.
+static void artists_queue_page(SimHost& host, Shell& shell) {
+    const auto artists = make_many_artists();
+    const auto pages = make_artist_pages(artists);
+    host.artists().serve(200, {pages[0]});
+    open_artists(host, shell);
+    scroll_list(shell, true);
+    expect(host.artists().get_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
+
+    tap_queue_button(host, shell, artists[PAGE_SIZE - 1].first.c_str(), QueueAction::Play);
+    host.answer_after(after_touches_ms(1), [&host, page = pages[1]]() { host.artists().answer(200, page.c_str()); });
+}
+
+static const char* check_artists_queue_page(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_rows(make_many_artists(), 0, 2 * PAGE_SIZE)) {
+        return problem;
+    }
+    if (host.get_queue_requests().size() != 1) {
+        return "the press was not sent once";
+    }
+
+    return check_presses({{make_many_artists()[PAGE_SIZE - 1].first, {QueueAction::Play}}});
 }
 
 // An entry of a queue's fixture: its title, and its artist.
@@ -6320,6 +6746,19 @@ const std::vector<Scene>& get_scenes() {
         {"queue-failed-other", queue_failed_other, check_queue_failed_other, 800},
         {"queue-no-answer", queue_no_answer, check_queue_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
         {"queue-failed-now-playing", queue_failed_now_playing, check_queue_failed_now_playing, 1000},
+        {"artists-queue-on-its-way", artists_queue_on_its_way, check_artists_queue_on_its_way, after_touches_ms(4)},
+        {"albums-queue-on-its-way", albums_queue_on_its_way, check_albums_queue_on_its_way, after_touches_ms(4)},
+        {"tracks-queue-on-its-way", tracks_queue_on_its_way, check_tracks_queue_on_its_way, after_touches_ms(3)},
+        {"playlists-queue-on-its-way", playlists_queue_on_its_way, check_playlists_queue_on_its_way,
+         after_touches_ms(2)},
+        {"albums-queue-answered", albums_queue_answered, check_albums_queue_answered, ATTA_ANSWER_MS + 300},
+        {"albums-queue-answered-one", albums_queue_answered_one, check_albums_queue_answered_one,
+         after_touches_ms(2) + 300},
+        {"albums-queue-refused", albums_queue_refused, check_albums_queue_refused, ATTA_ANSWER_MS + 300},
+        {"albums-queue-timed-out", albums_queue_timed_out, check_albums_queue_timed_out, ANSWER_TIME_LIMIT_MS + 1000},
+        {"artists-queue-back", artists_queue_back, check_artists_queue_back, after_touches_ms(6)},
+        {"albums-queue-reopened", albums_queue_reopened, check_albums_queue_reopened, after_touches_ms(3)},
+        {"artists-queue-page", artists_queue_page, check_artists_queue_page, after_touches_ms(1) + 300},
         {"queue-screen", queue_screen, check_queue_screen_open, after_touches_ms(1)},
         {"queue-screen-mid-page", queue_screen_mid_page, check_queue_screen_mid_page},
         {"queue-screen-long", queue_screen_long, check_queue_screen_long},

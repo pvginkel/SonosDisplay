@@ -20,11 +20,8 @@ const char* PlaylistsView::get_loading_message() const { return MSG_PLAYLISTS_LO
 const char* PlaylistsView::get_empty_message() const { return MSG_PLAYLISTS_EMPTY; }
 
 void PlaylistsView::build_row(lv_obj_t* row, size_t index) {
-    create_row_title(row, _playlists.items[index].title);
-    create_queue_buttons(row, true);
-}
+    const auto& playlist = _playlists.items[index];
 
-void PlaylistsView::queue_row(size_t index, QueueAction action) {
-    _host->queue_item(
-        QueueRequest{.kind = ItemKind::Playlist, .item_id = _playlists.items[index].id, .action = action});
+    create_row_title(row, playlist.title);
+    create_queue_buttons(row, ItemKind::Playlist, playlist.id);
 }

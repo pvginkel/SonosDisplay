@@ -721,7 +721,7 @@ struct Queueing {
         // What tells this request's answer from another's.
         uint32_t id{};
 
-        QueueAction action{};
+        QueueRequest request;
 
         // LVGL's tick when the request was sent.
         uint32_t sent_at{};
@@ -756,11 +756,18 @@ struct Queueing {
         return std::any_of(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
     }
 
+    // Whether a request for this item and action is on its way. A view shows the button that sent
+    // it so, and a press on that button sends no second one.
+    bool is_on_its_way(const QueueRequest& request) const {
+        return std::any_of(sending.begin(), sending.end(),
+                           [&request](const Sent& sent) { return sent.request == request; });
+    }
+
     // A request is on its way from `now`, LVGL's tick. Returns its id, which its answer is told
     // by.
-    uint32_t sent(QueueAction action, uint32_t now) {
+    uint32_t sent(const QueueRequest& request, uint32_t now) {
         const auto id = ++_last_id;
-        sending.push_back(Sent{.id = id, .action = action, .sent_at = now});
+        sending.push_back(Sent{.id = id, .request = request, .sent_at = now});
 
         return id;
     }
@@ -770,7 +777,7 @@ struct Queueing {
     void taken(uint32_t id, const std::string& task_id) {
         const auto found =
             std::find_if(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
-        if (found->action == QueueAction::Add) {
+        if (found->request.action == QueueAction::Add) {
             adds_taken++;
         }
         sending.erase(found);

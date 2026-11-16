@@ -2,9 +2,9 @@
 
 // A screen of a list the backend gives in pages: a heading with a way back, and under it a row
 // for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
-// item's row, opens an item whose row it made openable, and queues an item whose row it gave the
-// queue's buttons; it may end the heading with its own, and say a line under it. While the Shell's
-// "Reconnecting" marker shows at the top right, the heading ends before it.
+// item's row, which it may give the queue's buttons, and opens an item whose row it made openable;
+// it may end the heading with its own, and say a line under it. While the Shell's "Reconnecting"
+// marker shows at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -17,12 +17,20 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "View.h"
 
 class Shell;
 
 class ListView : public View {
+    // The item of a row that ends in the queue's buttons, and the row of those buttons.
+    struct QueueItem {
+        ItemKind kind;
+        std::string id;
+        lv_obj_t* buttons;
+    };
+
     std::string _title;
     lv_obj_t* _heading{};
     lv_obj_t* _note{};
@@ -36,6 +44,11 @@ class ListView : public View {
     uint32_t _first_index{};
     // Whether the pages changed since the list was built.
     bool _changed{};
+    // The item of each row built with the queue's buttons, in the rows' order.
+    std::vector<QueueItem> _queue_items;
+    // The ids of the requests to queue an item that were on their way when the queue's buttons
+    // last showed them.
+    std::vector<uint32_t> _shown_presses;
 
 protected:
     Shell* _shell;
@@ -72,14 +85,12 @@ protected:
     // label.
     static lv_obj_t* create_row_title(lv_obj_t* row, const std::string& title);
 
-    // Ends this row, which build_row() was handed, with buttons that play its item, shuffle it
-    // where `shuffles`, and add it to the queue. A press on one calls queue_row(); a drag that
-    // starts on one still scrolls the list.
-    void create_queue_buttons(lv_obj_t* row, bool shuffles);
-
-    // Plays, shuffles or adds to the queue the item held at `index`, on a press on a button
-    // create_queue_buttons() made in its row.
-    virtual void queue_row(size_t index, QueueAction action) {}
+    // Ends this row, which build_row() was handed, with PressButtons that play its item, of this
+    // kind and with this id, shuffle it unless it is a track, and add it to the queue. A press on
+    // one asks the host for its request, unless that request is on its way: the button then shows
+    // so, on every row of the item, built before the press or after it. A drag that starts on one
+    // still scrolls the list. Every row of a list has them, or none does.
+    void create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id);
 
     // What the screen says while the first page is on its way, and when the list is empty.
     virtual const char* get_loading_message() const = 0;
@@ -122,13 +133,11 @@ private:
     void build_list();
     void build_page_state(uint32_t page);
     void ask_near_ends();
+    void show_presses();
     size_t find_item(const lv_obj_t* row);
     static void back_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
     static void row_clicked(lv_event_t* event);
-    static void queue_clicked(lv_event_t* event, QueueAction action);
-    static void play_clicked(lv_event_t* event);
-    static void shuffle_clicked(lv_event_t* event);
-    static void add_clicked(lv_event_t* event);
+    static void queue_clicked(lv_event_t* event);
     static void scrolled(lv_event_t* event);
 };

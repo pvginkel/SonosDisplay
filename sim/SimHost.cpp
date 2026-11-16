@@ -181,7 +181,7 @@ void SimHost::queue_item(const QueueRequest& request) {
     }
     _queue_request_bodies.push_back(*body);
 
-    const auto id = _model.queueing.sent(request.action, lv_tick_get());
+    const auto id = _model.queueing.sent(request, lv_tick_get());
     _model.revision++;
 
     if (_queue_answer) {

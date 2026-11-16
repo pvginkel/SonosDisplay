@@ -570,7 +570,7 @@ void Application::group_change_answered(uint32_t change, bool adds, HttpResponse
 void Application::queue_item(const QueueRequest& request) {
     ESP_LOGI(TAG, "Queueing item %s on %s", request.item_id.c_str(), _model.speaker_id.c_str());
 
-    const auto id = _model.queueing.sent(request.action, lv_tick_get());
+    const auto id = _model.queueing.sent(request, lv_tick_get());
     model_changed();
 
     // A body the heap cannot hold is a request not taken, as HttpClient answers a request it

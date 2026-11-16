@@ -36,17 +36,15 @@ const char* ArtistsView::get_loading_message() const { return MSG_ARTISTS_LOADIN
 const char* ArtistsView::get_empty_message() const { return MSG_ARTISTS_EMPTY; }
 
 void ArtistsView::build_row(lv_obj_t* row, size_t index) {
-    create_row_title(row, _artists.items[index].title);
-    create_queue_buttons(row, true);
+    const auto& artist = _artists.items[index];
+
+    create_row_title(row, artist.title);
+    create_queue_buttons(row, ItemKind::Artist, artist.id);
     make_openable(row);
 }
 
 void ArtistsView::open_row(size_t index) {
     _shell->push(std::make_unique<AlbumsView>(_host, _shell, _artists.items[index]));
-}
-
-void ArtistsView::queue_row(size_t index, QueueAction action) {
-    _host->queue_item(QueueRequest{.kind = ItemKind::Artist, .item_id = _artists.items[index].id, .action = action});
 }
 
 void ArtistsView::do_render_beside(lv_obj_t* body, lv_obj_t* area) {

@@ -57,8 +57,9 @@ public:
     virtual void remove_from_group(const std::string& speaker_id) = 0;
 
     // Has the chosen speaker's group play, shuffle or add to its queue an item of the library. A
-    // view asks only while a speaker is chosen, and never to shuffle a track. The request is on
-    // its way in the model from here on.
+    // view asks only while a speaker is chosen, never to shuffle a track, and never while the same
+    // request is on its way (Queueing::is_on_its_way()). The request is on its way in the model
+    // from here on.
     virtual void queue_item(const QueueRequest& request) = 0;
 
     // Asks the backend for page `number` of the library's artists, from 1, PAGE_SIZE to a page.
