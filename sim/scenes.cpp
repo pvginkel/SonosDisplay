@@ -1728,7 +1728,7 @@ static void expect_volume_answer_time_limit_rules() {
     volume.speaker_changed();
     volume.pressed(Volume::STEP);
     const auto other = volume.next_change(UINT32_MAX - 99);
-    expect(other && !volume.is_sending(later->id) && volume.is_sending(other->id),
+    expect(other && !volume.is_sending(first->id) && !volume.is_sending(later->id) && volume.is_sending(other->id),
            "the answer to a change for the speaker before would be taken for a later change's");
     expect(!volume.timed_out(LIMIT - 101) && volume.timed_out(LIMIT - 100),
            "the time limit of a change does not hold across the tick's wrap");
