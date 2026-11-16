@@ -31,6 +31,13 @@ void SimHost::refresh_speakers() {
         _model.speakers.state = LoadState::Loading;
         _model.revision++;
     }
+
+    if (_next_speakers) {
+        const auto answer = std::move(*_next_speakers);
+        _next_speakers.reset();
+
+        answer_speakers(answer.status, answer.body.c_str());
+    }
 }
 
 void SimHost::refresh_playback() {
@@ -104,6 +111,43 @@ void SimHost::send_command(Command command) {
     }
 
     _model.revision++;
+}
+
+void SimHost::add_to_group(const std::string& speaker_id) { send_group_change(speaker_id, true); }
+
+void SimHost::remove_from_group(const std::string& speaker_id) { send_group_change(speaker_id, false); }
+
+void SimHost::send_group_change(const std::string& speaker_id, bool adds) {
+    _group_changes.push_back(GroupChangeRequest{speaker_id, _model.speaker_id, adds});
+
+    const auto change = _model.grouping.sent(speaker_id, _model.speaker_id, adds);
+    _model.revision++;
+
+    if (!_group_change_answer) {
+        return;
+    }
+
+    std::string error;
+    const auto problem = read_command(_group_change_answer->status, _group_change_answer->body.c_str(),
+                                      _group_change_answer->body.length(), error);
+    if (problem) {
+        printf("W (SimHost) %s group answered %d, %s: %s\n", adds ? "PUT" : "DELETE", _group_change_answer->status,
+               problem, error.c_str());
+
+        _model.grouping.not_taken(change);
+        refresh_speakers();
+    } else {
+        _model.grouping.taken(change, lv_tick_get());
+    }
+
+    _model.revision++;
+}
+
+void SimHost::process() {
+    if (_model.grouping.timed_out(lv_tick_get())) {
+        _model.revision++;
+        refresh_speakers();
+    }
 }
 
 void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
@@ -206,6 +250,8 @@ void SimHost::answer_speakers(int status, const char* body) {
     const auto problem = read_speakers(status, body, strlen(body), _model.speakers);
     if (problem) {
         printf("W (SimHost) GET /api/speakers answered %d, %s: %s\n", status, problem, _model.speakers.error.c_str());
+    } else {
+        _model.grouping.listed(_model.speakers);
     }
 
     _model.revision++;

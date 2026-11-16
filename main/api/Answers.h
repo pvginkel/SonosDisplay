@@ -16,8 +16,9 @@
 // Each reader returns what was wrong with the answer, for the log, or nullptr when it was what
 // the API's document says.
 
-// Reads the answer to GET /api/speakers into `list`: Loaded with the speakers, or Failed with
-// what the backend said went wrong, where it said so in the error envelope.
+// Reads the answer to GET /api/speakers into `list`: Loaded with the speakers and the members of
+// each one's group, or Failed with what the backend said went wrong, where it said so in the
+// error envelope.
 const char* read_speakers(int status, const char* body, size_t length, SpeakerList& list);
 
 // Reads the answer to GET /api/speakers/{speaker_id}/playback into `playback`: Loaded with what
@@ -25,8 +26,8 @@ const char* read_speakers(int status, const char* body, size_t length, SpeakerLi
 // failure leaves the last playback answered in place.
 const char* read_playback(int status, const char* body, size_t length, Playback& playback);
 
-// Reads the answer to a transport command, which is a 204 when the backend took it. `error` is
-// what the backend said went wrong, where it said so.
+// Reads the answer to a transport command or to a change of a group, which is a 204 when the
+// backend took it. `error` is what the backend said went wrong, where it said so.
 const char* read_command(int status, const char* body, size_t length, std::string& error);
 
 // Reads the answer to GET /api/speakers/{speaker_id} into `volume`: Loaded with the level and the

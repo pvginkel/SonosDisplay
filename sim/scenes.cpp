@@ -1,5 +1,6 @@
 #include "scenes.h"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -27,6 +28,16 @@ static const char SPEAKERS[] = R"({"data":[
  "volume":31},"id":"speaker-library","model":"Playbase","muted":false,"name":"Bibliothèque","volume":35},
 {"group":{"coordinator_id":"speaker-library","member_ids":["speaker-library","speaker-bathroom"],"muted":false,
  "volume":31},"id":"speaker-bathroom","model":"Play:1","muted":true,"name":"Żółta łazienka","volume":27}
+]})";
+
+// The same speakers once the bathroom's has left the library's group and joined the garage's.
+static const char SPEAKERS_REGROUPED[] = R"({"data":[
+{"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage","speaker-bathroom"],"muted":false,
+ "volume":25},"id":"speaker-garage","model":"Play:3","muted":false,"name":"Garage","volume":24},
+{"group":{"coordinator_id":"speaker-library","member_ids":["speaker-library"],"muted":false,"volume":35},
+ "id":"speaker-library","model":"Playbase","muted":false,"name":"Bibliothèque","volume":35},
+{"group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage","speaker-bathroom"],"muted":false,
+ "volume":25},"id":"speaker-bathroom","model":"Play:1","muted":true,"name":"Żółta łazienka","volume":27}
 ]})";
 
 static const char SPEAKERS_MANY[] = R"({"data":[
@@ -70,7 +81,24 @@ static const char* const UNREADABLE[] = {
     R"({"data":[{"id":"","name":"Garage"}]})",
     R"({"data":[{"id":7,"name":"Garage"}]})",
     R"({"data":[{"id":"speaker-garage","name":null}]})",
-    R"({"data":[{"id":"speaker-garage","name":"Garage"},{"id":"speaker-library"}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":"speaker-garage",)"
+    R"("member_ids":["speaker-garage"]}},{"id":"speaker-library"}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage"}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":null}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":["speaker-garage"]}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"member_ids":["speaker-garage"]}}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":null,)"
+    R"("member_ids":["speaker-garage"]}}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":"speaker-garage"}}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":"speaker-garage",)"
+    R"("member_ids":null}}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":"speaker-garage",)"
+    R"("member_ids":"speaker-garage"}}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":"speaker-garage",)"
+    R"("member_ids":["speaker-garage",7]}}]})",
+    R"({"data":[{"id":"speaker-garage","name":"Garage","group":{"coordinator_id":"speaker-garage",)"
+    R"("member_ids":["speaker-garage"]}},{"id":"speaker-library","name":"Bibliothèque","group":)"
+    R"({"coordinator_id":"speaker-library","member_ids":[null]}}]})",
 };
 
 // A queue from the Plex library, playing.
@@ -329,11 +357,173 @@ static void answer_speakers(SimHost& host) {
     const auto& list = host.get_model().speakers;
     expect(list.state == LoadState::Loaded, "the speakers fixture was not read as a list");
     expect(list.speakers.size() == 3, "the speakers fixture does not hold three speakers");
-    expect(list.speakers[1] == Speaker{.id = "speaker-library", .name = "Bibliothèque"},
+    expect(list.speakers[1] == Speaker{.id = "speaker-library",
+                                       .name = "Bibliothèque",
+                                       .member_ids = {"speaker-library", "speaker-bathroom"}},
            "the speakers fixture's second speaker was not read as it is");
 }
 
+// Which speakers play in the chosen speaker's group is read from the list: a group of two, from
+// the speaker that leads it and from the other one.
+static void expect_group_members() {
+    SimHost grouped;
+    const auto& model = grouped.get_model();
+
+    grouped.answer_speakers(200, SPEAKERS);
+    expect(!model.in_group("speaker-library"), "a speaker plays in a group while no speaker is chosen");
+
+    grouped.model().speaker_id = "speaker-library";
+    expect(model.in_group("speaker-bathroom") && model.in_group("speaker-library") && !model.in_group("speaker-garage"),
+           "the group of two was not read from the speaker that leads it");
+
+    grouped.model().speaker_id = "speaker-bathroom";
+    expect(model.in_group("speaker-library") && !model.in_group("speaker-garage"),
+           "the group of two was not read from the speaker that does not lead it");
+
+    grouped.model().speaker_id = "speaker-garage";
+    expect(!model.in_group("speaker-library") && !model.in_group("speaker-bathroom"),
+           "a speaker that plays alone has others in its group");
+
+    grouped.model().speaker_id = "speaker-shed";
+    expect(!model.in_group("speaker-library"), "a speaker plays in the group of a speaker the list lacks");
+}
+
+// A change of a group is pending from the press, when its speaker takes no second one, until a
+// list shows the group as asked or the time limit has passed. Any answer but a 204 is a change
+// not taken.
+static void expect_group_change_rules() {
+    {
+        SimHost group;
+        group.model().speaker_id = "speaker-garage";
+        group.answer_speakers(200, SPEAKERS);
+
+        const auto& model = group.get_model();
+        const auto& grouping = model.grouping;
+
+        group.add_to_group("speaker-bathroom");
+        expect(
+            group.get_group_changes() == std::vector<GroupChangeRequest>{{"speaker-bathroom", "speaker-garage", true}},
+            "an add did not send the speaker into the chosen speaker's group");
+        expect(!grouping.allows("speaker-bathroom") && grouping.allows("speaker-library"),
+               "a change on its way does not hold its own speaker, and no other");
+
+        // A list from before the speakers reported the new group settles nothing.
+        group.answer_speakers(200, SPEAKERS);
+        expect(!grouping.allows("speaker-bathroom"), "a list that does not show a change settled it");
+
+        // A pick of another speaker leaves the change pending. The bathroom plays in the library's
+        // group, which is not the one it was sent into.
+        group.choose_speaker("speaker-library");
+        group.answer_speakers(200, SPEAKERS);
+        expect(model.in_group("speaker-bathroom") && !grouping.allows("speaker-bathroom"),
+               "a change was settled by another group than the one it was sent for");
+
+        group.answer_speakers(200, SPEAKERS_REGROUPED);
+        expect(grouping.allows("speaker-bathroom"), "a list that shows an add did not settle it");
+
+        group.choose_speaker("speaker-garage");
+        expect(model.in_group("speaker-bathroom"), "the list that settled an add does not show the group");
+
+        // A remove the backend took waits for its list as well.
+        group.answer_group_changes(204, "");
+        group.remove_from_group("speaker-bathroom");
+        expect(group.get_group_changes().size() == 2 &&
+                   group.get_group_changes().back() == GroupChangeRequest{"speaker-bathroom", "speaker-garage", false},
+               "a remove did not send the speaker out of the chosen speaker's group");
+
+        const auto taken = grouping.find("speaker-bathroom");
+        expect(taken && !taken->adds && taken->taken_at, "a change the backend took is not pending");
+
+        group.answer_speakers(200, SPEAKERS_REGROUPED);
+        expect(!grouping.allows("speaker-bathroom"), "a list that still shows the speaker settled its remove");
+
+        // A list that cannot be read settles nothing.
+        group.answer_speakers(500, ERROR_ENVELOPE);
+        expect(!grouping.allows("speaker-bathroom"), "an error settled a change");
+
+        group.answer_speakers(200, SPEAKERS);
+        expect(grouping.allows("speaker-bathroom") && !model.in_group("speaker-bathroom"),
+               "a list that shows a remove did not settle it");
+        expect(model.not_taken() == 0, "a change that was settled counts as not taken");
+    }
+
+    // Anything but a 204 is a change not taken: it is counted, its speaker is held no longer, and
+    // the speakers are fetched again.
+    {
+        std::string error;
+        expect(!read_command(204, "", 0, error), "a 204 was not read as a change taken");
+        expect(read_command(404, ERROR_SPEAKER_NOT_FOUND, strlen(ERROR_SPEAKER_NOT_FOUND), error) &&
+                   error == "No speaker has the id speaker-garage",
+               "a 404 was not read as a change refused");
+        expect(read_command(400, ERROR_VALIDATION, strlen(ERROR_VALIDATION), error) && error.empty(),
+               "a bare array was not read as a change refused");
+        expect(read_command(200, "{}", 2, error), "a 200 was read as a change taken");
+
+        SimHost refused;
+        refused.model().speaker_id = "speaker-garage";
+        refused.answer_speakers(200, SPEAKERS);
+        refused.answer_group_changes(502, ERROR_SPEAKER);
+        refused.answer_next_speakers(200, SPEAKERS_REGROUPED);
+
+        const auto& model = refused.get_model();
+
+        refused.add_to_group("speaker-library");
+        expect(model.grouping.allows("speaker-library"), "a change refused is still pending");
+        expect(model.grouping.changes_not_taken == 1 && model.not_taken() == 1,
+               "a change refused does not count as not taken");
+        expect(model.in_group("speaker-bathroom"), "a change refused did not fetch the speakers again");
+    }
+
+    // The time limit runs from the backend's answer, on LVGL's tick, which wraps.
+    {
+        static constexpr uint32_t LIMIT = Grouping::TIME_LIMIT_MS;
+
+        Grouping grouping;
+
+        const auto first = grouping.sent("speaker-bathroom", "speaker-garage", true);
+        expect(!grouping.timed_out(10 * LIMIT) && !grouping.allows("speaker-bathroom"),
+               "a change on its way ran out of time");
+
+        grouping.taken(first, 1000);
+        expect(!grouping.timed_out(1000 + LIMIT - 1) && !grouping.allows("speaker-bathroom"),
+               "a change was settled before its time limit");
+        expect(grouping.timed_out(1000 + LIMIT) && grouping.allows("speaker-bathroom"),
+               "the time limit did not settle a change");
+        expect(!grouping.timed_out(1000 + LIMIT) && grouping.changes_not_taken == 0,
+               "a change settled by the time limit is settled twice, or counts as not taken");
+
+        const auto wrapped = grouping.sent("speaker-bathroom", "speaker-garage", false);
+        grouping.taken(wrapped, UINT32_MAX - 99);
+        expect(!grouping.timed_out(LIMIT - 101) && grouping.timed_out(LIMIT - 100),
+               "the time limit does not hold across the tick's wrap");
+
+        // The answer to a change that a list settled first is not the answer to a later change
+        // of the same speaker.
+        SpeakerList list;
+        expect(!read_speakers(200, SPEAKERS_REGROUPED, strlen(SPEAKERS_REGROUPED), list),
+               "the regrouped fixture was not read as a list");
+
+        const auto settled = grouping.sent("speaker-bathroom", "speaker-garage", true);
+        grouping.listed(list);
+        expect(grouping.allows("speaker-bathroom"), "a list did not settle a change on its way");
+
+        const auto later = grouping.sent("speaker-bathroom", "speaker-garage", false);
+        grouping.taken(settled, 0);
+        grouping.not_taken(settled);
+        expect(!grouping.allows("speaker-bathroom") && !grouping.find("speaker-bathroom")->taken_at &&
+                   grouping.changes_not_taken == 1,
+               "the answer to a settled change was taken for a later change's");
+
+        grouping.not_taken(later);
+        expect(grouping.allows("speaker-bathroom") && grouping.changes_not_taken == 2,
+               "a change that was not answered is still pending");
+    }
+}
+
 static void speakers(SimHost& host, Shell& shell) {
+    expect_group_members();
+    expect_group_change_rules();
+
     host.model().speaker_id = "speaker-library";
     answer_speakers(host);
 
@@ -483,6 +673,13 @@ static void speakers_unreadable(SimHost& host, Shell& shell) {
     host.answer_speakers(400, ERROR_VALIDATION);
     expect(list.state == LoadState::Failed && list.error.empty(), "a bare array was not read as a failure");
 
+    // What the document allows is taken, whatever the display does not show holds.
+    host.answer_speakers(200, R"({"data":[{"id":"speaker-garage","name":"Garage","model":7,"volume":"loud",)"
+                              R"("group":{"coordinator_id":"speaker-garage","member_ids":["speaker-garage"],)"
+                              R"("volume":null}}]})");
+    expect(list.state == LoadState::Loaded && list.speakers.size() == 1,
+           "a list was refused for what the display does not show");
+
     for (const auto body : UNREADABLE) {
         host.answer_speakers(200, SPEAKERS_EMPTY);
         host.answer_speakers(200, body);
@@ -515,6 +712,34 @@ static void speakers_reconnecting(SimHost& host, Shell& shell) {
     answer_speakers(host);
 
     shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+}
+
+// A change of a group that the backend took and no list shows: once its time limit has passed it
+// is settled, and the speakers are fetched again.
+static void speakers_group_time_limit(SimHost& host, Shell& shell) {
+    host.model().speaker_id = "speaker-garage";
+    answer_speakers(host);
+
+    shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+
+    host.answer_group_changes(204, "");
+    host.add_to_group("speaker-bathroom");
+    expect(!host.get_model().grouping.allows("speaker-bathroom"), "a change the backend took is not pending");
+
+    host.answer_next_speakers(200, SPEAKERS_REGROUPED);
+}
+
+static const char* check_group_time_limit(const SimHost& host, const Shell&) {
+    const auto& model = host.get_model();
+
+    if (!model.grouping.allows("speaker-bathroom")) {
+        return "the time limit did not settle the change";
+    }
+    if (model.not_taken()) {
+        return "a change settled by the time limit counts as not taken";
+    }
+
+    return model.in_group("speaker-bathroom") ? nullptr : "the speakers were not fetched again after the time limit";
 }
 
 // The now-playing screen as the app opens it: a speaker chosen that the list has, and a playback
@@ -1807,6 +2032,8 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-unreadable", speakers_unreadable},
         {"speakers-retry", speakers_retry, check_retry},
         {"speakers-reconnecting", speakers_reconnecting},
+        {"speakers-group-time-limit", speakers_group_time_limit, check_group_time_limit,
+         Grouping::TIME_LIMIT_MS + 1000},
         {"now-playing", now_playing, check_now_playing},
         {"now-playing-paused", now_playing_paused},
         {"now-playing-radio", now_playing_radio, check_radio},

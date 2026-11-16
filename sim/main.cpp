@@ -123,6 +123,7 @@ static bool render(const Scene& scene, lv_display_t* display, const std::filesys
     scene_host = &host;
     for (scene_elapsed_ms = 0; scene_elapsed_ms < run_ms; scene_elapsed_ms += STEP_MS) {
         tick_ms += STEP_MS;
+        host.process();
         shell->update();
         lv_timer_handler();
     }

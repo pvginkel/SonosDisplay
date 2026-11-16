@@ -94,6 +94,19 @@ static const char* command_name(Command command) {
     return "";
 }
 
+// The body of a join: the speaker whose group is joined. The id is the backend's own text, so
+// cJSON writes it as a JSON string.
+static std::string join_body(const std::string& speaker_id) {
+    const auto id = cJSON_CreateString(speaker_id.c_str());
+    DEFER(cJSON_Delete(id));
+
+    const auto text = cJSON_PrintUnformatted(id);
+    ESP_ERROR_CHECK(text ? ESP_OK : ESP_ERR_NO_MEM);
+    DEFER(cJSON_free(text));
+
+    return std::string("{\"speaker_id\":") + text + "}";
+}
+
 static esp_err_t read_speaker_choice(std::string& id) {
     nvs_handle_t handle;
     auto err = nvs_open(SPEAKER_NVS_NAMESPACE, NVS_READONLY, &handle);
@@ -286,6 +299,8 @@ void Application::speakers_answered(HttpResponse&& response) {
         ESP_LOGW(TAG, "GET /api/speakers answered %d, %s: %s", response.status, problem, list.error.c_str());
     } else {
         ESP_LOGI(TAG, "The backend lists %zu speakers", list.speakers.size());
+
+        _model.grouping.listed(list);
     }
 
     model_changed();
@@ -470,6 +485,56 @@ void Application::command_answered(Command command, HttpResponse&& response) {
     model_changed();
 }
 
+void Application::add_to_group(const std::string& speaker_id) { send_group_change(speaker_id, true); }
+
+void Application::remove_from_group(const std::string& speaker_id) { send_group_change(speaker_id, false); }
+
+void Application::send_group_change(const std::string& speaker_id, bool adds) {
+    ESP_LOGI(TAG, "Sending speaker %s %s the group of %s", speaker_id.c_str(), adds ? "into" : "out of",
+             _model.speaker_id.c_str());
+
+    const auto change = _model.grouping.sent(speaker_id, _model.speaker_id, adds);
+    model_changed();
+
+    // A join goes to the speaker that joins, and names a speaker of the group: the group keeps
+    // its coordinator, so it stays what the chosen speaker plays. A leave goes to the speaker
+    // that leaves.
+    HttpRequest request{.method = adds ? HTTP_METHOD_PUT : HTTP_METHOD_DELETE,
+                        .path = speaker_path(speaker_id, "/group")};
+    if (adds) {
+        request.body = join_body(_model.speaker_id);
+    }
+
+    // The answer is the change's own, whichever speaker is the chosen one by then.
+    _api_client->send(std::move(request), _scope, [this, change, adds](HttpResponse&& response) {
+        group_change_answered(change, adds, std::move(response));
+    });
+}
+
+void Application::group_change_answered(uint32_t change, bool adds, HttpResponse&& response) {
+    auto& grouping = _model.grouping;
+    std::string error;
+
+    // A 204 says that the speaker took the change. The groups change later, and speakers_changed
+    // then fetches the list that settles it. Whether the speaker moved for a change that was not
+    // taken is not known, so the speakers are fetched again.
+    if (response.err != ESP_OK) {
+        // HttpClient logged the transport error.
+        grouping.not_taken(change);
+        refresh_speakers();
+    } else if (const auto problem =
+                   read_command(response.status, (const char*)response.body.get(), response.length, error)) {
+        ESP_LOGW(TAG, "%s group answered %d, %s: %s", adds ? "PUT" : "DELETE", response.status, problem, error.c_str());
+
+        grouping.not_taken(change);
+        refresh_speakers();
+    } else {
+        grouping.taken(change, lv_tick_get());
+    }
+
+    model_changed();
+}
+
 void Application::request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                                   std::function<void(Artwork)> done) {
     _artwork.request(ArtworkRequest{
@@ -588,6 +653,13 @@ void Application::do_process() {
     // Nothing is fetched for a screen nobody sees: a cover asked for in the dark comes once the
     // screen wakes.
     _artwork.set_screen_lit(_board->get_screen_power().is_lit());
+
+    // A group change the backend took, which no list has shown within its time limit: the list
+    // fetched now shows the groups as they are.
+    if (_model.grouping.timed_out(lv_tick_get())) {
+        model_changed();
+        refresh_speakers();
+    }
 
     if (_shell) {
         _shell->update();

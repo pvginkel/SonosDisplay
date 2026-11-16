@@ -51,6 +51,37 @@ static std::string read_error(const cJSON* root) {
     return error ? read_text(error) : std::string();
 }
 
+// The members of a listed speaker's group. The ids are opaque, and go back to the backend as they
+// came: they are never cut.
+static const char* read_group_members(const cJSON* speaker, std::vector<std::string>& member_ids) {
+    const auto group = cJSON_GetObjectItemCaseSensitive(speaker, "group");
+    if (!cJSON_IsObject(group)) {
+        return "a speaker's group is not an object";
+    }
+
+    if (!get_string(group, "coordinator_id")) {
+        return "a group has no coordinator_id";
+    }
+
+    const auto members = cJSON_GetObjectItemCaseSensitive(group, "member_ids");
+    if (!cJSON_IsArray(members)) {
+        return "a group's member_ids is not an array";
+    }
+
+    const cJSON* member;
+    cJSON_ArrayForEach(member, members) {
+        if (!cJSON_IsString(member)) {
+            return "a group's member is not a string";
+        }
+
+        member_ids.emplace_back(member->valuestring);
+    }
+
+    return nullptr;
+}
+
+// A listed speaker's `model`, its own `volume` and `muted` and its group's are not shown from the
+// list, so they are not read.
 static const char* read_speaker_items(const cJSON* root, std::vector<Speaker>& speakers) {
     if (!cJSON_IsObject(root)) {
         return "the body is not a JSON object";
@@ -81,7 +112,12 @@ static const char* read_speaker_items(const cJSON* root, std::vector<Speaker>& s
             return "a speaker has no name";
         }
 
-        speakers.push_back(Speaker{.id = id, .name = name});
+        Speaker speaker{.id = id, .name = name};
+        if (const auto problem = read_group_members(item, speaker.member_ids)) {
+            return problem;
+        }
+
+        speakers.push_back(std::move(speaker));
     }
 
     return nullptr;

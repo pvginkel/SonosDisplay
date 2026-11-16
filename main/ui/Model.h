@@ -34,6 +34,14 @@ struct Speaker {
     std::string id;
     std::string name;
 
+    // The id of every speaker of the group this one plays in, itself included.
+    std::vector<std::string> member_ids;
+
+    // Whether the speaker with this id plays in this one's group.
+    bool plays_with(const std::string& speaker_id) const {
+        return std::find(member_ids.begin(), member_ids.end(), speaker_id) != member_ids.end();
+    }
+
     bool operator==(const Speaker&) const = default;
 };
 
@@ -49,7 +57,115 @@ struct SpeakerList {
     // The last list the backend answered, which a later failure leaves in place.
     std::vector<Speaker> speakers;
 
+    // The speaker with this id in that list, or nullptr when the list lacks it.
+    const Speaker* find(const std::string& id) const {
+        const auto found =
+            std::find_if(speakers.begin(), speakers.end(), [&id](const Speaker& speaker) { return speaker.id == id; });
+
+        return found == speakers.end() ? nullptr : &*found;
+    }
+
     bool operator==(const SpeakerList&) const = default;
+};
+
+// A change of a group that this display asked for: a speaker other than the chosen one joins the
+// chosen speaker's group, or leaves it.
+struct GroupChange {
+    // What tells this change from a later one of the same speaker.
+    uint32_t id{};
+
+    // The speaker that joins or leaves.
+    std::string speaker_id;
+
+    // The speaker that was the chosen one when the change was sent: the group is the one it
+    // plays in.
+    std::string group_of;
+
+    // Whether the speaker joins the group. It leaves it otherwise.
+    bool adds{};
+
+    // LVGL's tick when the backend took the change; empty while the change is on its way.
+    std::optional<uint32_t> taken_at;
+
+    bool operator==(const GroupChange&) const = default;
+};
+
+// The changes of groups that are not settled, and the rules by which they settle. The backend's
+// answer to a change says that the speaker took it, not that the group has changed: the speakers
+// list shows the old groups until the speakers have reported the new ones. A change is pending
+// from the press until then, and its speaker takes no second change for as long: the backend
+// decides from the old groups whether a repeat is sent to the speaker.
+struct Grouping {
+    // How long a change the backend took waits for a list that shows it.
+    static constexpr uint32_t TIME_LIMIT_MS = 15 * 1000;
+
+    std::vector<GroupChange> pending;
+
+    // How many changes were not taken: the backend answered an error, or did not answer. A view
+    // says so once for each.
+    uint32_t changes_not_taken{};
+
+    // The change of this speaker that is pending, or nullptr.
+    const GroupChange* find(const std::string& speaker_id) const {
+        const auto found = std::find_if(pending.begin(), pending.end(), [&speaker_id](const GroupChange& change) {
+            return change.speaker_id == speaker_id;
+        });
+
+        return found == pending.end() ? nullptr : &*found;
+    }
+
+    // Whether a change of this speaker can be sent.
+    bool allows(const std::string& speaker_id) const { return !find(speaker_id); }
+
+    // A change is on its way to the backend: `speaker_id` joins the group of `group_of`, the
+    // chosen speaker, or leaves it. Returns the change's id, which its answer is told by.
+    uint32_t sent(const std::string& speaker_id, const std::string& group_of, bool adds) {
+        const auto id = ++_last_id;
+        pending.push_back(GroupChange{.id = id, .speaker_id = speaker_id, .group_of = group_of, .adds = adds});
+
+        return id;
+    }
+
+    // The backend took the change. The time limit runs from here, `now` being LVGL's tick. A
+    // change a list has settled already stays settled.
+    void taken(uint32_t id, uint32_t now) {
+        for (auto& change : pending) {
+            if (change.id == id) {
+                change.taken_at = now;
+            }
+        }
+    }
+
+    // The backend answered the change with an error, or did not answer. The host fetches the
+    // speakers again, which shows the groups as they are.
+    void not_taken(uint32_t id) {
+        std::erase_if(pending, [id](const GroupChange& change) { return change.id == id; });
+        changes_not_taken++;
+    }
+
+    // The backend answered a list. A change is settled once the list shows its speaker in or out
+    // of the group as asked; a list from before the speakers reported leaves it pending, and so
+    // does one that lacks the speaker whose group it is.
+    void listed(const SpeakerList& list) {
+        std::erase_if(pending, [&list](const GroupChange& change) {
+            const auto group = list.find(change.group_of);
+
+            return group && group->plays_with(change.speaker_id) == change.adds;
+        });
+    }
+
+    // Settles the changes the backend took TIME_LIMIT_MS or longer before `now`, LVGL's tick, and
+    // returns whether there was one. The host then fetches the speakers again.
+    bool timed_out(uint32_t now) {
+        const auto settled = std::erase_if(pending, [now](const GroupChange& change) {
+            return change.taken_at && now - *change.taken_at >= TIME_LIMIT_MS;
+        });
+
+        return settled > 0;
+    }
+
+private:
+    uint32_t _last_id{};
 };
 
 // What the group of the chosen speaker is doing, as the API names it.
@@ -293,8 +409,14 @@ struct Model {
     // The volume of the chosen speaker's group.
     Volume volume;
 
-    // How many commands and volume changes were not taken.
-    uint32_t not_taken() const { return playback.commands_not_taken + volume.changes_not_taken; }
+    // The changes of groups that are pending. A pick of another speaker leaves them as they are:
+    // each is settled by the group it was sent for.
+    Grouping grouping;
+
+    // How many commands, volume changes and group changes were not taken.
+    uint32_t not_taken() const {
+        return playback.commands_not_taken + volume.changes_not_taken + grouping.changes_not_taken;
+    }
 
     // Whether the display is held on the speaker picker: no speaker is chosen, or the last list
     // the backend answered lacks the chosen one. A list that was never answered holds nothing.
@@ -303,9 +425,14 @@ struct Model {
             return true;
         }
 
-        const auto listed = std::any_of(speakers.speakers.begin(), speakers.speakers.end(),
-                                        [this](const Speaker& speaker) { return speaker.id == speaker_id; });
+        return speakers.answered && !speakers.find(speaker_id);
+    }
 
-        return speakers.answered && !listed;
+    // Whether the speaker with this id plays in the chosen speaker's group, by the last list the
+    // backend answered. No speaker does while none is chosen or that list lacks the chosen one.
+    bool in_group(const std::string& id) const {
+        const auto chosen = speakers.find(speaker_id);
+
+        return chosen && chosen->plays_with(id);
     }
 };

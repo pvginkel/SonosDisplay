@@ -19,6 +19,16 @@ struct ArtworkFetch {
     bool operator==(const ArtworkFetch&) const = default;
 };
 
+// A change of a group the views had sent to the backend: `speaker_id` joins the group of
+// `group_of`, or leaves it.
+struct GroupChangeRequest {
+    std::string speaker_id;
+    std::string group_of;
+    bool adds;
+
+    bool operator==(const GroupChangeRequest&) const = default;
+};
+
 class SimHost : public UiHost {
     struct Answer {
         int status;
@@ -38,6 +48,9 @@ class SimHost : public UiHost {
     std::vector<int> _volume_changes;
     std::optional<Answer> _volume_change_answer;
     std::optional<Answer> _next_volume;
+    std::optional<Answer> _next_speakers;
+    std::vector<GroupChangeRequest> _group_changes;
+    std::optional<Answer> _group_change_answer;
     ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
     std::vector<ArtworkFetch> _artwork_fetches;
     std::optional<ArtworkAnswer> _artwork_answer;
@@ -56,11 +69,28 @@ public:
     void refresh_volume() override;
     void change_volume(int step) override;
     void send_command(Command command) override;
+    void add_to_group(const std::string& speaker_id) override;
+    void remove_from_group(const std::string& speaker_id) override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
+    // What the device does on every turn of its loop: a group change past its time limit is
+    // settled, and the speakers are asked for again.
+    void process();
+
     // The backend's answer to GET /api/speakers, read as the device reads it.
     void answer_speakers(int status, const char* body);
+
+    // What the backend answers the next time the speakers are asked for. Without it the request
+    // stays unanswered.
+    void answer_next_speakers(int status, const char* body) { _next_speakers = Answer{status, body}; }
+
+    // What the backend answers every change of a group from here on, read as the device reads it.
+    // Without it a change stays on its way.
+    void answer_group_changes(int status, const char* body) { _group_change_answer = Answer{status, body}; }
+
+    // The changes of groups the views have sent, in order.
+    const std::vector<GroupChangeRequest>& get_group_changes() const { return _group_changes; }
 
     // The backend's answer to GET /api/speakers/{speaker_id}/playback, read as the device reads
     // it.
@@ -139,6 +169,7 @@ public:
 
 private:
     void send_volume_change();
+    void send_group_change(const std::string& speaker_id, bool adds);
     void fetch_artwork(ArtworkRequest&& request);
     void answer_artwork(const ArtworkRequest& request);
 };

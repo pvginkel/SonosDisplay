@@ -45,6 +45,16 @@ public:
     // allows.
     virtual void send_command(Command command) = 0;
 
+    // Has the speaker with this id join the chosen speaker's group, where it plays what the group
+    // plays. A view asks only while a speaker is chosen, for another speaker than the chosen one,
+    // and only for a speaker the grouping allows a change of. The change is pending in the model
+    // from here on.
+    virtual void add_to_group(const std::string& speaker_id) = 0;
+
+    // Has the speaker with this id leave the group it plays in, and play alone. A view asks under
+    // the same conditions, for a speaker of the chosen speaker's group.
+    virtual void remove_from_group(const std::string& speaker_id) = 0;
+
     // Asks for the picture with this id, `size` by `size` pixels. `done` runs with it once the
     // host has it, which is before this returns for one it has already, and may be much later:
     // nothing is fetched while the screen is dark. It runs with nullptr when the backend did not

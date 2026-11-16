@@ -41,6 +41,8 @@ public:
     void refresh_volume() override;
     void change_volume(int step) override;
     void send_command(Command command) override;
+    void add_to_group(const std::string& speaker_id) override;
+    void remove_from_group(const std::string& speaker_id) override;
     void request_artwork(const std::string& artwork_id, int32_t size, std::weak_ptr<void> scope,
                          std::function<void(Artwork)> done) override;
 
@@ -60,6 +62,8 @@ private:
     void send_volume_change();
     void volume_change_answered(HttpResponse&& response);
     void command_answered(Command command, HttpResponse&& response);
+    void send_group_change(const std::string& speaker_id, bool adds);
+    void group_change_answered(uint32_t change, bool adds, HttpResponse&& response);
     void fetch_artwork(ArtworkRequest&& request);
     void artwork_answered(const ArtworkRequest& request, HttpResponse&& response);
     void event_received(const std::string& type, const cJSON* payload);
