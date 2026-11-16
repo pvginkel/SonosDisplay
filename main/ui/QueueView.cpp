@@ -18,11 +18,24 @@ static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
 QueueView::QueueView(UiHost* host, Shell* shell)
-    : ListView(host, shell, MSG_QUEUE), _queue_changes(host->get_model().queue_changes) {}
+    : ListView(host, shell, MSG_QUEUE), _queue_changes(host->get_model().queue_changes) {
+    if (host->get_model().stream_state == StreamState::Connected) {
+        _stream_down_since = host->get_model().stream_down_since;
+    }
+}
 
 void QueueView::do_update() {
-    if (const auto changes = _host->get_model().queue_changes; changes != _queue_changes) {
-        _queue_changes = changes;
+    const auto& model = _host->get_model();
+
+    // The events sent while the stream was away are gone, so the queue is asked for again once it
+    // is back. Every loss moves stream_down_since, so one lost and back between two passes counts.
+    const auto reconnected =
+        model.stream_state == StreamState::Connected && model.stream_down_since != _stream_down_since;
+    if (model.queue_changes != _queue_changes || reconnected) {
+        _queue_changes = model.queue_changes;
+        if (reconnected) {
+            _stream_down_since = model.stream_down_since;
+        }
         refresh();
     }
 

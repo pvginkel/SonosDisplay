@@ -6065,6 +6065,66 @@ static const char* check_queue_screen_reconnecting(const SimHost& host, const Sh
     return clear_area.x2 + 1 + Theme::GAP <= marker_area.x1 ? nullptr : "Clear runs under the marker";
 }
 
+// The event stream is lost while the queue shows, and the group goes on to the next track before it
+// is back: that track's event is gone, and the queue, asked for again once the stream is back,
+// marks it.
+static void queue_screen_reconnected(SimHost& host, Shell& shell) {
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    host.answer_after(SimHost::TAP_INTERVAL_MS, [&host]() {
+        host.model().stream_state = StreamState::Disconnected;
+        host.model().stream_down_since = lv_tick_get();
+        host.model().revision++;
+    });
+    host.answer_after(2 * SimHost::TAP_INTERVAL_MS, [&host]() {
+        host.queue().serve(200, make_queue_pages(QUEUE, QUEUE_CURRENT + 1));
+        host.model().stream_state = StreamState::Connected;
+        host.model().revision++;
+    });
+}
+
+static const char* check_queue_screen_reconnected(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {1, 1}, {true, false})) {
+        return problem;
+    }
+
+    return check_marked(QUEUE[QUEUE_CURRENT].first.c_str());
+}
+
+// The queue opens while the event stream is away, and Clear is confirmed: its events are gone, and
+// the queue, asked for again once the stream is back, is empty.
+static void queue_screen_reconnected_clear(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+    host.answer_clears(204, "");
+    open_queue(host, shell, QUEUE, QUEUE_CURRENT);
+
+    tap_label(host, shell, MSG_CLEAR);
+    tap_confirm_clear(host, shell);
+    host.answer_after(after_touches_ms(2) - 200, [&host]() {
+        host.queue().serve(200, make_queue_pages({}, std::nullopt));
+        host.model().stream_state = StreamState::Connected;
+        host.model().revision++;
+    });
+}
+
+static const char* check_queue_screen_reconnected_clear(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (host.get_clears() != std::vector<std::string>{"speaker-garage"}) {
+        return "the confirmed Clear did not clear the chosen speaker's queue, once";
+    }
+    if (const auto problem = check_queue_asked(host, {1, 1}, {true, false})) {
+        return problem;
+    }
+
+    return says(MSG_QUEUE_EMPTY) && !says(MSG_CLEAR) ? nullptr : "the cleared queue is not said to be empty";
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -6254,6 +6314,9 @@ const std::vector<Scene>& get_scenes() {
         {"queue-screen-bar-cover", queue_screen_bar_cover, check_bar_opened, after_touches_ms(1)},
         {"queue-screen-bar-texts", queue_screen_bar_texts, check_bar_opened, after_touches_ms(1)},
         {"queue-screen-reconnecting", queue_screen_reconnecting, check_queue_screen_reconnecting},
+        {"queue-screen-reconnected", queue_screen_reconnected, check_queue_screen_reconnected, after_touches_ms(2)},
+        {"queue-screen-reconnected-clear", queue_screen_reconnected_clear, check_queue_screen_reconnected_clear,
+         after_touches_ms(2)},
     };
 
     return scenes;
