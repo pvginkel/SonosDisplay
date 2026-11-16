@@ -561,6 +561,17 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   screen could undo a change made in the Sonos app. The presses made while a change is on its way
   wait in the model (`Volume`) and go as one change when it is answered, so a burst of presses is
   one request at a time, and a transport command waits behind one change at most.
+- **A change of a group is pending until a speakers list shows it.** A speaker joins the chosen
+  speaker's group with `PUT /api/speakers/{id}/group`, the body `{"speaker_id": ...}` naming the
+  chosen speaker, and leaves it with `DELETE` on the same path. The 204 says that the speaker took
+  the change, not that the group has changed: the list shows the old groups until the speakers
+  report the new ones, and the backend decides from the old groups whether a repeat is sent on to
+  the speaker. The change therefore waits in the model (`Grouping`) from the press until a list
+  shows the speaker in the group or out of it, as asked, and the speaker takes no second change
+  meanwhile. A pick of another speaker leaves it waiting on the group it was sent for. A change the
+  backend took that no list shows within 15 seconds of its 204 is settled without a notice, and the
+  speakers are fetched again; any answer but 204, or none, is a change not taken, and the speakers
+  are fetched again.
 - **The body goes to PSRAM.** The task reads with `esp_http_client_open`,
   `esp_http_client_fetch_headers` and a read loop into a `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`
   buffer sized from `Content-Length`, growing when there is none, and failing with
@@ -698,11 +709,13 @@ no FreeRTOS, no `esp-libs`, no `Application.h`. It has two doors to the rest of 
 both headers in `ui/`:
 
 - **`Model.h`**: plain structs holding what the views draw: the event stream's state, the
-  speakers and the chosen one, the playback and the group's volume, with the rules by which a
-  command or a press changes what they show (`Playback`, `Volume`).
+  speakers and the chosen one with each one's group, the playback, the group's volume and the
+  pending changes of groups, with the rules by which a command or a press changes what they show
+  (`Playback`, `Volume`) and a change of a group settles (`Grouping`).
 - **`UiHost.h`**: an abstract class with what a view may ask for: a speaker chosen, a transport
-  command, a step of the volume, a fetch again, a piece of artwork. `Application` implements it
-  on the device; `sim/` implements it with fixtures.
+  command, a step of the volume, a speaker added to the chosen speaker's group or removed from it, a
+  fetch again, a piece of artwork. `Application` implements it on the device; `sim/` implements it
+  with fixtures.
 
 `ui/log.h` gives the views `UI_LOGI`, `UI_LOGW` and `UI_LOGE`: `ESP_LOGx` when `ESP_PLATFORM` is
 defined, `printf` otherwise. The rule is enforced by the build: an ESP-IDF include in `ui/` fails
@@ -734,16 +747,23 @@ as the backend sends them, read by the code the device runs.
   of the stack, not by what was visited. A view that navigates takes the `Shell*`:
   `open_speaker_picker()`, and `back()`, which acts at the next `update()` so a view may call it
   from its own event.
-- **The views of milestone 1.** The speaker picker lists the speakers and stores a pick; it is
-  reached from now playing, and a pick goes back. The now-playing screen shows the cover at
-  400 px, title, artist and album, previous, play or pause, and next, and under them the group's
-  volume: down, the level, up. The bar shows the cover at 80 px, title and artist, play or pause,
-  next, and the volume. Both build from `Cover` and `Controls`, so the rules are in one place: a
-  control is live only while the playback lists its command or the volume allows the step, and
-  one that is not is `LV_STATE_DISABLED`, which LVGL sends no click. A play or pause shows at
-  once; next and previous wait for the speaker's event. A command or a volume change that was not
-  taken shows "That did not go through" for five seconds, said once, by whichever of the two is
-  on screen. A muted group shows as muted; the display does not unmute it.
+- **The views.** The speaker picker, the speakers screen, lists the speakers and stores a pick; it
+  is reached from now playing, and a touch on a row picks its speaker and goes back. While the list
+  has the chosen speaker, every other row carries a group control at its right end: a ring for a
+  speaker outside the chosen speaker's group, which a press adds to it, an accent disc with a tick
+  for one in it, which a press removes, and a spinner while a change of that speaker is pending,
+  which takes the press and sends nothing. A press on a control never picks, and the control takes
+  presses over the row's whole height. The chosen speaker's row has no control, only its tick where
+  the controls sit: it does not leave its own group from here. The now-playing screen shows the
+  cover at 400 px, title, artist and album, previous, play or pause, and next, and under them the
+  group's volume: down, the level, up. The bar shows the cover at 80 px, title and artist, play or
+  pause, next, and the volume. Both build from `Cover` and `Controls`, so the rules are in one
+  place: a control is live only while the playback lists its command or the volume allows the step,
+  and one that is not is `LV_STATE_DISABLED`, which LVGL sends no click. A play or pause shows at
+  once; next and previous wait for the speaker's event. A command, a volume change or a change of a
+  group that was not taken shows "That did not go through" for five seconds, said once, by whichever
+  of the two is on screen; under the speaker picker that is the bar. A muted group shows as muted;
+  the display does not unmute it.
 - **`Theme`** sets up the dark theme once, with `lv_theme_default_init(disp, primary, secondary,
   true, font)`, and holds the palette and the type scale as named constants. Starting values:
   background `#101214`, surface `#1C1F24`, text `#F2F2F2`, secondary text `#A0A6AD`, accent
@@ -1100,3 +1120,9 @@ and write and the panel restart after it, a `POST` with an empty body and its 20
 bar's touch targets under a finger. Also to watch: that `esp_http_client_read` returns
 `-ESP_ERR_HTTP_EAGAIN` on a quiet stream as its header documents, and that the 75-second idle
 limit holds against the deployed heartbeat.
+
+Milestone 4's changes of groups have reached no real speaker: the operator's first try of the
+speakers screen on the display is the first join and the first leave. What only that shows is
+still to see there: the `PUT` and `DELETE` and the join's body through `esp_http_client`, how long
+the speakers take to report the new groups against the 15-second limit, and what becomes of the
+rest of a group when the speaker that leads it leaves.

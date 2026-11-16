@@ -1,8 +1,8 @@
 #pragma once
 
 // What the views draw: plain structs, filled by the host, and the rules by which a command
-// changes what they show. One of the two doors between ui/ and the rest of the firmware; UiHost.h
-// is the other.
+// changes what they show and a change of a group settles. One of the two doors between ui/ and
+// the rest of the firmware; UiHost.h is the other.
 
 #include <algorithm>
 #include <cstdint>
