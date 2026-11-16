@@ -25,7 +25,8 @@ response, a JSON body, an event frame, an artwork header, IoT Support's device c
 data from there never crashes or restarts the display. It is logged and shown: the view says what
 is wrong, and the device stays usable. A backend that is down never restarts the device. An answer
 the API's document does not allow is refused whole; one it allows is never refused for a field the
-display does not show.
+display does not show. A text the backend sends, but not an id, is read through `read_text()`,
+which leaves out what the fonts do not draw, so no title shows LVGL's placeholder box.
 
 ## The structure's rules
 
@@ -36,10 +37,11 @@ display does not show.
   render the screens.
 - **`main/backend/` knows nothing of `ui/` or `Application`**, so it can move to `esp-libs` as it
   is when a second firmware needs it.
-- **`main/api/` is where the backend's answers are read**, into `ui/`'s types. It includes cJSON,
-  LVGL, the C++ standard library and `ui/`'s two doors only, so `sim/` builds it and the scenes
-  read their fixtures as the device reads the backend; `kc project test` fails on an ESP-IDF
-  include there.
+- **`main/api/` is where the backend's answers are read**, into `ui/`'s types, and where the
+  bodies of the requests are written (`Requests`). It includes cJSON, LVGL, the C++ standard
+  library and `ui/`'s two doors only, so `sim/` builds it, the scenes read their fixtures as the
+  device reads the backend, and they check the bodies the device sends; `kc project test` fails
+  on an ESP-IDF include there.
 - **`main/board/` is the only code that talks to the hardware.** `ScreenPower` is the only code
   that switches the backlight, and never twice within a second.
 - **Memory.** Anything large or numerous goes to PSRAM: response bodies, artwork, JSON trees,

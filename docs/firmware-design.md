@@ -14,15 +14,15 @@ the first display", with what the first display, flashed the same day, showed.
 
 | Question | Decision |
 |---|---|
-| Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events), `api/` (the backend's answers, read into the UI's types) and `ui/` (LVGL and standard C++ only). |
+| Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events), `api/` (the backend's answers, read into the UI's types, and the bodies of the requests) and `ui/` (LVGL and standard C++ only). |
 | Carried over | The panel, expander, touch, backlight and motion-sensor code of ThermostatDisplay's shipped build: two framebuffers in PSRAM at a 14 MHz pixel clock. Rewritten for LVGL 9.2 and for ESP-IDF's current I2C driver, not copied. |
-| Picture drift | No change to `esp-libs`. The panel resynchronises whenever the screen is switched on, as ThermostatDisplay's did, and code runs from PSRAM. Not every frame: on the S3, `CONFIG_LCD_RGB_RESTART_IN_VSYNC` pins the picture to the first framebuffer, which was the first display's artifacts. An update is only written during boot, and the display restarts after it. |
+| Picture drift | No change to `esp-libs`. The panel resynchronises whenever the screen is switched on, as ThermostatDisplay's did, and twice as startup ends, and code runs from PSRAM. Not every frame: on the S3, `CONFIG_LCD_RGB_RESTART_IN_VSYNC` pins the picture to the first framebuffer, which was the first display's artifacts. An update is only written during boot, and the display restarts after it. |
 | Brown-out | The backlight is switched at most once a second, in either direction, by one state machine. Boot lights the screen only after a power-on reset. |
-| HTTP and events | Three small tasks in the app: one for API calls, one for artwork, one holding the event stream. Results reach the UI task through esp-mdm's queue. The code lives in the app, `main/backend/`, written free of app types so it can move to `esp-libs` when a second firmware needs it. |
+| HTTP and events | Four small tasks in the app: one for presses, one for fetches, one for artwork, one holding the event stream. Results reach the UI task through esp-mdm's queue. The code lives in the app, `main/backend/`, written free of app types so it can move to `esp-libs` when a second firmware needs it. |
 | Backend address | IoT Support's device configuration, key `backendUrl`, required by the model's schema. Not a build setting. |
 | Screens without a device | `sim/`: a native build of `main/ui/` against LVGL 9.2.2 that renders every scene to an 800×480 PNG. It is the repository's `kc project test`. The Windows simulator is not carried over. |
 | Model and provisioning | Model code `sonos_display`, which is also the CMake project name. The operator creates the model and the device in IoT Support, then runs Flash device and Provision device. `scripts/upload.sh` is the two-line fetcher of the script IoT Support serves. |
-| Memory | Everything large is in PSRAM: framebuffers 1.5 MB, LVGL's heap, an artwork cache capped at 1.5 MiB, response bodies. At most 200 list rows are built at a time. Roboto as pre-rendered bitmap fonts for Basic Latin, Latin-1 and Latin Extended-A. |
+| Memory | Everything large is in PSRAM: framebuffers 1.5 MB, LVGL's heap, an artwork cache capped at 1.5 MiB, response bodies. At most 200 list rows are built at a time. Roboto as pre-rendered bitmap fonts for Basic Latin, Latin-1, Latin Extended-A and the punctuation and signs the library's titles hold. |
 
 One thing in this note was the operator's to rule: registering the firmware as an architecture
 producer changes three other repositories. They ruled on 2026-11-15 that task 5 makes those
@@ -87,16 +87,20 @@ main/
     Touch.{h,cpp}           GT911 and the LVGL input device
     ScreenPower.{h,cpp}     backlight, wake and sleep (section 3)
     MotionSensor.{h,cpp}
+    RunMark.{h,cpp}         how far a run got, kept across a reset (section 1)
     lv_mem_psram.c          LVGL's allocator on PSRAM (section 7)
   backend/                  ESP-IDF only; no LVGL, no app types
     HttpClient.{h,cpp}  EventStream.{h,cpp}
   api/                      cJSON, LVGL, standard C++ and ui/'s two doors only; sim/ builds it too
     Answers.{h,cpp}         the backend's answers, checked and read into the model
+    Requests.{h,cpp}        the bodies of the requests the firmware sends
     Artwork.{h,cpp}         the artwork's checks, its cache and its loader (section 7)
   ui/                       LVGL and standard C++ only
     UiHost.h  Model.h       the only two doors between ui/ and the rest
     Shell.{h,cpp}  View.{h,cpp}  Theme.{h,cpp}  Messages.h  lv_support.{h,cpp}  log.h
     LoadingView.{h,cpp}  SpeakerPickerView.{h,cpp}  NowPlayingView.{h,cpp}
+    ListView.{h,cpp}        the paged list every library screen and the queue derive from
+    ArtistsView  AlbumsView  TracksView  PlaylistsView  QueueView   each .{h,cpp}
     NowPlayingBar.{h,cpp}   the bar under the content area
     Cover.{h,cpp}  Controls.{h,cpp}  shared by the now-playing screen and the bar
     fonts/                  generated .c files and icons.h
@@ -112,7 +116,8 @@ There is no `Kconfig.projbuild`: the board is one fixed product, so its constant
 | Task | Stack | Priority | Core | Does |
 |---|---|---|---|---|
 | `ui` | 16384 | 2 | 1 | `process()`, `lv_timer_handler()`, everything that touches LVGL, the model, I2C and NVS |
-| `backend_api` | 6144 | 1 | 0 | API requests, one at a time |
+| `backend_api` | 6144 | 1 | 0 | fetches of the backend's state and lists, one at a time |
+| `backend_press` | 6144 | 1 | 0 | presses: commands and changes the operator makes, one at a time, in order |
 | `backend_art` | 6144 | 1 | 0 | artwork downloads, one at a time |
 | `backend_events` | 6144 | 1 | 0 | the event stream |
 
@@ -131,12 +136,14 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
    and `screenOffSeconds` out of the JSON, which esp-mdm frees when the hook returns. It then sets
    the loading text to "Checking for an update" and calls `lv_refr_now(nullptr)`, because the
    update check that follows blocks this task (section 2).
-4. `do_ready()` runs once MQTT is connected. It starts the three backend tasks, asks for the
-   speakers, the chosen speaker's playback and its group's volume, and calls `Shell::open()`,
-   which replaces `LoadingView` with the app's first view: the speaker picker or the now-playing
-   screen (section 5).
+4. `do_ready()` runs once MQTT is connected. It restarts the panel (section 3), starts the four
+   backend tasks, asks for the speakers, the chosen speaker's playback and its group's volume, and
+   calls `Shell::open()`, which replaces `LoadingView` with the app's first view: the speaker
+   picker or the now-playing screen (section 5).
 5. `do_process()` calls `board.process()`, tells the artwork loader whether the screen is lit
-   (section 7), and calls the Shell's `update()`, which updates the top view and the bar.
+   (section 7), settles the changes whose answer did not come in time (section 4), and calls the
+   Shell's `update()`, which updates the top view and the bar. Once startup has settled it
+   restarts the panel a second time (section 3).
 
 esp-mdm restarts the device when WiFi cannot be joined, when WiFi or MQTT drops, and when IoT
 Support announces a new configuration or firmware. SonosDisplay accepts that: a restart takes
@@ -148,6 +155,39 @@ esp-mdm needs MQTT even though this firmware publishes nothing of its own, so
 `sdkconfig.defaults` sets `CONFIG_MQTT_TOPIC_PREFIX` to the value PaperClock's sets, and
 `CONFIG_MQTT_DEVICE_MANUFACTURER`, `CONFIG_MQTT_DEVICE_MODEL="Sonos Display"` and
 `CONFIG_MQTT_DEVICE_MODEL_ID="Sonos Display v1"`.
+
+### What a restart leaves behind
+
+esp-mdm logs `esp_reset_reason()` at every start, and it reaches IoT Support's device log. It says
+`ESP_RST_WDT` alike for a restart the firmware began that then stalled, which the one-second RTC
+watchdog armed by `esp_restart()` finishes, and for a panic whose handler hung, which the panic's
+own RTC watchdog finishes. So the firmware keeps its own record of every run, `RunMark`
+(`main/board/RunMark`), and logs it at the next boot:
+
+- **The mark.** A struct in RTC memory (`RTC_NOINIT_ATTR`), with a magic and a CRC, since RTC
+  memory holds what it happens to hold after a power-on and a reset can cut a write short. It
+  holds the last stage the run reached, `booting`, `configured`, `ready` or `settled` (section 1's
+  steps, and the second panel restart of section 3), with its uptime; and of a restart, the task
+  that began it, its uptime, and whether the panel stopped in time. `Board::begin()` keeps the run
+  before's mark and starts this one's.
+- **What survives.** RTC memory survives a reset of the digital core alone: a software restart, a
+  panic's restart, and the first stage of the restart's RTC watchdog (raw reason 9, "RTC watch dog
+  resets digital core"). Whether it survives raw reason 16, which resets the RTC module too (the
+  second stage of that watchdog, and the panic's), is not known; a mark that did not survive reads
+  "left no mark". A power-on loses it.
+- **The log.** `Board::log_state()`, which `do_ready()` calls, logs "Raw reset reason …", the
+  chip's own for both CPUs, which tells those two watchdog resets apart, and "The run before …",
+  the mark.
+- **The stop before a restart.** `Board::begin()` registers a shutdown handler, which
+  `esp_restart()` runs on the task that called it before it arms its watchdog. It marks the
+  restart begun, then stops the panel's presents for good (`RgbPanel::stop()`): none begins after
+  it, and one another task is in is waited for, at most `LCD_STOP_TIMEOUT_MS` (two vblank
+  timeouts and 50 ms); on the task that presents it returns at once. Then it marks how the stop
+  ended. `esp_restart()` arms its watchdog only once every handler has run, so a reset by it
+  comes after the mark.
+- **No shutdown handler is left.** ESP-IDF keeps five, and all five are in use: esp_timer's,
+  `Board`'s, WiFi's, and esp-mdm's two (its log flush and `ApplicationBase`'s), registered in that
+  order and run in reverse, so `Board`'s runs fourth. Nothing more can register one.
 
 ### Flash layout
 
@@ -256,6 +296,7 @@ void RgbPanel::flush(lv_display_t* disp, const lv_area_t*, uint8_t* px_map) {
 }
 
 void RgbPanel::present(uint8_t* fb) {
+    if (_stopped) return;                                 // stop(), before a restart (section 1)
     if (now - _last_vsync_us > LCD_SWAP_DEADLINE_US) {   // 20 ms into a 30.6 ms frame
         xSemaphoreTake(_vsync, 0);
         wait_vsync();                                     // swap at the start of the next frame instead
@@ -449,16 +490,29 @@ saw the picture shifted, until the screen went dark and woke: "It's very familia
 drift the restart in every vblank had hidden, and startup is where it comes from. Startup reads
 and writes flash: WiFi's and the PHY's data in NVS, the update check, the core dump check. Flash
 and PSRAM share the bus, so each access holds up the panel's DMA, and the FIFO between DMA and
-panel holds 16 pixels, about a microsecond at 14 MHz. So `do_ready`, once startup is over, calls
-`Board::resync_panel` and restarts the panel once. If the frame from fb0 is one update old, it
-shows for 30 ms while the loading view gives way to the next view.
+panel holds 16 pixels, about a microsecond at 14 MHz. So `do_ready`, once esp-mdm's startup is
+over, calls `Board::resync_panel` and restarts the panel. If the frame from fb0 is one update
+old, it shows for 30 ms while the loading view gives way to the next view.
 
-What would come next if the picture drifts in use (shifted sideways until the next wake): bounce
-buffers. The setting is `bounce_buffer_size_px = 10 * 800`, with `CONFIG_LCD_RGB_ISR_IRAM_SAFE`,
-so the refill also runs while flash is accessed, and `CONFIG_ESP32S3_DATA_CACHE_LINE_64B`, which
-ESP-IDF's FAQ asks for in this mode. The panel's DMA then reads ten lines of internal RAM, 600 µs
-of slack instead of a microsecond, and the driver restarts by itself when a frame
-comes up short. The costs:
+**Then two shifts on power-on starts.** Trying the first milestone, the operator saw the picture
+shift once during startup, and differently just before the main screen opened. `do_ready`'s
+restart comes just before the backend's tasks open their TLS connections, and the first view
+opens while they do; nothing restarted the panel after that. So the panel is restarted a second
+time once startup has settled (`Application::has_settled()`): the first view is up, the event
+stream is connected, and no `HttpClient` holds a request whose answer has not run on the UI task
+(`HttpClient::is_idle()`), a cover the first view asked for among them. `do_process()` checks
+this after the Shell's update, once per boot, and logs "Startup has settled; restarting the
+panel". The restart blocks the UI task for up to two frames, and shows one frame from fb0; with
+the backend unreachable it waits until the stream connects. A client added to `Application`
+joins `has_settled()`. Whether the second restart ends the shifts is still to see on the display
+("To check on the first display").
+
+What would come next if the picture still shifts at startup, or drifts in use (shifted sideways
+until the next wake): bounce buffers. The setting is `bounce_buffer_size_px = 10 * 800`, with
+`CONFIG_LCD_RGB_ISR_IRAM_SAFE`, so the refill also runs while flash is accessed, and
+`CONFIG_ESP32S3_DATA_CACHE_LINE_64B`, which ESP-IDF's FAQ asks for in this mode. The panel's DMA
+then reads ten lines of internal RAM, 600 µs of slack instead of a microsecond, and the driver
+restarts by itself when a frame comes up short. The costs:
 
 - 32 KB of internal RAM;
 - an interrupt that copies 25 MB a second out of PSRAM, a third or more of core 0;
@@ -525,8 +579,8 @@ ingress answers plain HTTP with a 301 to HTTPS, and its certificate is issued by
 which Mozilla's bundle does not hold. Every connection then failed the handshake
 (`esp-x509-crt-bundle: No matching trusted root certificate found`), and the screen stayed at
 "Connecting". The firmware therefore carries the homelab root, `certs/homelab-root.pem`, which
-`main/CMakeLists.txt` embeds and `Application` hands to the backend's two `HttpClient`s and its
-`EventStream` as their `cert_pem`, so `backendUrl` is `https://`. Those three verify against that
+`main/CMakeLists.txt` embeds and `Application` hands to the backend's three `HttpClient`s and its
+`EventStream` as their `cert_pem`, so `backendUrl` is `https://`. Those four verify against that
 root alone. esp-mdm's own connections keep ESP-IDF's bundle: none of them goes to the backend, and
 the first display installed an update over the air on that bundle alone. The file is a root
 certificate, public by nature, and holds no hostname or address; it is valid until 2036.
@@ -537,6 +591,7 @@ struct HttpRequest {
     std::string path;                    // "/api/..." appended to the base URL
     std::string body;                    // JSON for POST/PUT/DELETE, else empty
     size_t max_response{256 * 1024};
+    bool merges{};                       // goes as one with an equal request that waits
 };
 struct HttpResponse {
     esp_err_t err;                       // transport error, or ESP_OK
@@ -548,19 +603,39 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
                       std::function<void(HttpResponse&&)> done);
 ```
 
-- **One task per client, one request at a time.** `send` puts the request on the client's
-  FreeRTOS queue (16 deep), and drops it when the queue is full. The task keeps one
-  `esp_http_client` handle with keep-alive and
-  reuses it; after a transport error it destroys the handle and makes a new one. A connection idle
-  for more than 1.5 seconds is closed before the next request: a server that closed it first would
-  fail that request, and only a GET is retried.
-- **Two clients.** `backend_api` carries API calls and `backend_art` carries artwork, so a
-  command is never queued behind twenty covers.
-- **One change of the volume in the queue at most.** A press sends `{"delta": n}` to the group's
+- **One task per client, one request at a time, in the order sent.** `send` puts the request on
+  the client's queue (16 deep), and answers it as failed when the queue is full. The task keeps
+  one `esp_http_client` handle with keep-alive and reuses it; after a transport error it destroys
+  the handle and makes a new one. A connection idle for more than 1.5 seconds is closed before the
+  next request: a server that closed it first would fail that request, and only a GET is retried.
+- **Three clients.** `backend_press` carries every press: transport commands, changes of the
+  volume and of groups, and the queue's play, shuffle, add and clear. `backend_api` carries every
+  fetch of the backend's state and of its lists. `backend_art` carries artwork. So a press waits
+  behind no fetch, however long one stalls, and behind no cover, only behind the presses sent
+  before it.
+- **A fetch merges.** Every request on `backend_api` is sent with `merges`: one equal to a request
+  that still waits in the client, by method, path and body, goes as one with it, the later
+  caller's scope and `done` taking the earlier's place. One under way merges with nothing. So a
+  burst of events asks for the speakers, the playback, the volume or a page of the queue once
+  more, not once per event.
+- **A press has a time limit.** `HttpClient` bounds every wait on the link by the 5-second
+  timeout below, and esp-tls gives a handshake up at its first step that ends 5 seconds or more
+  after it began, so a request on the press path ends within about 30 seconds, but for a host
+  lookup that misses lwIP's cache and a handshake whose every read comes just inside the timeout.
+  A change of the volume or of a group, or a request to play, shuffle or add, whose answer has not
+  come 30 seconds after it was sent (`ANSWER_TIME_LIMIT_MS`, `main/ui/Model.h`) is settled, so an
+  answer dropped on its way to the UI task, or a press stuck behind stalled ones, leaves nothing
+  on its way for good. Each carries an id, and an answer to one that is no longer on its way
+  changes nothing.
+- **One change of the volume on its way at most.** A press sends `{"delta": n}` to the group's
   volume: a step, which the speaker takes from the volume it has, where a level sent from the
   screen could undo a change made in the Sonos app. The presses made while a change is on its way
   wait in the model (`Volume`) and go as one change when it is answered, so a burst of presses is
-  one request at a time, and a transport command waits behind one change at most.
+  one request at a time. While the group shows muted, a press on up also unmutes it: the change
+  carries `"muted": false`, also at the top of the range, where its step is 0, and also where up
+  and down net to no step. Down leaves the mute, so a group muted while loud can be brought down
+  first. A change the time limit settled drops the steps that wait with it, and the volume is
+  fetched again, without a notice.
 - **A change of a group is pending until a speakers list shows it.** A speaker joins the chosen
   speaker's group with `PUT /api/speakers/{id}/group`, the body `{"speaker_id": ...}` naming the
   chosen speaker, and leaves it with `DELETE` on the same path. The 204 says that the speaker took
@@ -570,8 +645,24 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   shows the speaker in the group or out of it, as asked, and the speaker takes no second change
   meanwhile. A pick of another speaker leaves it waiting on the group it was sent for. A change the
   backend took that no list shows within 15 seconds of its 204 is settled without a notice, and the
-  speakers are fetched again; any answer but 204, or none, is a change not taken, and the speakers
-  are fetched again.
+  speakers are fetched again; any answer but 204, or a failed request, is a change not taken, and
+  the speakers are fetched again. A change whose answer has not come within the time limit is
+  settled without a notice too.
+- **Play, Shuffle and Add to queue** send `POST /api/speakers/{id}/queue`, the body `kind`,
+  `item_id`, `action` and, for an artist's play and add, `"order": "newest_first"`: what the
+  speaker plays for an artist from the Sonos app. The backend answers 202 with a `task_id` and
+  queues in the background; the task's end comes later on the event stream, as `task_event`, which
+  every connection receives and which may come before the 202. The model (`Queueing`) watches the
+  tasks of the display's own requests, the newest 8, and holds the ends no answer has named yet
+  while a request is on its way, also 8 at most. A failure is said in the backend's words; an add
+  the backend took is said too, since nothing else on screen shows it; Play and Shuffle show as the
+  playback's events bring what plays. Any answer but a 202 with a `task_id`, a failed request, or
+  none within the time limit, is a request not taken.
+- **Clear** sends `DELETE /api/speakers/{id}/queue`. A 204 waits for the queue's events to show
+  the empty queue; any other answer, or a failed request, is a Clear not taken. Nothing waits on
+  a Clear, so it has no time limit.
+- **The bodies are written in `main/api/Requests`** (`write_volume_change`,
+  `write_queue_request`), which `sim/` builds too, so a scene checks the body the device sends.
 - **The body goes to PSRAM.** The task reads with `esp_http_client_open`,
   `esp_http_client_fetch_headers` and a read loop into a `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`
   buffer sized from `Content-Length`, growing when there is none, and failing with
@@ -587,12 +678,14 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   client hands status and body to the caller, which hands them there. An answer the API's
   document does not allow is refused whole, and one it allows is never refused for a field the
   display does not show. A command is taken when it is answered 204; any other answer, or none,
-  is a command not taken, and the playback is fetched again.
+  is a command not taken, and the playback is fetched again. A text the backend sends, such as a
+  title or a speaker's name, is read through `read_text()`: without the bytes that are not UTF-8
+  and the characters the fonts do not draw (section 7), cut at a character to 200 bytes. An id is
+  read as it is.
 - **Errors:** a status of 400 or above carries the template's envelope,
   `{"error": ..., "details": {"message": ...}, "code": ...}`, though not always: a validation
-  error is a bare array. The envelope's `error`, cut at 200 bytes on a character boundary, is
-  what the speaker picker and the now-playing screen show; any other body is a failure without a
-  message.
+  error is a bare array. The envelope's `error`, read as a text, is what a view shows when a list
+  or the playback did not come; any other body is a failure without a message.
 
 `cJSON_InitHooks` is set at start-up to allocate from PSRAM (section 7).
 
@@ -628,14 +721,19 @@ fields, no replay. `EventStream` owns the `backend_events` task and a second `es
 7. **Reconnect** after 1, 2, 4, 8, then 15 seconds, reset by `ready`.
 8. **After every `ready`** the app is told the stream is (re)connected, and fetches the speakers,
    the chosen speaker's playback and its group's volume again, since events sent while it was
-   away are gone. There is nothing to renew: every connection receives every event.
+   away are gone; the queue screen, while it shows, asks again for the page at its top. There is
+   nothing to renew: every connection receives every event.
 
 **What the app does with an event.** `speakers_changed` fetches the speakers, and the group's
 volume, which a speaker joining or leaving the group changes. `playback_changed` and
 `volume_changed` name a speaker and come once for every member of a group, so the chosen
-speaker's own id is the whole filter: one that names it fetches the playback or the volume. One
-whose payload cannot be read is taken for the chosen speaker's. When the chosen speaker comes back
-into the speakers list, its playback and volume are fetched too.
+speaker's own id is the whole filter: one that names it fetches the playback or the volume. So does
+`queue_changed`, which fetches nothing itself: it and `playback_changed` move
+`Model::queue_changes`, and the queue screen, while it shows, asks again for the page at its top.
+One whose payload cannot be read is taken for the chosen speaker's. When the chosen speaker comes
+back into the speakers list, its playback and volume are fetched too. `task_event` reports the
+progress and end of the backend's tasks; the display reads the ends of those its own requests
+started (Requests, above).
 
 The UI works without the stream: commands go over `HttpClient` either way. While the stream has
 been down for more than five seconds the Shell shows a "Reconnecting" marker. The backend being
@@ -709,33 +807,41 @@ no FreeRTOS, no `esp-libs`, no `Application.h`. It has two doors to the rest of 
 both headers in `ui/`:
 
 - **`Model.h`**: plain structs holding what the views draw: the event stream's state, the
-  speakers and the chosen one with each one's group, the playback, the group's volume and the
-  pending changes of groups, with the rules by which a command or a press changes what they show
-  (`Playback`, `Volume`) and a change of a group settles (`Grouping`).
+  speakers and the chosen one with each one's group, the playback, the group's volume, the
+  pending changes of groups and the items asked to be queued, with the rules by which a command or
+  a press changes what they show (`Playback`, `Volume`), a change of a group settles (`Grouping`)
+  and a request to play, shuffle or add is watched to its end (`Queueing`); the time limit of a
+  press; the pages of a list a view holds (`PagedList`), the library's items and the queue's
+  entries; and `can_draw()`, which says whether the fonts draw a character.
 - **`UiHost.h`**: an abstract class with what a view may ask for: a speaker chosen, a transport
   command, a step of the volume, a speaker added to the chosen speaker's group or removed from it, a
-  fetch again, a piece of artwork. `Application` implements it on the device; `sim/` implements it
-  with fixtures.
+  fetch again, a page of the artists, an artist's albums, an album's tracks, the playlists or the
+  queue, an item played, shuffled or added to the queue, the queue cleared, a piece of artwork.
+  `Application` implements it on the device; `sim/` implements it with fixtures.
 
 `ui/log.h` gives the views `UI_LOGI`, `UI_LOGW` and `UI_LOGE`: `ESP_LOGx` when `ESP_PLATFORM` is
 defined, `printf` otherwise. The rule is enforced by the build: an ESP-IDF include in `ui/` fails
 `kc project test`.
 
 **`main/api/`** is built by `sim/` too: the backend's answers read into the model's types
-(`Answers`), and the artwork's checks, cache and loader (`Artwork`). It includes cJSON, LVGL, the
-C++ standard library and `ui/`'s two doors only, and nothing of ESP-IDF is on `sim/`'s include
-path, so an ESP-IDF include there fails `kc project test` as well. The scenes' fixtures are bodies
-as the backend sends them, read by the code the device runs.
+(`Answers`), the bodies of the requests the firmware sends (`Requests`), and the artwork's checks,
+cache and loader (`Artwork`). It includes cJSON, LVGL, the C++ standard library and `ui/`'s two
+doors only, and nothing of ESP-IDF is on `sim/`'s include path, so an ESP-IDF include there fails
+`kc project test` as well. The scenes' fixtures are bodies as the backend sends them, read by the
+code the device runs, and a scene can check the body the device would send.
 
 ### The UI's structure
 
 - **One LVGL screen.** `Shell` owns it: a content area, the now-playing bar under it, which is how
-  the bar "stays at the bottom of every screen", and the "Reconnecting" marker. The bar shows
+  the bar "stays at the bottom of every screen", and the "Reconnecting" marker, in the top corner
+  the top view leaves free (`View::get_marker_align()`): the top right, but over the now-playing
+  screen the top left, over its cover's corner. A list's heading ends before the marker while it
+  shows at the top right (`Shell::get_marker_reach()`). The bar shows
   under every view that has it (`View::has_bar()`, true unless a view says otherwise) while the
   display is not held on the speaker picker, and the content area then ends where the bar
   begins. `NowPlayingView`, which carries the bar's controls in full, and `LoadingView` say
-  otherwise. `Shell::layout()` alone decides, and runs in `push()`, `pop()` and `update()`, so no
-  frame draws a view at the wrong height.
+  otherwise. `Shell::layout()` alone decides, and runs in `push()`, before the view renders,
+  `pop()` and `update()`, so no frame draws a view at the wrong height.
 - **The first view.** `Shell::open()` shows the speaker picker while the display needs a speaker
   (`Model::needs_speaker()`: none is chosen, or the last list the backend answered lacks the
   chosen one; a list never answered holds nothing), and the now-playing screen otherwise. From
@@ -744,9 +850,11 @@ as the backend sends them, read by the code the device runs.
   building its objects inside the content area, `do_update()` called from the loop while it is
   the top view, and `do_show()` when it shows again after the view over it closed. `Shell` keeps
   a stack of them. Going back destroys the view that is left, so memory is bounded by the depth
-  of the stack, not by what was visited. A view that navigates takes the `Shell*`:
-  `open_speaker_picker()`, and `back()`, which acts at the next `update()` so a view may call it
-  from its own event.
+  of the stack, not by what was visited. A view that navigates takes the `Shell*`: `push()`,
+  `open_speaker_picker()`, `open_library()`, `open_queue()`, and two that act at the next
+  `update()`, so a view may call them from its own event: `back()`, and `open_now_playing()`,
+  which closes the views over the now-playing screen wherever it sits in the stack, or opens one
+  on top while the stack has none. Only `NowPlayingView` says `View::is_now_playing()`.
 - **The views.** The speaker picker, the speakers screen, lists the speakers and stores a pick; it
   is reached from now playing, and a touch on a row picks its speaker and goes back. While the list
   has the chosen speaker, every other row carries a group control at its right end: a ring for a
@@ -756,14 +864,37 @@ as the backend sends them, read by the code the device runs.
   presses over the row's whole height. The chosen speaker's row has no control, only its tick where
   the controls sit: it does not leave its own group from here. The now-playing screen shows the
   cover at 400 px, title, artist and album, previous, play or pause, and next, and under them the
-  group's volume: down, the level, up. The bar shows the cover at 80 px, title and artist, play or
-  pause, next, and the volume. Both build from `Cover` and `Controls`, so the rules are in one
+  group's volume: down, the level, up; its top row holds the speaker button, the library button
+  and the queue button. The bar shows the cover at 80 px, title and artist, play or pause, next,
+  and the volume; a touch on its cover or its texts opens the now-playing screen, the library's
+  and the queue's way back to it. Both build from `Cover` and `Controls`, so the rules are in one
   place: a control is live only while the playback lists its command or the volume allows the step,
   and one that is not is `LV_STATE_DISABLED`, which LVGL sends no click. A play or pause shows at
-  once; next and previous wait for the speaker's event. A command, a volume change or a change of a
-  group that was not taken shows "That did not go through" for five seconds, said once, by whichever
-  of the two is on screen; under the speaker picker that is the bar. A muted group shows as muted;
-  the display does not unmute it.
+  once; next and previous wait for the speaker's event. A muted group shows as muted, and up stays
+  live while it does, also at the top of the range: a press on it unmutes the group, and the icon
+  shows unmuted at once (section 4). What came of a press is said for five seconds, once, by the
+  now-playing screen or, under any other view, the bar (`PressNotice`): a queued item's failure in
+  the backend's words before the rest, then "That did not go through" for a command, a change of
+  the volume or of a group, a request to queue or a Clear that was not taken, then "Added to the
+  queue".
+- **The library and the queue.** Each is a `ListView`: a heading with a back button and the title
+  at Medium 40, and rows of 72 px with their titles at Regular 32. It holds a `PagedList` and builds
+  a row for each item held; within a screen of an end with a page past it, it asks for that page,
+  and the list says, past its rows, that the page is on its way, or why it did not come with Try
+  again. Rows carry no covers. The library button opens the artists, as the backend sorts them;
+  an "A–Z" button beside them opens a grid of the letters the rows file under, 9 by 3 over the
+  list, each as large a target as the grid allows, and a letter brings its first artist to the
+  top. A button under it opens the playlists. A
+  press on an artist's row opens its albums, newest first, each with its year where it has one; a
+  press on an album's row opens its tracks. A playlist opens nothing: the backend does not list its
+  tracks. Every artist, album and playlist row ends in Play, Shuffle and Add to queue, every track
+  row in Play and Add to queue, 64 px each; a press on one does not open its row, and a drag that
+  starts on one still scrolls the list. The queue lists each entry's title and, beside it, its
+  artist. It opens on the page holding the loaded track, that row at the top and marked in the
+  accent; while no track of the queue is loaded, a line under the heading says it plays from
+  another source, or the screen says the queue is empty. While it shows it asks again for the page
+  at its top when `Model::queue_changes` moves, and once the event stream is back after a loss.
+  Clear ends its heading and asks to be confirmed over the list.
 - **`Theme`** sets up the dark theme once, with `lv_theme_default_init(disp, primary, secondary,
   true, font)`, and holds the palette and the type scale as named constants. Starting values:
   background `#101214`, surface `#1C1F24`, text `#F2F2F2`, secondary text `#A0A6AD`, accent
@@ -795,12 +926,13 @@ sim/
 - **Time:** `lv_tick_set_cb` returns a counter the program advances itself, so a scene renders
   the same on every run.
 - **A scene** is a name and a function that builds the screen from fixtures, for example
-  `loading`, `speakers`, `now-playing`, `now-playing-radio`, `bar`, and later `artists`,
-  `queue-empty`. One view has several scenes where its states differ. A fixture is a body as the
-  backend sends it (`SimHost::answer_speakers(status, body)` and its siblings), and `expect()` in
+  `loading`, `speakers`, `now-playing`, `now-playing-radio`, `bar`, `artists`,
+  `queue-screen-empty`. One view has several scenes where its states differ. A fixture is a body
+  as the backend sends it (`SimHost::answer_speakers(status, body)` and its siblings), and `expect()` in
   `sim/scenes.cpp` fails the render on one that reads wrong.
 - **A scene can touch and check.** `host.tap(x, y)` presses for 100 ms as the scene starts, and a
-  second touch comes 200 ms after the first. The scene's optional `check` runs once it has run,
+  second touch comes 200 ms after the first; `host.drag(from, to)` touches and moves, and
+  `host.wait(ms)` puts the next touch later. The scene's optional `check` runs once it has run,
   with the host and the Shell, and fails the render with the string it returns. A scene runs for
   500 ms unless its `run_ms` asks for longer.
 - **Rendering a scene:** build it, advance the clock by its run time in 10 ms steps calling the
@@ -1016,7 +1148,7 @@ a post-build step in `CMakeLists.txt` that checks the size of `sonos_display.bin
 
 ### Internal RAM
 
-Task stacks take about 75 KB: the four tasks of section 1, esp-mdm's, WiFi's and the system's.
+Task stacks take about 80 KB: the five tasks of section 1, esp-mdm's, WiFi's and the system's.
 The model of the open list takes up to 40 KB. The target is at least 60 KB of internal RAM free
 with the largest list open. The firmware logs `heap_caps_get_free_size` and
 `heap_caps_get_minimum_free_size` for both kinds of memory once a minute; the lines reach IoT
@@ -1050,12 +1182,16 @@ meanwhile, and still wanted, is fetched when it wakes.
 
 ### Lists
 
-- **At most 200 rows are built at a time.** The firmware asks for pages of 100 and keeps two.
-  Scrolling past an end fetches the next page and drops the far one.
+- **At most 200 rows are built at a time.** The firmware asks for pages of 100 and keeps two
+  (`PagedList`). Scrolled to within a screen of an end, a list asks for the page past it; once it
+  comes, the build drops the page at the far end, or, when a row on screen is in that one, the
+  page that came, so the rows on screen stay where they are.
 - **The library fits whole.** 94 artists, an artist's albums and an album's tracks are each under
-  200, so the A–Z bar jumps within rows that are already there.
-- **The queue and Plex's large playlists do not fit**, one of them at 12,019 tracks. They are
-  windowed the same way, and the queue opens on the page holding the current track.
+  200, so the A–Z bar jumps within rows that are already there. Over 200 artists, its letters are
+  those of the rows built.
+- **The queue need not fit**: playing one of Plex's large playlists, one at 12,019 tracks, queues
+  it whole. It is windowed the same way, and opens on the page holding the loaded track
+  (`locate=current`). A playlist's own tracks are not listed: the backend does not list them.
 - **A response body is capped at 256 KB**, about ten times a page of 100 items.
 
 ### Fonts
@@ -1068,9 +1204,13 @@ The cost is a fixed set of sizes.
   Apache-2.0, and their licence files sit beside the TTFs in `tools/fonts/`. PaperClock's
   FontAwesome files are not copied into this repository.
 - **Characters:** Basic Latin `0x20-0x7E`, Latin-1 Supplement `0xA0-0xFF`, Latin Extended-A
-  `0x100-0x17F`, and the punctuation `0x2013-0x2014`, `0x2018-0x201D`, `0x2022`, `0x2026`,
-  `0x20AC`: about 335 glyphs, which is "Latin script with accents". Anything else is drawn as
-  LVGL's placeholder box.
+  `0x100-0x17F`, which is "Latin script with accents", and the punctuation, signs and sub- and
+  superscripts the library's titles hold: dashes and quotes, the bullet, the ellipsis, primes, the
+  euro, the modifier apostrophe and a few of maths (`TEXT_RANGES` in `tools/fonts/generate.sh`),
+  about 350 glyphs. A character outside them would draw as LVGL's placeholder box, so a text the
+  backend sends is read without it (section 4): `can_draw()`, in `main/ui/Theme.cpp`, asks the
+  four text fonts. A text font added to the generator takes the same ranges, and a face other
+  than Roboto Regular or Medium joins `can_draw()`'s fonts.
 - **Sizes.** The panel is about 217 pixels per inch and is read from arm's length in a workshop,
   so the scale is larger than a phone's: Regular 24 and 32, Medium 32 and 40, icons 40 and 64.
   A slice that needs another size adds a line to the generator.
@@ -1126,3 +1266,12 @@ speakers screen on the display is the first join and the first leave. What only 
 still to see there: the `PUT` and `DELETE` and the join's body through `esp_http_client`, how long
 the speakers take to report the new groups against the 15-second limit, and what becomes of the
 rest of a group when the speaker that leads it leaves.
+
+What only a display shows of milestone 2's library and queue, and of the restarts of section 1 and
+section 3, is still to see there: whether the picture still shifts on a few power-on starts with the
+panel's second restart; the "Raw reset reason …" and "The run before …" lines after a restart the
+firmware makes itself, such as the one a saved configuration brings, and what they say at the next
+watchdog reset; whether a press still waits behind a stalled fetch on weak WiFi; the lists'
+scrolling, the A–Z grid and the rows' buttons under a finger; Play, Shuffle, Add and Clear on a
+speaker, the queue's mark, and its refetch on the events; up on a muted group; and free internal RAM
+with the largest list open, against the 60 KB target.

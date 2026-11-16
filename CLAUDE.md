@@ -14,8 +14,9 @@ before making it.
 - `main/board/`: the hardware and LVGL's driver interface. Every pin and timing is in
   `BoardConfig.h`.
 - `main/backend/`: `HttpClient` and `EventStream`, free of app types.
-- `main/api/`: the backend's answers read into `ui/`'s types, and the artwork cache; cJSON, LVGL,
-  the C++ standard library and `ui/`'s doors only, so `sim/` builds it too.
+- `main/api/`: the backend's answers read into `ui/`'s types, the bodies of the requests sent, and
+  the artwork cache; cJSON, LVGL, the C++ standard library and `ui/`'s doors only, so `sim/` builds
+  it too.
 - `main/ui/`: the views, LVGL and the C++ standard library only; `Model.h` and `UiHost.h` are its
   two doors.
 - `main/Application.{h,cpp}`: the app on esp-mdm's `ApplicationBase`; owns the UI task.

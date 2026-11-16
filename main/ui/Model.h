@@ -1,8 +1,10 @@
 #pragma once
 
-// What the views draw: plain structs, filled by the host, and the rules by which a command
-// changes what they show and a change of a group settles. One of the two doors between ui/ and
-// the rest of the firmware; UiHost.h is the other.
+// What the views draw: plain structs, filled by the host, and the rules by which a command or a
+// press changes what they show, a change of a group or of the volume settles, a request to play,
+// shuffle or add is watched to its end, and a list's pages are held; the library's items and the
+// queue's entries; and can_draw(), which says what the fonts draw. One of the two doors between
+// ui/ and the rest of the firmware; UiHost.h is the other.
 
 #include <algorithm>
 #include <cstddef>

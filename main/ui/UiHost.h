@@ -37,8 +37,9 @@ public:
     // Asks the backend again for the volume of the chosen speaker's group.
     virtual void refresh_volume() = 0;
 
-    // Turns the volume of the chosen speaker's group down, by a negative step, or up. A view
-    // sends only a step the volume allows.
+    // Turns the volume of the chosen speaker's group down, by a negative step, or up. A step up
+    // while the volume shows muted unmutes the group too; down leaves the mute. A view sends only
+    // a step the volume allows.
     virtual void change_volume(int step) = 0;
 
     // Sends a transport command to the chosen speaker. A view sends only a command the playback
