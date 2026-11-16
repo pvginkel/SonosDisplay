@@ -1218,17 +1218,20 @@ static void now_playing_glyphs(SimHost& host, Shell& shell) {
     expect(track && track->artist == "Ensemble ʼ67 feat. x₂ᵢⱼ", "the artist was not read as the fonts draw it");
     expect(track && track->album == "Signs ∂ ∆ ∑ √ − 10⁻⁰", "the album was not read as the fonts draw it");
 
-    // A stray continuation byte, a sequence cut short, and a lead byte no sequence starts with.
+    // A stray continuation byte, a lead byte no sequence starts with, a lead byte the byte after it
+    // does not continue, and a sequence cut short.
     const std::string broken = R"({"actions":[],"state":"stopped","track":{"album":"A)"
                                "\x80"
                                R"(B","artist":"C)"
                                "\xFF"
                                R"(D","artwork_id":null,"title":"E)"
+                               "\xC3"
+                               R"(F)"
                                "\xE2\x80"
                                R"("}})";
     Playback read;
     expect(!read_playback(200, broken.c_str(), broken.length(), read), "a playback with bytes not UTF-8 was refused");
-    expect(read.track && read.track->album == "AB" && read.track->artist == "CD" && read.track->title == "E",
+    expect(read.track && read.track->album == "AB" && read.track->artist == "CD" && read.track->title == "EF",
            "bytes that are not UTF-8 were not left out");
 
     // A text is cut at a character, to 200 bytes: the first "é" ends at the 200th.
