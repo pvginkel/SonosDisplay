@@ -16,7 +16,7 @@ the first display", with what the first display, flashed the same day, showed.
 |---|---|
 | Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events), `api/` (the backend's answers, read into the UI's types, and the bodies of the requests) and `ui/` (LVGL and standard C++ only). |
 | Carried over | The panel, expander, touch, backlight and motion-sensor code of ThermostatDisplay's shipped build: two framebuffers in PSRAM at a 14 MHz pixel clock. Rewritten for LVGL 9.2 and for ESP-IDF's current I2C driver, not copied. |
-| Picture drift | No change to `esp-libs`. The panel resynchronises whenever the screen is switched on, as ThermostatDisplay's did, and twice as startup ends, and code runs from PSRAM. Not every frame: on the S3, `CONFIG_LCD_RGB_RESTART_IN_VSYNC` pins the picture to the first framebuffer, which was the first display's artifacts. An update is only written during boot, and the display restarts after it. |
+| Picture drift | No change to `esp-libs`. The panel's DMA reads two bounce buffers in internal RAM, which interrupts on core 1, the UI task's, refill from the framebuffers, also while flash is written; the driver restarts a frame that comes up short. The panel also resynchronises whenever the screen is switched on, as ThermostatDisplay's did, twice as startup ends and after a setting is saved, and code runs from PSRAM. `CONFIG_LCD_RGB_RESTART_IN_VSYNC` stays off. An update is only written during boot, and the display restarts after it. |
 | Brown-out | The backlight is switched at most once a second, in either direction, by one state machine. Boot lights the screen only after a power-on reset. |
 | HTTP and events | Four small tasks in the app: one for presses, one for fetches, one for artwork, one holding the event stream. Results reach the UI task through esp-mdm's queue. The code lives in the app, `main/backend/`, written free of app types so it can move to `esp-libs` when a second firmware needs it. |
 | Backend address | IoT Support's device configuration, key `backendUrl`, required by the model's schema. Not a build setting. |
@@ -182,8 +182,8 @@ own RTC watchdog finishes. So the firmware keeps its own record of every run, `R
 - **The stop before a restart.** `Board::begin()` registers a shutdown handler, which
   `esp_restart()` runs on the task that called it before it arms its watchdog. It marks the
   restart begun, then stops the panel's presents for good (`RgbPanel::stop()`): none begins after
-  it, and one another task is in is waited for, at most `LCD_STOP_TIMEOUT_MS` (two vblank
-  timeouts and 50 ms); on the task that presents it returns at once. Then it marks how the stop
+  it, and one another task is in is waited for, at most `LCD_STOP_TIMEOUT_MS` (a frame's timeout
+  and 50 ms); on the task that presents it returns at once. Then it marks how the stop
   ended. `esp_restart()` arms its watchdog only once every handler has run, so a reset by it
   comes after the mark.
 - **No shutdown handler is left.** ESP-IDF keeps five, and all five are in use: esp_timer's,
@@ -224,7 +224,8 @@ vendored the touch driver under `components/`; that copy is not carried over.
 ThermostatDisplay's repository holds three display variants behind Kconfig switches. Only one
 ever ran on the displays: the committed `sdkconfig` selects two framebuffers. That variant is
 what is carried over. The single-framebuffer, bounce-buffer and vsync-semaphore paths, and their
-21 MHz timings, are dead code there and are left behind.
+21 MHz timings, are dead code there and are left behind; SonosDisplay's bounce buffers (section 3)
+are set up anew.
 
 ### The board
 
@@ -245,7 +246,7 @@ select, bit 5 USB/CAN select. The firmware only ever writes bits 1 to 3.
 
 ### Panel
 
-`esp_lcd_new_rgb_panel` with these values, which are the shipped ones:
+`esp_lcd_new_rgb_panel` with these values, which are the shipped ones but for the bounce buffers:
 
 | Field | Value |
 |---|---|
@@ -257,14 +258,18 @@ select, bit 5 USB/CAN select. The firmware only ever writes bits 1 to 3.
 | `timings.flags.pclk_active_neg` | 0 |
 | `data_width`, `bits_per_pixel` | 16, 16 |
 | `num_fbs` | 2 |
-| `bounce_buffer_size_px` | 0 |
+| `bounce_buffer_size_px` | 8000, ten lines (`LCD_BOUNCE_BUFFER_PX`, section 3) |
 | `dma_burst_size` | 64 (ESP-IDF 5.5's name for the old `psram_trans_align`) |
 | `flags.fb_in_psram` | 1 |
 
-Then `esp_lcd_panel_reset()` and `esp_lcd_panel_init()`. That is about 33 frames a second. The
-14 MHz clock is deliberate: ThermostatDisplay's comment is "We need to lower the clock speed when
-double buffering", and 21 MHz and the vendor's 30 MHz were both too fast for framebuffers in
-PSRAM.
+Then the callbacks, `on_vsync` and `on_frame_buf_complete`, and `esp_lcd_panel_reset()` and
+`esp_lcd_panel_init()`. That is about 33 frames a second. The 14 MHz clock is deliberate:
+ThermostatDisplay's comment is "We need to lower the clock speed when double buffering", and
+21 MHz and the vendor's 30 MHz were both too fast for framebuffers in PSRAM.
+
+The driver allocates the panel's interrupts on the core that creates the panel, so
+`RgbPanel::begin()` runs all of this, `RgbPanel::install()`, in a task pinned to core 1
+(`RgbPanel::INTERRUPT_CORE`), which ends once the panel is up (section 3).
 
 ### LVGL 9.2 on the panel
 
@@ -297,32 +302,35 @@ void RgbPanel::flush(lv_display_t* disp, const lv_area_t*, uint8_t* px_map) {
 }
 
 void RgbPanel::present(uint8_t* fb) {
-    if (_stopped) return;                                 // stop(), before a restart (section 1)
-    if (now - _last_vsync_us > LCD_SWAP_DEADLINE_US) {   // 20 ms into a 30.6 ms frame
-        xSemaphoreTake(_vsync, 0);
-        wait_vsync();                                     // swap at the start of the next frame instead
-    }
-    esp_lcd_panel_draw_bitmap(_panel, 0, 0, 800, 480, fb);  // fb is a panel framebuffer: the driver swaps
-    xSemaphoreTake(_vsync, 0);                            // drop a signal from before the swap
-    wait_vsync();                                         // the DMA is on the new buffer from here
+    if (_stopped) return;                                    // stop(), before a restart (section 1)
+    esp_lcd_panel_draw_bitmap(_panel, 0, 0, 800, 480, fb);  // fb is a panel framebuffer: it becomes the current one
+    xSemaphoreTake(_taken, 0);                               // drop a sign from before the swap
+    xSemaphoreTake(_taken, pdMS_TO_TICKS(LCD_FRAME_TIMEOUT_MS));  // the refill copies from the new buffer from here
 }
 ```
 
-`_vsync` is a binary semaphore given from the panel's `on_vsync` callback with
-`xSemaphoreGiveFromISR`; the callback also records the time. Waiting for it keeps LVGL from
-drawing into the buffer that is still on screen. That holds only because of how the driver swaps,
-read in ESP-IDF 5.5.3's `esp_lcd_panel_rgb.c` after the first display's artifacts (section 3):
+`_taken` is a binary semaphore given from the panel's `on_frame_buf_complete` callback,
+`RgbPanel::on_framebuffer_taken`, with `xSemaphoreGiveFromISR`. Waiting for it keeps LVGL from
+drawing into the buffer the refill still copies to the screen. That holds only because of how the
+driver swaps with bounce buffers (section 3), read in ESP-IDF 5.5.3's `esp_lcd_panel_rgb.c`:
 
-- `esp_lcd_panel_draw_bitmap` with a panel framebuffer writes the cache back over the rows given
-  (all 480: LVGL's copies between the buffers are not in the flushed areas) and points the last
-  DMA node of every framebuffer at the new one. The swap takes effect at the end of the frame on
-  screen, not at once.
-- The DMA reads that last node's link a few lines before the frame ends. A swap made later shows
-  the old buffer one frame more, while LVGL already draws into it. So a swap more than 20 ms
-  after the last vblank waits for the next one first; the frame is 840 × 510 clocks, 30.6 ms at
-  14 MHz.
+- `esp_lcd_panel_draw_bitmap` with a panel framebuffer only makes it the current one. It writes
+  no cache back: the refill reads the framebuffers through the data cache LVGL writes them
+  through.
+- The refill copies a frame into the bounce buffers ten lines at a time, all from one framebuffer.
+  Once it has copied a frame's last lines, it takes the current framebuffer for the next frame
+  and calls `on_frame_buf_complete`. Until then it may still copy from the old one, which LVGL
+  draws into next.
+- The refill's interrupt runs on the core of the task that presents, so it runs whole between two
+  of that task's instructions: a sign given after the clear comes from a frame the refill began
+  after the swap. One begun between the swap and the clear costs a frame more. On two cores
+  neither holds, so `Application.cpp` has `static_assert(UI_TASK_CORE == RgbPanel::INTERRUPT_CORE)`.
 - The panel starts on fb0, so LVGL is given fb1 as its first buffer: its first frame is drawn
   out of sight.
+
+A frame is 840 × 510 clocks, 30.6 ms at 14 MHz, so the wait is at most a frame, or two when a
+frame begins between the swap and the clear. `_vsync`, given from `on_vsync`, is what
+`RgbPanel::restart()` waits for (section 3).
 
 Direct mode itself is not what went wrong on the first display: `LV_DISPLAY_RENDER_MODE_FULL`
 alternates the same two buffers and would have shown the same artifacts.
@@ -401,6 +409,9 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
 
+CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
@@ -425,6 +436,7 @@ plus the four MQTT lines of section 1.
 - **240 MHz**, where ThermostatDisplay ran at 160: software rendering of a scrolling list is the
   heaviest thing this firmware does. It raises the board's current draw a little, which matters
   for the brown-out quirk; section 3 names the fallback.
+- **The two panel options** are for the bounce buffers (section 3).
 - **The PSRAM clock stays at 80 MHz.** The vendor's benchmark figure is for 120 MHz, which
   ESP-IDF 5.5.3 offers for octal PSRAM only as an experimental feature.
 
@@ -432,9 +444,10 @@ plus the four MQTT lines of section 1.
 
 ### The picture drifts while flash is written
 
-**What it is.** The panel's pixels are fetched from the PSRAM framebuffer by DMA, continuously.
-A flash write holds up PSRAM access for a moment, the DMA falls behind the pixel clock, and from
-then on the picture is shifted until the transfer is restarted.
+**What it is.** The panel's pixels are fetched by DMA, continuously, at the pixel clock. When the
+DMA reads them straight from the PSRAM framebuffer, a flash write holds up PSRAM access for a
+moment, the DMA falls behind the pixel clock, and from then on the picture is shifted until the
+transfer is restarted.
 
 **What ThermostatDisplay did.** Three things were in effect: the 14 MHz clock, code and
 read-only data moved to PSRAM (`CONFIG_SPIRAM_FETCH_INSTRUCTIONS` and `CONFIG_SPIRAM_RODATA`),
@@ -447,11 +460,21 @@ wired: `OTAManager` declares the callback and nothing calls it.
 1. **Keeps all three.** `CONFIG_SPIRAM_XIP_FROM_PSRAM=y` is ESP-IDF 5.5's switch for both
    options; its help text says code "that need to be executing during Flash operation can
    continue working normally".
-2. **Does not set `CONFIG_LCD_RGB_RESTART_IN_VSYNC`.** The skeleton set it, to make a drift last
-   one frame instead of until the next wake, and the first display showed artifacts with it
-   ("What the first display showed", below). A drift now lasts until the screen is next switched
-   on, as it did on ThermostatDisplay.
-3. **Adds no hook for updates, and changes nothing in `esp-libs`.** In esp-mdm, a firmware
+2. **Scans out through bounce buffers.** The panel's DMA reads two bounce buffers of ten lines in
+   internal RAM, 16,000 bytes each (`LCD_BOUNCE_BUFFER_PX`), and an interrupt refills each from a
+   framebuffer in PSRAM once the DMA has read it; section 2 has which, and the swap that goes
+   with it. A hold-up of PSRAM then has ten lines, 600 µs, of slack, where the FIFO between DMA
+   and panel holds 16 pixels, about a microsecond at 14 MHz. `CONFIG_LCD_RGB_ISR_IRAM_SAFE` keeps
+   the panel's interrupts and their callbacks in IRAM, so the refill also runs while flash is
+   written, and `CONFIG_ESP32S3_DATA_CACHE_LINE_64B` has the data cache, through which the refill
+   reads PSRAM, fetch 64-byte lines. A frame that still comes up short, with fewer refills than a
+   frame takes, is restarted by the driver itself at the next vblank.
+3. **Does not set `CONFIG_LCD_RGB_RESTART_IN_VSYNC`.** The skeleton set it, without bounce
+   buffers, to make a drift last one frame instead of until the next wake, and the first display
+   showed artifacts with it ("What the first display showed", below). With bounce buffers the
+   driver restarts a short frame by itself, and the option would restart every frame, which the
+   driver's own comment says shifts a frame whose vblank interrupt comes late.
+4. **Adds no hook for updates, and changes nothing in `esp-libs`.** In esp-mdm, a firmware
    update is downloaded and written only during boot, synchronously, on the task that calls
    `process()`, and it ends in `esp_restart()`. So while flash is written the UI task is blocked,
    the screen holds the loading view, and the restart that follows re-initialises the panel.
@@ -459,8 +482,14 @@ wired: `OTAManager` declares the callback and nothing calls it.
 
 The other flash writes are short: the speaker choice and the motion setting saved to NVS, esp-mdm
 storing new provisioning data (followed by a restart), and a coredump being erased after its upload
-at boot. Item 1 covers them, and the restart on the next wake puts right what it does not. After
-either setting is saved, the app restarts the panel at once (`Board::resync_panel`).
+at boot. Items 1 and 2 cover them, and the restart on the next wake puts right what they do not.
+After either setting is saved, the app restarts the panel at once (`Board::resync_panel`).
+
+The bounce buffers cost 32,000 bytes of internal RAM (section 7) and an interrupt that copies
+about 25 MB a second out of PSRAM; how much of its core that takes is not measured. The core is 1,
+the UI task's, not 0, where WiFi and the backend's tasks run: the copy's time comes out of
+rendering rather than the network, and the waits of `RgbPanel::present()` and
+`RgbPanel::restart()` hold only on the core of the interrupts (section 2).
 
 The loading view cannot animate during an update, since its task is blocked. It shows "Checking
 for an update" as a still frame (section 1, step 3).
@@ -470,9 +499,9 @@ for an update" as a still frame (section 1, step 3).
 The skeleton, flashed on 2026-11-15, showed screen update artifacts. The cause is in ESP-IDF
 5.5.3's RGB driver, not in flash or PSRAM traffic:
 
-- **On the S3 a restart always scans out fb0.** A hardware workaround (`RGB_LCD_NEEDS_SEPARATE_RESTART_LINK`)
-  restarts the DMA through a one-node "restart link" that is mounted on `fbs[0]` when the panel
-  is created and never moved. The transfer follows the current buffer only through the link at
+- **Without bounce buffers, a restart on the S3 always scans out fb0.** A hardware workaround
+  (`RGB_LCD_NEEDS_SEPARATE_RESTART_LINK`) restarts the DMA through a one-node "restart link" that
+  is mounted on `fbs[0]` when the panel is created and never moved. The transfer follows the current buffer only through the link at
   the end of a frame.
 - **`CONFIG_LCD_RGB_RESTART_IN_VSYNC` restarts on every vblank**, so it never gets there. The
   panel showed fb0 always. LVGL alternates the two buffers, so every second update was drawn
@@ -482,18 +511,20 @@ The skeleton, flashed on 2026-11-15, showed screen update artifacts. The cause i
 - **ThermostatDisplay never set it.** Its only restart was the one on waking, which costs one
   frame from fb0 and then follows the current buffer.
 
-So the option is off, and the restart on wake remains. `RgbPanel::restart` waits out the frame
-from fb0 before it returns, so the backlight comes on over the current picture. The swap itself
-is made safe in section 2.
+So the option is off, and the restart on wake remains. With bounce buffers the restart link is
+mounted on the first bounce buffer instead, and the refill follows the framebuffer it took last,
+the current one once a present has returned (section 2). So a restart shows the current picture.
+`RgbPanel::restart` asks the driver for one, which it makes at the next vblank, and returns once
+that vblank has passed, at most two frames later, so the backlight comes on over the restarted
+picture.
 
 **Then the drift showed.** With that update installed, the operator switched the display on and
 saw the picture shifted, until the screen went dark and woke: "It's very familiar." This is the
 drift the restart in every vblank had hidden, and startup is where it comes from. Startup reads
 and writes flash: WiFi's and the PHY's data in NVS, the update check, the core dump check. Flash
-and PSRAM share the bus, so each access holds up the panel's DMA, and the FIFO between DMA and
-panel holds 16 pixels, about a microsecond at 14 MHz. So `do_ready`, once esp-mdm's startup is
-over, calls `Board::resync_panel` and restarts the panel. If the frame from fb0 is one update
-old, it shows for 30 ms while the loading view gives way to the next view.
+and PSRAM share the bus, so each access held up the panel's DMA, which read the framebuffer
+straight from PSRAM then. So `do_ready`, once esp-mdm's startup is over, calls
+`Board::resync_panel` and restarts the panel.
 
 **Then two shifts on power-on starts.** Trying the first milestone, the operator saw the picture
 shift once during startup, and differently just before the main screen opened. `do_ready`'s
@@ -503,24 +534,14 @@ time once startup has settled (`Application::has_settled()`): the first view is 
 stream is connected, and no `HttpClient` holds a request whose answer has not run on the UI task
 (`HttpClient::is_idle()`), a cover the first view asked for among them. `do_process()` checks
 this after the Shell's update, once per boot, and logs "Startup has settled; restarting the
-panel". The restart blocks the UI task for up to two frames, and shows one frame from fb0; with
-the backend unreachable it waits until the stream connects. A client added to `Application`
-joins `has_settled()`. Whether the second restart ends the shifts is still to see on the display
-("To check on the first display").
+panel". The restart blocks the UI task for up to two frames; with the backend unreachable it
+waits until the stream connects. A client added to `Application` joins `has_settled()`.
 
-What would come next if the picture still shifts at startup, or drifts in use (shifted sideways
-until the next wake): bounce buffers. The setting is `bounce_buffer_size_px = 10 * 800`, with
-`CONFIG_LCD_RGB_ISR_IRAM_SAFE`, so the refill also runs while flash is accessed, and
-`CONFIG_ESP32S3_DATA_CACHE_LINE_64B`, which ESP-IDF's FAQ asks for in this mode. The panel's DMA
-then reads ten lines of internal RAM, 600 µs of slack instead of a microsecond, and the driver
-restarts by itself when a frame comes up short. The costs:
-
-- 32 KB of internal RAM;
-- an interrupt that copies 25 MB a second out of PSRAM, a third or more of core 0;
-- the frame-complete callback in place of the vblank as the sign that a swap took effect.
-
-The firmware itself writes flash only when the speaker choice or the motion setting is saved, and
-restarts the panel right after, so drift in use is not expected.
+**Then the shift in use.** At milestone 2's try-out, with both restarts in, the operator saw "no
+improvement at all in the screen shifting". When it showed is not known beyond those words, so the
+fix covers a sideways shift wherever it shows, at startup, in use and on waking: the panel scans
+out through bounce buffers (item 2 above), and every restart stays. Whether they end the shifts is
+still to see on the display ("To check on the first display").
 
 ### Switching the backlight too fast browns the board out
 
@@ -536,8 +557,8 @@ runs on the UI task, from `board.process()`:
 - **States:** `Off`, `On`, and `WaitRelease` (lit by a touch that is still down).
 - **The interval:** at least 1000 ms between two switches of the backlight. A request inside the
   interval stays pending and is applied when it ends. The first switch after boot is not delayed.
-- **Switching on:** `RgbPanel::restart()` first, which returns once the restarted frame is past
-  (section 3, up to two frames), then the expander write.
+- **Switching on:** `RgbPanel::restart()` first, which returns once the panel has restarted on
+  the current picture (above, up to two frames), then the expander write.
 - **Switching off:** the expander write only. The panel keeps scanning and LVGL keeps drawing.
 - **Wake:** a touch, or motion while the motion setting on Home lets it (section 5), which the
   display stores (section 4). Switched off, `ScreenPower::handle_motion()` returns at once: motion
@@ -1207,10 +1228,11 @@ a post-build step in `CMakeLists.txt` that checks the size of `sonos_display.bin
 ### Internal RAM
 
 Task stacks take about 80 KB: the five tasks of section 1, esp-mdm's, WiFi's and the system's.
-The model of the open list takes up to 40 KB. The target is at least 60 KB of internal RAM free
-with the largest list open. The firmware logs `heap_caps_get_free_size` and
-`heap_caps_get_minimum_free_size` for both kinds of memory once a minute; the lines reach IoT
-Support's device log, where every milestone can read them.
+The panel's two bounce buffers take 32,000 bytes (section 3). The model of the open list takes up
+to 40 KB. The target is at least 60 KB of internal RAM free with the largest list open. The
+firmware logs `heap_caps_get_free_size` and `heap_caps_get_minimum_free_size` for both kinds of
+memory once a minute; the lines reach IoT Support's device log, where every milestone can read
+them.
 
 ### Artwork
 
@@ -1299,8 +1321,8 @@ provisioned on 2026-11-15; the results are from its log in IoT Support (Elastics
 
 | Check | Result on the first display | Fallback |
 |---|---|---|
-| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). With that fixed, the picture drifted at power-on, until the next wake; startup now ends with a restart (section 3). Holds since `f2217d1`: the operator's "Works" after a power-on and a wake, 2026-11-15 | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here. For drift in use: bounce buffers (section 3) |
-| `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | Failed: on the S3 it pins the picture to fb0. Taken out | done: the restart on every wake remains |
+| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). With that fixed, the picture drifted at power-on, until the next wake; startup now ends with a restart (section 3). Holds since `f2217d1`: the operator's "Works" after a power-on and a wake, 2026-11-15 | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here |
+| `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | Failed: on the S3, without bounce buffers, it pins the picture to fb0. Taken out | done: the restart on every wake remains |
 | The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | The expander holds: the backlight is switched through it. The touch controller answered at bring-up, when the board had only been reset by esptool, but not after the operator's power-ons: it was probed before it left reset. It is now probed until it answers, and the result is logged where IoT Support gets it (section 2). Holds since `f2217d1`: `Touch: GT911 at 0x5D` after a power-on, and the operator's "Works" | none needed |
 | Touch coordinates match what is drawn, corner to corner: the skeleton's placeholder view drew a dot where each touch landed | Holds: the operator's "Works" at bring-up | `swap_xy` or the mirror flags of the touch configuration |
 | No brown-out reset in IoT Support's device log after a day of waking and sleeping at 240 MHz | One boot so far, `ESP_RST_POWERON`, then 7 minutes without a reset. The day is still to come | `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y` |
@@ -1333,9 +1355,8 @@ still to see there: the `PUT` and `DELETE` and the join's body through `esp_http
 the speakers take to report the new groups against the 15-second limit, and what becomes of the
 rest of a group when the speaker that leads it leaves.
 
-What only a display shows of milestone 2's library and queue, and of the restarts of section 1 and
-section 3, is still to see there: whether the picture still shifts on a few power-on starts with the
-panel's second restart; the "Raw reset reason …" and "The run before …" lines after a restart the
+What only a display shows of milestone 2's library and queue, and of the restarts of section 1, is
+still to see there: the "Raw reset reason …" and "The run before …" lines after a restart the
 firmware makes itself, such as the one a saved configuration brings, and what they say at the next
 watchdog reset; whether a press still waits behind a stalled fetch on weak WiFi; the lists'
 scrolling, the A–Z grid and the rows' buttons under a finger; Play, Shuffle, Add and Clear on a
@@ -1349,3 +1370,11 @@ panel restart after it, and that, switched off, motion neither wakes the screen 
 Home's tiles and their pictures, how much of a title Regular 32 leaves readable, whether the motion
 setting's icon reads as the setting without a label, the sheet under a finger, and free internal
 RAM with Home's pictures held.
+
+What only a display shows of the bounce buffers (section 3) is still to see there: that the
+firmware starts with them, since a panel set-up the driver refuses fails
+`ESP_ERROR_CHECK(board.begin())` in `app_main`, before WiFi, where no update can reach the display; whether the picture stays put on a few power-on
+starts, through a sitting of use and on a few wakes; that a view that changes and a list that
+scrolls show no stale or torn area with the swap of section 2; that a long list still scrolls and
+a press on a row still answers as before, with the refill on the UI task's core; and free internal
+RAM with the largest list open, against the 60 KB target, with their 32,000 bytes taken.

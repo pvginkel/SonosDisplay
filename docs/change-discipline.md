@@ -31,7 +31,9 @@ which leaves out what the fonts do not draw, so no title shows LVGL's placeholde
 ## The structure's rules
 
 - **One UI task.** Only it touches LVGL, the model, I2C and NVS. Every other task hands it a
-  closure through `get_queue().enqueue(...)`. No LVGL lock is added.
+  closure through `get_queue().enqueue(...)`. No LVGL lock is added. It alone presents and
+  restarts the panel, whose waits hold only on the core of the panel's interrupts; a
+  `static_assert` in `Application.cpp` keeps the UI task on that core.
 - **`main/ui/` includes LVGL and the C++ standard library only.** Its doors to the rest are
   `Model.h` and `UiHost.h`. `kc project test` fails on anything else, and that is what lets `sim/`
   render the screens.
