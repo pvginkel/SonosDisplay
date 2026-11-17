@@ -6807,6 +6807,116 @@ static const char* check_artists_favourite_page(const SimHost& host, const Shell
     return check_presses({}, {artists[PAGE_SIZE - 2].first});
 }
 
+// Albums of Sigur Rós enough for two pages, the second short, each named for its place in the list
+// from 1.
+static std::vector<AlbumFixture> make_many_albums() {
+    std::vector<AlbumFixture> albums;
+    for (size_t i = 0; i < PAGE_SIZE + PAGE_SIZE / 2; i++) {
+        char title[32];
+        snprintf(title, sizeof(title), "Album %03zu", i + 1);
+        albums.push_back({title, 2000});
+    }
+
+    return albums;
+}
+
+// Playlists enough for two pages, the second short, each named for its place in the list from 1.
+static std::vector<std::string> make_many_playlists() {
+    std::vector<std::string> titles;
+    for (size_t i = 0; i < PAGE_SIZE + PAGE_SIZE / 2; i++) {
+        char title[32];
+        snprintf(title, sizeof(title), "Playlist %03zu", i + 1);
+        titles.emplace_back(title);
+    }
+
+    return titles;
+}
+
+// What the backend answers a mark of the many albums' and the many playlists' hundredth.
+static const char FAVOURITE_HUNDREDTH_ALBUM[] =
+    R"({"artwork_id":null,"available":true,"created_at":"2026-11-17T09:30:12.123456+00:00","id":46,)"
+    R"("item_id":"album-100","kind":"album","subtitle":"Sigur Rós","title":"Album 100"})";
+static const char FAVOURITE_HUNDREDTH_PLAYLIST[] =
+    R"({"artwork_id":null,"available":true,"created_at":"2026-11-17T09:30:12.123456+00:00","id":47,)"
+    R"("item_id":"playlist-100","kind":"playlist","subtitle":null,"title":"Playlist 100"})";
+
+// The same on the albums: the list is built again with both pages, the first page's last album
+// shows marked still, and the one before it its change on its way.
+static void albums_favourite_page(SimHost& host, Shell& shell) {
+    const auto titles = get_titles(make_many_albums());
+    const auto pages = make_pages(make_many_albums(), make_albums_body);
+    host.albums().serve(200, {pages[0]});
+    open_home(host, shell, PLAYING);
+    shell.push(std::make_unique<AlbumsView>(
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+    scroll_list(shell, true);
+    expect(host.albums().get_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
+
+    tap_favourite_toggle(host, shell, titles[PAGE_SIZE - 1].c_str());
+    tap_favourite_toggle(host, shell, titles[PAGE_SIZE - 2].c_str());
+    host.answer_after(ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_HUNDREDTH_ALBUM); });
+    host.answer_after(after_touches_ms(2), [&host, page = pages[1]]() { host.albums().answer(200, page.c_str()); });
+}
+
+static const char* check_albums_favourite_page(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+
+    const auto titles = get_titles(make_many_albums());
+    if (const auto problem = check_titles(titles, 0, titles.size())) {
+        return problem;
+    }
+
+    const auto& favouring = host.get_model().favouring;
+    if (favouring.changes_taken != 1 || favouring.sending.size() != 1 || favouring.changes_not_taken) {
+        return "the mark was not taken alone, with the unmark on its way";
+    }
+    if (const auto problem = check_marks(with(get_marked(titles), {titles[PAGE_SIZE - 1]}))) {
+        return problem;
+    }
+
+    return check_presses({}, {titles[PAGE_SIZE - 2]});
+}
+
+// The same on the playlists.
+static void playlists_favourite_page(SimHost& host, Shell& shell) {
+    const auto titles = make_many_playlists();
+    const auto pages = make_pages(titles, make_playlists_body);
+    host.playlists().serve(200, {pages[0]});
+    open_playlists(host, shell);
+    scroll_list(shell, true);
+    expect(host.playlists().get_requests() == std::vector<uint32_t>{1, 2}, "the second page was not asked for");
+
+    tap_favourite_toggle(host, shell, titles[PAGE_SIZE - 1].c_str());
+    tap_favourite_toggle(host, shell, titles[PAGE_SIZE - 2].c_str());
+    host.answer_after(ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_HUNDREDTH_PLAYLIST); });
+    host.answer_after(after_touches_ms(2), [&host, page = pages[1]]() { host.playlists().answer(200, page.c_str()); });
+}
+
+static const char* check_playlists_favourite_page(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<PlaylistsView>(shell, 2)) {
+        return problem;
+    }
+
+    const auto titles = make_many_playlists();
+    if (const auto problem = check_titles(titles, 0, titles.size())) {
+        return problem;
+    }
+
+    const auto& favouring = host.get_model().favouring;
+    if (favouring.changes_taken != 1 || favouring.sending.size() != 1 || favouring.changes_not_taken) {
+        return "the mark was not taken alone, with the unmark on its way";
+    }
+    if (const auto problem = check_marks(with(get_marked(titles), {titles[PAGE_SIZE - 1]}))) {
+        return problem;
+    }
+
+    return check_presses({}, {titles[PAGE_SIZE - 2]});
+}
+
 // Sigur Rós's albums, opened twice, the second over the first.
 static void open_albums_twice(SimHost& host, Shell& shell) {
     open_albums_screen(host, shell);
@@ -9664,6 +9774,9 @@ const std::vector<Scene>& get_scenes() {
         {"albums-favourite-copies", albums_favourite_copies, check_albums_favourite_copies, after_touches_ms(1)},
         {"artists-favourite-back", artists_favourite_back, check_artists_favourite_back, after_touches_ms(6)},
         {"artists-favourite-page", artists_favourite_page, check_artists_favourite_page, after_touches_ms(2) + 300},
+        {"albums-favourite-page", albums_favourite_page, check_albums_favourite_page, after_touches_ms(2) + 300},
+        {"playlists-favourite-page", playlists_favourite_page, check_playlists_favourite_page,
+         after_touches_ms(2) + 300},
         {"albums-favourite-under", albums_favourite_under, check_albums_favourite_under, after_touches_ms(2)},
         {"albums-favourite-missed", albums_favourite_missed, check_albums_favourite_missed,
          after_touches_ms(MISSED_CHANGES + 1)},
