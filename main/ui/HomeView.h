@@ -12,13 +12,14 @@
 // A press on an available tile opens its sheet over the view: the favourite's title after a way
 // back, and under it the presses its item's row in the library has (ItemPresses), and, for an
 // artist or an album, the way to its albums or its tracks, which closes the sheet. A press beside
-// the sheet closes it too. Its toggle shows the favourite the tile was built from, and then what
-// the backend took of the presses on it; the tile of a favourite unmarked stays until the
-// favourites come again.
+// the sheet closes it too. Its toggle shows the favourite that marks the item: the tile's, until the
+// backend takes a mark or an unmark of the item from this display; the tile of a favourite unmarked
+// stays until the favourites come again.
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -35,7 +36,14 @@ class HomeView : public ListView {
         std::unique_ptr<Cover> cover;
     };
 
-    PagedList<Favourite> _favourites;
+    // A favourite held, and the favourite that marks its item now: its own as it came, then what
+    // the backend took of the marks and unmarks of the item since (FavouriteChange::apply()).
+    struct Held {
+        Favourite favourite;
+        std::optional<int64_t> favourite_id;
+    };
+
+    PagedList<Held> _favourites;
     // The tiles built, in the order of the favourites they were built from.
     std::vector<Tile> _tiles;
     // The model's revision when the tiles last looked.
@@ -77,7 +85,7 @@ protected:
 private:
     void show_pictures();
     void build_sheet(lv_obj_t* parent);
-    void open_sheet(const Favourite& favourite);
+    void open_sheet(const Favourite& favourite, std::optional<int64_t> favourite_id);
     static void library_clicked(lv_event_t* event);
     static void scroll_ended(lv_event_t* event);
     static void sheet_closed(lv_event_t* event);

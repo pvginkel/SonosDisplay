@@ -9257,6 +9257,67 @@ static const char* check_home_tile_mark_again(const SimHost& host, const Shell& 
     return check_sheet_presses({}, true);
 }
 
+// Unmarked from her sheet, which is closed before the backend says the favourites changed, Björk's
+// tile, still on Home, opens her sheet again.
+static void home_tile_unmark_reopened(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_sheet_toggle(host);
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(204, ""); });
+    tap_sheet_back(host);
+    tap_tile(host, shell, "Björk");
+}
+
+// The sheet opened again shows Björk unmarked, as the backend took it, not as her tile was fetched.
+static const char* check_home_tile_unmark_reopened(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Björk", MSG_ALBUMS, false)) {
+        return problem;
+    }
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 503}}, {""})) {
+        return problem;
+    }
+
+    return check_sheet_presses({}, false);
+}
+
+// Unmarked and marked again from her sheet, which is closed before the backend says the favourites
+// changed, Björk is unmarked from her sheet opened again.
+static void home_tile_mark_again_reopened(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_sheet_toggle(host);
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(204, ""); });
+    tap_sheet_toggle(host);
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_BJORK_AGAIN); });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_sheet_back(host);
+    tap_tile(host, shell, "Björk");
+    tap_sheet_toggle(host);
+}
+
+// The third press unmarks the favourite the backend marked her with anew, not the tile's.
+static const char* check_home_tile_mark_again_reopened(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Björk", MSG_ALBUMS, true)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 503},
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3"},
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 509},
+                                     },
+                                     {"", R"({"kind":"artist","item_id":"artist-3"})", ""})) {
+        return problem;
+    }
+
+    return check_sheet_presses({}, true);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -9333,6 +9394,9 @@ const std::vector<Scene>& get_scenes() {
         {"home-tile-unmark", home_tile_unmark, check_home_tile_unmark},
         {"home-tile-unmark-closed", home_tile_unmark_closed, check_home_tile_unmark_closed, after_touches_ms(2)},
         {"home-tile-mark-again", home_tile_mark_again, check_home_tile_mark_again, after_touches_ms(4)},
+        {"home-tile-unmark-reopened", home_tile_unmark_reopened, check_home_tile_unmark_reopened, after_touches_ms(3)},
+        {"home-tile-mark-again-reopened", home_tile_mark_again_reopened, check_home_tile_mark_again_reopened,
+         after_touches_ms(6)},
         {"now-playing", now_playing, check_now_playing},
         {"now-playing-glyphs", now_playing_glyphs, check_now_playing},
         {"now-playing-paused", now_playing_paused},

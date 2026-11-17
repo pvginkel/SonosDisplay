@@ -48,7 +48,16 @@ void HomeView::request_page(uint32_t page) {
     _favourites.ask(page);
 
     _host->request_favourites(page, get_scope(), [this](Page<Favourite> answered) {
-        _favourites.answered(std::move(answered));
+        Page<Held> held{.state = answered.state,
+                        .error = std::move(answered.error),
+                        .number = answered.number,
+                        .total = answered.total};
+        for (auto& favourite : answered.items) {
+            const auto favourite_id = favourite.id;
+            held.items.push_back(Held{.favourite = std::move(favourite), .favourite_id = favourite_id});
+        }
+
+        _favourites.answered(std::move(held));
         list_changed();
     });
 }
@@ -92,7 +101,7 @@ void HomeView::do_render_heading(lv_obj_t* heading) {
 
 // The picture over the title, which is cut where the tile ends.
 void HomeView::build_row(lv_obj_t* row, size_t index) {
-    const auto& favourite = _favourites.items[index];
+    const auto& favourite = _favourites.items[index].favourite;
 
     auto cover = std::make_unique<Cover>(_host, TILE_SIZE);
     cover->create(row, Theme::FONT_ICON_LARGE);
@@ -113,10 +122,17 @@ void HomeView::build_row(lv_obj_t* row, size_t index) {
     }
 }
 
-void HomeView::open_row(size_t index) { open_sheet(_favourites.items[index]); }
+void HomeView::open_row(size_t index) {
+    const auto& held = _favourites.items[index];
+
+    open_sheet(held.favourite, held.favourite_id);
+}
 
 // The tiles stay as they are: the backend's event of the change has the favourites asked for again.
 void HomeView::apply_favourite(const FavouriteChange& change) {
+    for (auto& held : _favourites.items) {
+        held.favourite_id = change.apply(held.favourite.kind, held.favourite.item_id, held.favourite_id);
+    }
     if (_sheet_presses) {
         _sheet_presses->apply(change);
     }
@@ -215,7 +231,7 @@ void HomeView::build_sheet(lv_obj_t* parent) {
 
 // The presses end the row, where a library row has them. What the sheet held before goes first,
 // its buttons before the presses they call on.
-void HomeView::open_sheet(const Favourite& favourite) {
+void HomeView::open_sheet(const Favourite& favourite, std::optional<int64_t> favourite_id) {
     lv_obj_clean(_sheet_actions);
 
     _sheet_favourite = favourite;
@@ -231,7 +247,7 @@ void HomeView::open_sheet(const Favourite& favourite) {
     }
 
     _sheet_presses =
-        std::make_unique<ItemPresses>(_host, _sheet_actions, favourite.kind, favourite.item_id, favourite.id);
+        std::make_unique<ItemPresses>(_host, _sheet_actions, favourite.kind, favourite.item_id, favourite_id);
     _sheet_presses->show_on_its_way();
 
     lv_obj_remove_flag(_sheet, LV_OBJ_FLAG_HIDDEN);
