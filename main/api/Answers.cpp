@@ -735,6 +735,89 @@ const char* read_playlists(int status, const char* body, size_t length, Page<Pla
     return read_page(status, body, length, page, read_playlist);
 }
 
+static bool read_favourite_kind(const char* name, ItemKind& kind) {
+    if (!strcmp(name, "artist")) {
+        kind = ItemKind::Artist;
+    } else if (!strcmp(name, "album")) {
+        kind = ItemKind::Album;
+    } else if (!strcmp(name, "playlist")) {
+        kind = ItemKind::Playlist;
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
+// A key of a favourite's that is a string or null, and present either way. Returns the string, or
+// nullptr for null and for a key that is neither, which `present` tells apart.
+static const char* get_string_or_null(const cJSON* item, const char* name, bool& present) {
+    const auto value = cJSON_GetObjectItemCaseSensitive(item, name);
+    present = cJSON_IsString(value) || cJSON_IsNull(value);
+
+    return cJSON_IsString(value) ? value->valuestring : nullptr;
+}
+
+// A favourite's `subtitle` and `created_at` are not shown, so they are not read. Its `item_id` and
+// `artwork_id` are null while it is not available, and are read only while it is: an available
+// one names its item. The ids are opaque, and go back to the backend as they came: they are never
+// cut.
+static const char* read_favourite(const cJSON* item, Favourite& favourite) {
+    if (!cJSON_IsObject(item)) {
+        return "a favourite is not an object";
+    }
+
+    Favourite read;
+    if (!read_favourite_number(cJSON_GetObjectItemCaseSensitive(item, "id"), read.id)) {
+        return "a favourite's id is not a whole number";
+    }
+
+    const auto kind = get_string(item, "kind");
+    if (!kind || !read_favourite_kind(kind, read.kind)) {
+        return "a favourite's kind is not artist, album or playlist";
+    }
+
+    const auto title = get_string(item, "title");
+    if (!title) {
+        return "a favourite has no title";
+    }
+
+    const auto available = cJSON_GetObjectItemCaseSensitive(item, "available");
+    if (!cJSON_IsBool(available)) {
+        return "a favourite's available is not a boolean";
+    }
+
+    bool present;
+    const auto item_id = get_string_or_null(item, "item_id", present);
+    if (!present) {
+        return "a favourite's item_id is neither a string nor null";
+    }
+
+    const auto artwork_id = get_string_or_null(item, "artwork_id", present);
+    if (!present) {
+        return "a favourite's artwork_id is neither a string nor null";
+    }
+
+    read.title = read_text(title);
+    read.available = cJSON_IsTrue(available);
+    if (read.available) {
+        if (!item_id || !*item_id) {
+            return "an available favourite has no item_id";
+        }
+
+        read.item_id = item_id;
+        read.artwork_id = artwork_id ? artwork_id : "";
+    }
+
+    favourite = std::move(read);
+
+    return nullptr;
+}
+
+const char* read_favourites(int status, const char* body, size_t length, Page<Favourite>& page) {
+    return read_page(status, body, length, page, read_favourite);
+}
+
 // An entry's `position` is its place in the page, and its `album`, `duration_ms`, `artwork_id` and
 // `track_id` are not shown, so they are not read.
 static const char* read_queue_entry(const cJSON* item, QueueEntry& entry) {

@@ -189,6 +189,7 @@ private:
     ListFixture<Album> _albums{"albums", read_albums};
     ListFixture<AlbumTrack> _tracks{"tracks", read_tracks};
     ListFixture<Playlist> _playlists{"playlists", read_playlists};
+    ListFixture<Favourite> _favourites{"favourites", read_favourites};
     ListFixture<QueueEntry, QueuePage> _queue{"queue", read_queue};
     std::optional<uint32_t> _queue_current_page;
     std::vector<bool> _queue_locates;
@@ -220,6 +221,8 @@ public:
                         std::function<void(Page<AlbumTrack>)> done) override;
     void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                            std::function<void(Page<Playlist>)> done) override;
+    void request_favourites(uint32_t number, std::weak_ptr<void> scope,
+                            std::function<void(Page<Favourite>)> done) override;
     void request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
                        std::function<void(QueuePage)> done) override;
     void clear_queue() override;
@@ -365,6 +368,10 @@ public:
     const ListFixture<AlbumTrack>& tracks() const { return _tracks; }
     ListFixture<Playlist>& playlists() { return _playlists; }
     const ListFixture<Playlist>& playlists() const { return _playlists; }
+
+    // The favourites.
+    ListFixture<Favourite>& favourites() { return _favourites; }
+    const ListFixture<Favourite>& favourites() const { return _favourites; }
 
     // The queue of the chosen speaker's group, a request for which is recorded with the page it
     // was answered with: at the loaded track, the one set_queue_current_page() names.

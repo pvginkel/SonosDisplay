@@ -1,12 +1,13 @@
 #pragma once
 
-// A screen of a list the backend gives in pages: a heading with a way back, and under it a row
-// for every item held. A subclass holds the pages (PagedList), asks the host for one, builds an
-// item's row, which it may give the queue's buttons and the favourite toggle, applies to its items
-// the changes of a favourite the backend took, and opens an item whose row it made openable;
-// it may end the heading with its own, and say a line under it. A list whose items carry a
-// favourite asks for them again whenever the favourites may have changed unseen. While the Shell's
-// "Reconnecting" marker shows at the top right, the heading ends before it.
+// A screen of a list the backend gives in pages: a heading with a way back, unless the screen is
+// the root, and under it a row, or a tile, for every item held. A subclass holds the pages
+// (PagedList), asks the host for one, builds an item's row, which it may give the queue's buttons
+// and the favourite toggle, applies to its items the changes of a favourite the backend took, and
+// opens an item whose row it made openable; it may end the heading with its own, and say a line
+// under it. A list whose items carry a favourite, or are the favourites, asks for them again
+// whenever the favourites may have changed unseen. While the Shell's "Reconnecting" marker shows
+// at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -82,8 +83,16 @@ protected:
     // calls list_changed().
     virtual void request_page(uint32_t page) = 0;
 
-    // Builds the row of the item held at `index` in `row`, a flex row the list made.
+    // Builds the row of the item held at `index` in `row`, a flex row the list made, or, where the
+    // list shows tiles, its tile, a flex column get_tile_width() wide and as tall as what it holds.
     virtual void build_row(lv_obj_t* row, size_t index) = 0;
+
+    // The width of an item's tile, where the list shows its items as tiles, side by side and a line
+    // of them under another; 0, where it shows them as rows, one under another.
+    virtual int32_t get_tile_width() const { return 0; }
+
+    // Whether the heading starts with a way back: not on the screen at the root.
+    virtual bool has_back() const { return true; }
 
     // Opens the item held at `index`, on a press on its row, which build_row() made openable.
     virtual void open_row(size_t index) {}
@@ -108,8 +117,8 @@ protected:
                               std::optional<int64_t> favourite_id);
 
     // Whether the subclass's items carry the favourite that marks each, as artists, albums and
-    // playlists do. The list then applies to them the changes of a favourite the backend took, and
-    // asks for them again whenever the favourites may have changed unseen
+    // playlists do, or are the favourites. The list then applies to them the changes of a favourite
+    // the backend took, and asks for them again whenever the favourites may have changed unseen
     // (Model::favourites_changes): a mark or an unmark made on any display.
     virtual bool has_favourites() const { return false; }
 
@@ -120,9 +129,11 @@ protected:
     // items again instead.
     virtual void apply_favourite(const FavouriteChange& change) {}
 
-    // What the screen says while the first page is on its way, and when the list is empty.
+    // What the screen says while the first page is on its way, and when the list is empty, and the
+    // icon over the latter.
     virtual const char* get_loading_message() const = 0;
     virtual const char* get_empty_message() const = 0;
+    virtual const char* get_empty_icon() const;
 
     // Builds what the subclass shows at the heading's end, after its title, in `heading`, a flex
     // row. Called once, before the list is first built.
@@ -131,6 +142,10 @@ protected:
     // Builds what the subclass shows beside the list, in `body`, the row the list's `area` is in,
     // or over it, in `area`. Called once, before the list is first built.
     virtual void do_render_beside(lv_obj_t* body, lv_obj_t* area) {}
+
+    // Called each time before the list is built, while what build_row() built before is still
+    // there: what the subclass holds of it goes here.
+    virtual void do_clear_list() {}
 
     // Called each time the list was built again, rows or not.
     virtual void do_list_built() {}

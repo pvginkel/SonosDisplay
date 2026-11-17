@@ -746,6 +746,12 @@ void Application::request_playlists(uint32_t number, std::weak_ptr<void> scope,
     request_page(*_api_client, "/api/library/playlists", number, std::move(scope), std::move(done), read_playlists);
 }
 
+void Application::request_favourites(uint32_t number, std::weak_ptr<void> scope,
+                                     std::function<void(Page<Favourite>)> done) {
+    request_page(*_api_client, "/api/favourites?sort_by=title", number, std::move(scope), std::move(done),
+                 read_favourites);
+}
+
 void Application::request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
                                 std::function<void(QueuePage)> done) {
     request_page(*_api_client, speaker_path(_model.speaker_id, locate ? "/queue?locate=current" : "/queue"), number,

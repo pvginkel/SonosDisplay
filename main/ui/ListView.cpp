@@ -24,6 +24,8 @@ static constexpr int32_t BUTTON_HEIGHT = 72;
 static constexpr int32_t BUTTON_PADDING = 40;
 static constexpr int32_t SPINNER_SIZE = 56;
 static constexpr int32_t SPINNER_ARC_WIDTH = 6;
+static constexpr int32_t TILE_GAP = 24;
+static constexpr int32_t TILE_TITLE_GAP = 8;
 // The queue's buttons at a row's end, as far from its end as from its top and bottom.
 static constexpr int32_t QUEUE_BUTTON_GAP = 8;
 static constexpr int32_t QUEUE_BUTTONS_END = (ListView::ROW_HEIGHT - PressButton::SIZE) / 2;
@@ -52,20 +54,22 @@ void ListView::do_render(lv_obj_t* parent) {
     lv_obj_set_flex_align(_heading, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     fit_heading();
 
-    auto back = lv_container_create(_heading);
-    lv_obj_set_size(back, BACK_SIZE, BACK_SIZE);
-    lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(back, Theme::color(Theme::SURFACE), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(back, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
-    lv_obj_set_style_bg_opa(back, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(back, Theme::RADIUS, LV_PART_MAIN);
-    lv_obj_add_event_cb(back, back_clicked, LV_EVENT_CLICKED, this);
+    if (has_back()) {
+        auto back = lv_container_create(_heading);
+        lv_obj_set_size(back, BACK_SIZE, BACK_SIZE);
+        lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_style_bg_color(back, Theme::color(Theme::SURFACE), LV_PART_MAIN);
+        lv_obj_set_style_bg_color(back, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+        lv_obj_set_style_bg_opa(back, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_radius(back, Theme::RADIUS, LV_PART_MAIN);
+        lv_obj_add_event_cb(back, back_clicked, LV_EVENT_CLICKED, this);
 
-    auto back_icon = lv_label_create(back);
-    lv_label_set_text(back_icon, ICON_ARROW_LEFT);
-    lv_obj_set_style_text_font(back_icon, Theme::FONT_ICON, LV_PART_MAIN);
-    lv_obj_set_style_text_color(back_icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
-    lv_obj_center(back_icon);
+        auto back_icon = lv_label_create(back);
+        lv_label_set_text(back_icon, ICON_ARROW_LEFT);
+        lv_obj_set_style_text_font(back_icon, Theme::FONT_ICON, LV_PART_MAIN);
+        lv_obj_set_style_text_color(back_icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+        lv_obj_center(back_icon);
+    }
 
     auto title = lv_label_create(_heading);
     lv_obj_set_flex_grow(title, 1);
@@ -192,6 +196,7 @@ void ListView::build() {
         pages.drop(came_first == far_shown);
     }
 
+    do_clear_list();
     lv_obj_clean(_content);
     _list = nullptr;
     _row_count = 0;
@@ -213,7 +218,7 @@ void ListView::build() {
                 break;
         }
     } else if (!pages.count()) {
-        build_notice(ICON_MUSIC, get_empty_message(), "", false);
+        build_notice(get_empty_icon(), get_empty_message(), "", false);
     } else {
         build_list();
         lv_obj_update_layout(_list);
@@ -321,13 +326,18 @@ void ListView::build_notice(const char* icon, const char* message, const std::st
     }
 }
 
+const char* ListView::get_empty_icon() const { return ICON_MUSIC; }
+
 void ListView::build_list() {
     const auto& pages = get_pages();
+    const auto tile_width = get_tile_width();
 
+    // A page's state past the tiles takes a line of its own: it is as wide as the list.
     _list = lv_container_create(_content);
     lv_obj_set_size(_list, LV_PCT(100), LV_PCT(100));
-    lv_obj_set_flex_flow(_list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(_list, ROW_GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(_list, tile_width ? LV_FLEX_FLOW_ROW_WRAP : LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_row(_list, tile_width ? TILE_GAP : ROW_GAP, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(_list, TILE_GAP, LV_PART_MAIN);
     lv_obj_set_style_pad_bottom(_list, Theme::GAP, LV_PART_MAIN);
     lv_obj_set_style_pad_right(_list, SCROLLBAR_ROOM, LV_PART_MAIN);
     // A press anywhere on the list scrolls it, a row's too: the rows take no press.
@@ -349,6 +359,16 @@ void ListView::build_list() {
     _row_count = pages.count();
 
     for (size_t i = 0; i < _row_count; i++) {
+        if (tile_width) {
+            auto tile = lv_container_create(_list);
+            lv_obj_set_size(tile, tile_width, LV_SIZE_CONTENT);
+            lv_obj_set_style_pad_row(tile, TILE_TITLE_GAP, LV_PART_MAIN);
+            lv_obj_set_flex_flow(tile, LV_FLEX_FLOW_COLUMN);
+
+            build_row(tile, i);
+            continue;
+        }
+
         auto row = lv_container_create(_list);
         lv_obj_set_size(row, LV_PCT(100), ROW_HEIGHT);
         lv_obj_set_style_bg_color(row, Theme::color(Theme::SURFACE), LV_PART_MAIN);

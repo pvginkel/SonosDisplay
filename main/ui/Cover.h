@@ -1,8 +1,8 @@
 #pragma once
 
-// A track's cover in a square tile: the picture, or a drawn placeholder while there is none to
-// show. The picture is asked of the host at the tile's size, and held for exactly as long as the
-// tile draws it.
+// A picture in a square tile, a track's cover or a favourite's: the picture, or a drawn placeholder
+// while there is none to show. The picture is asked of the host at the tile's size, and held for
+// exactly as long as the tile draws it.
 
 #include <cstdint>
 #include <memory>
@@ -40,6 +40,10 @@ public:
     // no playback or the track has no picture, the placeholder shows. A picture the backend did
     // not give is asked for again at the next call.
     void apply(const Playback& playback);
+
+    // Shows the picture with this id, as apply(const Playback&) does; with an empty one, the
+    // placeholder.
+    void apply(const std::string& artwork_id);
 
     // Shows the placeholder and holds no picture. A picture still on its way is no longer waited
     // for.

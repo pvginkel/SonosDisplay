@@ -1,25 +1,61 @@
 #pragma once
 
-// The view the display opens on once a speaker is chosen, with the now-playing bar under it: a
-// heading that ends in the entry into the library. While the Shell's "Reconnecting" marker shows at
-// the top right, the heading ends before it.
+// The view the display opens on once a speaker is chosen, with the now-playing bar under it: the
+// favourites as tiles, by title, under a heading that ends in the entry into the library. A tile
+// shows its favourite's picture and title; one that is not available shows its title dimmed, and
+// no picture. A tile asks for its picture only while it shows in the list, and holds it only while
+// it draws it: the tiles look as the list is built, as a scroll of it ends, and at every change of
+// the model, which asks again for a picture the backend did not give. Home asks for the favourites
+// again whenever they may have changed unseen. While the Shell's "Reconnecting" marker shows at the
+// top right, the heading ends before it.
 
-#include "View.h"
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
-class Shell;
+#include "Cover.h"
+#include "ListView.h"
 
-class HomeView : public View {
-    Shell* _shell;
-    lv_obj_t* _heading{};
+class HomeView : public ListView {
+    // A tile built: its box, the picture its favourite had as it was built, and the cover that
+    // draws it.
+    struct Tile {
+        lv_obj_t* box;
+        std::string artwork_id;
+        std::unique_ptr<Cover> cover;
+    };
+
+    PagedList<Favourite> _favourites;
+    // The tiles built, in the order of the favourites they were built from.
+    std::vector<Tile> _tiles;
+    // The model's revision when the tiles last looked.
+    uint32_t _revision;
 
 public:
-    HomeView(UiHost* host, Shell* shell) : View(host), _shell(shell) {}
+    // The size of a tile's picture, and the tile's width.
+    static constexpr int32_t TILE_SIZE = 160;
+
+    HomeView(UiHost* host, Shell* shell);
 
 protected:
-    void do_render(lv_obj_t* parent) override;
     void do_update() override;
+    PageWindow& get_pages() override { return _favourites; }
+    void request_page(uint32_t page) override;
+    void build_row(lv_obj_t* row, size_t index) override;
+    int32_t get_tile_width() const override { return TILE_SIZE; }
+    bool has_back() const override { return false; }
+    bool has_favourites() const override { return true; }
+    const char* get_loading_message() const override;
+    const char* get_empty_message() const override;
+    const char* get_empty_icon() const override;
+    void do_render_heading(lv_obj_t* heading) override;
+    void do_clear_list() override;
+    void do_list_built() override;
 
 private:
-    void fit_heading();
+    void show_pictures();
     static void library_clicked(lv_event_t* event);
+    static void scroll_ended(lv_event_t* event);
 };

@@ -57,6 +57,8 @@ public:
                         std::function<void(Page<AlbumTrack>)> done) override;
     void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                            std::function<void(Page<Playlist>)> done) override;
+    void request_favourites(uint32_t number, std::weak_ptr<void> scope,
+                            std::function<void(Page<Favourite>)> done) override;
     void request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
                        std::function<void(QueuePage)> done) override;
     void clear_queue() override;

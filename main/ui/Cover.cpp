@@ -25,21 +25,25 @@ lv_obj_t* Cover::create(lv_obj_t* parent, const lv_font_t* placeholder_font) {
 
 void Cover::apply(const Playback& playback) {
     const auto shows_track = playback.state == LoadState::Loaded && playback.track;
-    const auto wanted = shows_track ? playback.track->artwork_id : std::string();
-    if (wanted == _id) {
+
+    apply(shows_track ? playback.track->artwork_id : std::string());
+}
+
+void Cover::apply(const std::string& artwork_id) {
+    if (artwork_id == _id) {
         return;
     }
 
     clear();
 
-    _id = wanted;
-    if (wanted.empty()) {
+    _id = artwork_id;
+    if (artwork_id.empty()) {
         return;
     }
 
     // The placeholder shows until the picture is there.
     _request = std::make_shared<int>(0);
-    _host->request_artwork(wanted, _size, _request, [this](Artwork artwork) { show(std::move(artwork)); });
+    _host->request_artwork(artwork_id, _size, _request, [this](Artwork artwork) { show(std::move(artwork)); });
 }
 
 void Cover::show(Artwork artwork) {

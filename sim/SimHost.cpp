@@ -410,6 +410,11 @@ void SimHost::request_playlists(uint32_t number, std::weak_ptr<void> scope, std:
     _playlists.request({}, number, std::move(scope), std::move(done));
 }
 
+void SimHost::request_favourites(uint32_t number, std::weak_ptr<void> scope,
+                                 std::function<void(Page<Favourite>)> done) {
+    _favourites.request({}, number, std::move(scope), std::move(done));
+}
+
 void SimHost::request_queue(uint32_t number, bool locate, std::weak_ptr<void> scope,
                             std::function<void(QueuePage)> done) {
     _queue_locates.push_back(locate);

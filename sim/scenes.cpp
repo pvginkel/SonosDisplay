@@ -7992,6 +7992,713 @@ static const char* check_queue_screen_reconnected_clear(const SimHost& host, con
     return says(MSG_QUEUE_EMPTY) && !says(MSG_CLEAR) ? nullptr : "the cleared queue is not said to be empty";
 }
 
+// A favourite of a fixture: the number its made-up ids are made from, its kind as the API names
+// it, its title, its subtitle, the name of an album's artist, whether Plex has it and, where it
+// does, whether its item has a picture.
+struct FavouriteFixture {
+    size_t number;
+    const char* kind;
+    std::string title;
+    const char* subtitle;
+    bool available;
+    bool has_picture;
+};
+
+// The favourites by title, as Home asks for them: two of each kind with their pictures, an album
+// Plex does not have, and an artist without a picture.
+static const std::vector<FavouriteFixture> FAVOURITES = {
+    {1, "album", "Ágætis byrjun", "Sigur Rós", true, true},
+    {2, "playlist", "Avondeten", nullptr, true, true},
+    {3, "artist", "Björk", nullptr, true, true},
+    {4, "album", "Dummy", "Portishead", false, false},
+    {5, "playlist", "Friday in the workshop", nullptr, true, true},
+    {6, "album", "Kveikur", "Sigur Rós", true, true},
+    {7, "artist", "Sigur Rós", nullptr, true, true},
+    {8, "artist", "Tinariwen", nullptr, true, false},
+};
+
+// The favourites as they are listed while Plex fails: every one of them not available.
+static std::vector<FavouriteFixture> make_unavailable(std::vector<FavouriteFixture> favourites) {
+    for (auto& favourite : favourites) {
+        favourite.available = false;
+        favourite.has_picture = false;
+    }
+
+    return favourites;
+}
+
+// Favourites enough to scroll and to page through, each named for its place among them from 1, of
+// the three kinds in turn, each with its picture.
+static std::vector<FavouriteFixture> make_many_favourites(size_t count) {
+    static const char* const KINDS[] = {"artist", "album", "playlist"};
+
+    std::vector<FavouriteFixture> favourites;
+    for (size_t i = 0; i < count; i++) {
+        char title[32];
+        snprintf(title, sizeof(title), "Favourite %03zu", i + 1);
+        favourites.push_back(FavouriteFixture{i + 1, KINDS[i % 3], title, nullptr, true, true});
+    }
+
+    return favourites;
+}
+
+// The id of the picture of the fixture's favourite with this number.
+static std::string get_favourite_artwork_id(size_t number) { return "ZmF2b3VyaXRlLw" + std::to_string(number); }
+
+// The answer to GET /api/favourites for page `number` of `favourites`, its data the `count`
+// favourites from `first`, with every key FavouriteSchema has: one that is not available has its
+// item_id and artwork_id, and an item without a picture its artwork_id, null. The ids are made up.
+static std::string make_favourites_body(const std::vector<FavouriteFixture>& favourites, size_t first, size_t count,
+                                        uint32_t number) {
+    const auto data = cJSON_CreateArray();
+    for (auto i = first; i < first + count; i++) {
+        const auto& fixture = favourites[i];
+        const auto favourite = cJSON_CreateObject();
+
+        if (fixture.available && fixture.has_picture) {
+            cJSON_AddStringToObject(favourite, "artwork_id", get_favourite_artwork_id(fixture.number).c_str());
+        } else {
+            cJSON_AddNullToObject(favourite, "artwork_id");
+        }
+        cJSON_AddBoolToObject(favourite, "available", fixture.available);
+        cJSON_AddStringToObject(favourite, "created_at", "2026-11-17T09:30:12.123456+00:00");
+        cJSON_AddNumberToObject(favourite, "id", double(500 + fixture.number));
+        if (fixture.available) {
+            const auto item_id = std::string(fixture.kind) + "-" + std::to_string(fixture.number);
+            cJSON_AddStringToObject(favourite, "item_id", item_id.c_str());
+        } else {
+            cJSON_AddNullToObject(favourite, "item_id");
+        }
+        cJSON_AddStringToObject(favourite, "kind", fixture.kind);
+        if (fixture.subtitle) {
+            cJSON_AddStringToObject(favourite, "subtitle", fixture.subtitle);
+        } else {
+            cJSON_AddNullToObject(favourite, "subtitle");
+        }
+        cJSON_AddStringToObject(favourite, "title", fixture.title.c_str());
+        cJSON_AddItemToArray(data, favourite);
+    }
+
+    return make_page_body(data, number, favourites.size(), "title", "asc");
+}
+
+static std::vector<std::string> make_favourite_pages(const std::vector<FavouriteFixture>& favourites) {
+    return make_pages(favourites, make_favourites_body);
+}
+
+// A favourite as the API's document allows it: one that is not available, its item_id and
+// artwork_id null, and one of an item without a picture, without the keys the display does not
+// show.
+static const char FAVOURITES_UNAVAILABLE[] =
+    R"({"data":[{"artwork_id":null,"available":false,"created_at":"2026-11-17T09:30:12.123456+00:00","id":7,)"
+    R"("item_id":null,"kind":"album","subtitle":"Portishead","title":"Dummy"}],)"
+    R"("meta":{"page":1,"per_page":100,"sort_by":"title","sort_dir":"asc","total":1,"total_pages":1}})";
+static const char FAVOURITES_WITHOUT_PICTURE[] =
+    R"({"data":[{"artwork_id":null,"available":true,"id":8,"item_id":"artist-8","kind":"artist",)"
+    R"("title":"Tinariwen"}],"meta":{"page":1,"per_page":100,"total":1}})";
+
+// Pages of favourites the API's document does not allow, by what is wrong with a favourite.
+static const char* const UNREADABLE_FAVOURITE_PAGES[] = {
+    R"({"data":["favourite-1"],"meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"item_id":"album-1","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":"7","item_id":"album-1","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7.5,"item_id":"album-1","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":"track-1","kind":"track","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":"album-1","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":"album-1","kind":"album"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":"album-1","kind":"album","title":null}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"id":7,"item_id":"album-1","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":"true","id":7,"item_id":"album-1","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":false,"id":7,"kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"available":false,"id":7,"item_id":null,"kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":7,"kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":7,"available":true,"id":7,"item_id":"album-1","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":null,"kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+    R"({"data":[{"artwork_id":null,"available":true,"id":7,"item_id":"","kind":"album","title":"Von"}],)"
+    R"("meta":{"page":1,"per_page":100,"total":1}})",
+};
+
+// A page of favourites is read as a page of artists is; a favourite is refused for a key it lacks
+// or one the document does not allow, and an available one for no item_id. One that is not
+// available is read with its title alone, and one of an item without a picture with none; neither
+// is refused for the keys the display does not show.
+static void expect_favourites_rules() {
+    Page<Favourite> page;
+    expect(!read_favourites(200, FAVOURITES_UNAVAILABLE, strlen(FAVOURITES_UNAVAILABLE), page) &&
+               page.items.size() == 1 &&
+               page.items[0] == Favourite{.id = 7, .kind = ItemKind::Album, .title = "Dummy", .available = false},
+           "a favourite that is not available was not read with its title");
+
+    page = {};
+    expect(
+        !read_favourites(200, FAVOURITES_WITHOUT_PICTURE, strlen(FAVOURITES_WITHOUT_PICTURE), page) &&
+            page.items.size() == 1 &&
+            page.items[0] ==
+                Favourite{
+                    .id = 8, .kind = ItemKind::Artist, .item_id = "artist-8", .title = "Tinariwen", .available = true},
+        "a favourite without a picture was not read, or not as one");
+
+    page = {};
+    const auto pages = make_favourite_pages(FAVOURITES);
+    expect(!read_favourites(200, pages[0].c_str(), pages[0].length(), page) && page.items.size() == FAVOURITES.size() &&
+               page.items[0] == Favourite{.id = 501,
+                                          .kind = ItemKind::Album,
+                                          .item_id = "album-1",
+                                          .title = "Ágætis byrjun",
+                                          .artwork_id = get_favourite_artwork_id(1),
+                                          .available = true} &&
+               page.items[1].kind == ItemKind::Playlist && page.items[2].kind == ItemKind::Artist,
+           "the favourites were not read as the deployed backend sends them");
+
+    expect_refused(
+        read_favourites, FAVOURITES_UNAVAILABLE,
+        std::vector<const char*>(std::begin(UNREADABLE_FAVOURITE_PAGES), std::end(UNREADABLE_FAVOURITE_PAGES)));
+}
+
+// Whether this object of a list is a tile of Home's: its picture's box, as wide as it, over its
+// title.
+static bool is_tile(const lv_obj_t* obj) {
+    if (!lv_obj_check_type(obj, &lv_obj_class) || lv_obj_get_child_count(obj) != 2) {
+        return false;
+    }
+
+    const auto picture = lv_obj_get_child(obj, 0);
+
+    return lv_obj_check_type(picture, &lv_obj_class) && lv_obj_get_width(picture) == lv_obj_get_width(obj) &&
+           lv_obj_check_type(lv_obj_get_child(obj, 1), &lv_label_class);
+}
+
+// The list of Home's tiles on screen: what scrolls, and holds tiles.
+static lv_obj_t* find_tiles(lv_obj_t* obj) {
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+        return nullptr;
+    }
+
+    const auto count = lv_obj_get_child_count(obj);
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_SCROLLABLE)) {
+        for (uint32_t i = 0; i < count && i < 2; i++) {
+            if (is_tile(lv_obj_get_child(obj, int32_t(i)))) {
+                return obj;
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (const auto found = find_tiles(lv_obj_get_child(obj, int32_t(i)))) {
+            return found;
+        }
+    }
+
+    return nullptr;
+}
+
+static lv_obj_t* find_tiles() {
+    lv_obj_update_layout(lv_screen_active());
+
+    return find_tiles(lv_screen_active());
+}
+
+// The tiles of the list, in order.
+static std::vector<lv_obj_t*> get_tiles(lv_obj_t* list) {
+    std::vector<lv_obj_t*> tiles;
+    for (uint32_t i = 0; i < lv_obj_get_child_count(list); i++) {
+        const auto child = lv_obj_get_child(list, int32_t(i));
+        if (is_tile(child)) {
+            tiles.push_back(child);
+        }
+    }
+
+    return tiles;
+}
+
+// Whether any of the tile is in the list's box.
+static bool is_in_view(lv_obj_t* list, lv_obj_t* tile) {
+    lv_area_t shown;
+    lv_area_t area;
+    lv_obj_get_coords(list, &shown);
+    lv_obj_get_coords(tile, &area);
+
+    return area.y2 >= shown.y1 && area.y1 <= shown.y2;
+}
+
+// Whether the tile draws a picture over its placeholder.
+static bool draws_picture(lv_obj_t* tile) {
+    const auto picture = lv_obj_get_child(tile, 0);
+
+    for (uint32_t i = 0; i < lv_obj_get_child_count(picture); i++) {
+        if (lv_obj_check_type(lv_obj_get_child(picture, int32_t(i)), &lv_image_class)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+// How many of the tiles are in view.
+static size_t count_tiles_in_view() {
+    const auto list = find_tiles();
+    if (!list) {
+        return 0;
+    }
+
+    const auto tiles = get_tiles(list);
+
+    return size_t(std::count_if(tiles.begin(), tiles.end(), [list](lv_obj_t* tile) { return is_in_view(list, tile); }));
+}
+
+// How many pictures of favourites were fetched.
+static size_t count_tile_fetches(const SimHost& host) {
+    const auto& fetches = host.get_artwork_fetches();
+
+    return size_t(std::count_if(fetches.begin(), fetches.end(),
+                                [](const ArtworkFetch& fetch) { return fetch.size == HomeView::TILE_SIZE; }));
+}
+
+// Home's tiles are those of `favourites` from `first`, `count` of them, in order: each its title,
+// dimmed where its favourite is not available, under its picture's box at the size the record
+// gives the tiles. A tile in view draws its favourite's picture where it has one; no other draws
+// one, and no picture of the favourites `served`, those Home was answered with, is held but those
+// drawn. No picture was fetched for a favourite without one, nor at a size Home and the bar do not
+// draw.
+static const char* check_tiles(const SimHost& host, const std::vector<FavouriteFixture>& favourites, size_t first,
+                               size_t count, const std::vector<FavouriteFixture>& served) {
+    const auto list = find_tiles();
+    if (!list) {
+        return "Home does not show the favourites as tiles";
+    }
+
+    const auto tiles = get_tiles(list);
+    if (tiles.size() != count) {
+        return "Home does not have a tile for every favourite held";
+    }
+
+    size_t drawn = 0;
+    for (size_t i = 0; i < count; i++) {
+        const auto& favourite = favourites[first + i];
+        const auto title = lv_obj_get_child(tiles[i], 1);
+
+        if (!shows_title(lv_label_get_text(title), favourite.title)) {
+            return "the tiles are not the favourites, in the backend's order";
+        }
+
+        const auto dimmed =
+            lv_color_eq(lv_obj_get_style_text_color(title, LV_PART_MAIN), Theme::color(Theme::TEXT_UNAVAILABLE));
+        if (dimmed == favourite.available) {
+            return "a tile's title is dimmed while its favourite is available, or not while it is not";
+        }
+
+        const auto picture = lv_obj_get_child(tiles[i], 0);
+        if (lv_obj_get_width(picture) != HomeView::TILE_SIZE || lv_obj_get_height(picture) != HomeView::TILE_SIZE) {
+            return "a tile's picture is not at the size the record gives the tiles";
+        }
+
+        const auto wanted = favourite.available && favourite.has_picture && is_in_view(list, tiles[i]);
+        if (draws_picture(tiles[i]) != wanted) {
+            return "a tile in view does not draw its favourite's picture, or one out of view or without one draws one";
+        }
+        drawn += wanted;
+        if (favourite.has_picture &&
+            host.is_artwork_shown(get_favourite_artwork_id(favourite.number), HomeView::TILE_SIZE) != wanted) {
+            return "a picture is held by a tile that does not draw it, or not by the one that does";
+        }
+    }
+
+    size_t held = 0;
+    for (const auto& favourite : served) {
+        held += host.is_artwork_shown(get_favourite_artwork_id(favourite.number), HomeView::TILE_SIZE);
+    }
+    if (held != drawn) {
+        return "a picture is held that no tile draws";
+    }
+
+    for (const auto& fetch : host.get_artwork_fetches()) {
+        if (fetch.size == BAR_COVER_SIZE || fetch.size == COVER_SIZE) {
+            continue;
+        }
+        if (fetch.size != HomeView::TILE_SIZE) {
+            return "a picture was fetched at a size neither Home nor the bar draws";
+        }
+
+        const auto found = std::find_if(served.begin(), served.end(), [&fetch](const FavouriteFixture& f) {
+            return f.available && f.has_picture && fetch.artwork_id == get_favourite_artwork_id(f.number);
+        });
+        if (found == served.end()) {
+            return "a picture was fetched for a favourite that has none";
+        }
+    }
+
+    return nullptr;
+}
+
+static const char* check_tiles(const SimHost& host, const std::vector<FavouriteFixture>& favourites, size_t first,
+                               size_t count) {
+    return check_tiles(host, favourites, first, count, favourites);
+}
+
+// Home, with the bar under it, shows `favourites` as tiles, asked for once.
+static const char* check_home_favourites(const SimHost& host, const Shell& shell,
+                                         const std::vector<FavouriteFixture>& favourites) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (host.favourites().get_requests() != std::vector<uint32_t>{1}) {
+        return "Home did not ask for the favourites once";
+    }
+
+    return check_tiles(host, favourites, 0, favourites.size());
+}
+
+// Home with favourites of each kind, by title: an album Plex does not have shows its title dimmed,
+// with no picture, and an artist without a picture its placeholder. The second line shows in part:
+// its tiles ask for their pictures too.
+static void home_tiles(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_tiles(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home_favourites(host, shell, FAVOURITES)) {
+        return problem;
+    }
+    if (!says(MSG_FAVOURITES) || !find_button_of(MSG_LIBRARY)) {
+        return "Home's heading is not its title and the entry into the library";
+    }
+    if (count_tiles_in_view() != FAVOURITES.size()) {
+        return "the second line of tiles is not in view";
+    }
+
+    // Ágætis byrjun, Avondeten, Björk, Friday in the workshop, Kveikur and Sigur Rós.
+    return count_tile_fetches(host) == 6 ? nullptr : "a picture was fetched more than once, or not at all";
+}
+
+// While Plex fails every favourite is listed, none of them available: the page is read, and each
+// shows its title, dimmed, with no picture, and none is asked for.
+static void home_tiles_unavailable(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(make_unavailable(FAVOURITES)));
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_tiles_unavailable(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home_favourites(host, shell, make_unavailable(FAVOURITES))) {
+        return problem;
+    }
+
+    return count_tile_fetches(host) ? "a picture was asked for a favourite that is not available" : nullptr;
+}
+
+// The backend does not give the tiles' pictures: their placeholders stay. Nothing plays, so the bar
+// asks for no cover.
+static void home_tiles_picture_refused(SimHost& host, Shell& shell) {
+    host.answer_artwork_with(404, {});
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+
+    open_home(host, shell, NOTHING_LOADED);
+}
+
+static const char* check_home_tiles_picture_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    const auto list = find_tiles();
+    if (!list) {
+        return "Home does not show the favourites as tiles";
+    }
+    for (const auto tile : get_tiles(list)) {
+        if (draws_picture(tile)) {
+            return "a tile draws a picture the backend did not give";
+        }
+    }
+
+    return count_tile_fetches(host) >= 6 ? nullptr : "a tile in view did not ask for its picture";
+}
+
+// A picture the backend did not give is asked for again at the next change of the model, and the
+// tiles then draw them.
+static void home_tiles_picture_again(SimHost& host, Shell& shell) {
+    home_tiles_picture_refused(host, shell);
+    shell.update();
+    expect(!check_home_tiles_picture_refused(host, shell), "the tiles draw pictures the backend did not give");
+
+    host.answer_artwork_as_made();
+    host.answer_playback(200, NOTHING_LOADED);
+}
+
+static const char* check_home_tiles_picture_again(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return check_tiles(host, FAVOURITES, 0, FAVOURITES.size());
+}
+
+// While the favourites are on their way, Home says so.
+static void home_favourites_loading(SimHost& host, Shell& shell) { open_home(host, shell, PLAYING); }
+
+static const char* check_home_favourites_loading(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return says(MSG_FAVOURITES_LOADING) && count_spinners(lv_screen_active()) == 1
+               ? nullptr
+               : "Home does not say that the favourites are on their way";
+}
+
+static void home_favourites_unreachable(SimHost& host, Shell& shell) {
+    host.favourites().serve(SimHost::UNREACHABLE, {""});
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_favourites_unreachable(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return check_says_unreachable();
+}
+
+static void home_favourites_error(SimHost& host, Shell& shell) {
+    host.favourites().serve(502, {ERROR_PLEX});
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_favourites_error(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return check_says_failed();
+}
+
+// An answer the document does not allow is refused whole, and said as an error.
+static void home_favourites_unreadable(SimHost& host, Shell& shell) {
+    expect_favourites_rules();
+
+    host.favourites().serve(200, {UNREADABLE_FAVOURITE_PAGES[0]});
+
+    open_home(host, shell, PLAYING);
+}
+
+// Try again asks for the favourites again, and they show.
+static void home_favourites_retry(SimHost& host, Shell& shell) {
+    home_favourites_unreachable(host, shell);
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+
+    tap_label(host, shell, MSG_TRY_AGAIN);
+}
+
+static const char* check_home_favourites_retry(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (host.favourites().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "Try again did not ask for the favourites again";
+    }
+
+    return check_tiles(host, FAVOURITES, 0, FAVOURITES.size());
+}
+
+// With no favourites, Home says how one is added, under the toggle's look while it marks nothing.
+static void home_favourites_empty(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages({}));
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_favourites_empty(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return says(MSG_FAVOURITES_EMPTY) && says(ICON_HEART_OUTLINE) ? nullptr
+                                                                  : "Home does not say how a favourite is added";
+}
+
+// The favourites without Kveikur: unmarked elsewhere.
+static std::vector<FavouriteFixture> make_without_kveikur() {
+    auto favourites = FAVOURITES;
+    std::erase_if(favourites, [](const FavouriteFixture& favourite) { return favourite.title == "Kveikur"; });
+
+    return favourites;
+}
+
+// The event stream says that the favourites changed: Home asks for them again, and shows them as
+// the backend now has them.
+static void home_favourites_changed(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+    open_home(host, shell, PLAYING);
+    shell.update();
+
+    host.favourites().serve(200, make_favourite_pages(make_without_kveikur()));
+    host.send_favourites_changed();
+}
+
+static const char* check_home_favourites_asked_again(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (host.favourites().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "Home did not ask for the favourites again, once";
+    }
+
+    return check_tiles(host, make_without_kveikur(), 0, FAVOURITES.size() - 1, FAVOURITES);
+}
+
+// The event stream is back after it was away, and the events sent meanwhile are gone: Home asks for
+// the favourites again.
+static void home_favourites_reconnected(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+    open_home(host, shell, PLAYING);
+    shell.update();
+
+    host.lose_stream();
+    shell.update();
+    host.favourites().serve(200, make_favourite_pages(make_without_kveikur()));
+    host.connect_stream();
+}
+
+// The count of the favourites' changes moved before Home opened, as the first connection moves it
+// on a display: Home asks for the favourites once.
+static void home_favourites_after_connect(SimHost& host, Shell& shell) {
+    host.connect_stream();
+    host.send_favourites_changed();
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_favourites_after_connect(const SimHost& host, const Shell& shell) {
+    return check_home_favourites(host, shell, FAVOURITES);
+}
+
+// The favourites change while the library is over Home: Home asks for them again once it shows
+// again, and not before.
+static void home_favourites_changed_hidden(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+    open_home(host, shell, PLAYING);
+    shell.open_library();
+    shell.update();
+
+    host.favourites().serve(200, make_favourite_pages(make_without_kveikur()));
+    host.send_favourites_changed();
+    shell.update();
+    expect(host.favourites().get_requests().size() == 1, "Home asked for the favourites while it was hidden");
+
+    shell.back();
+}
+
+// Favourites enough for four lines of tiles.
+static constexpr size_t FOUR_LINES_OF_FAVOURITES = 16;
+
+// At rest only the tiles in view, the first two lines, ask for their pictures. A drag scrolls the
+// first line out of view: once the scroll ends, the tiles that came into view ask for theirs, and
+// those that left it let go of theirs.
+static void home_tiles_scrolled(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(make_many_favourites(FOUR_LINES_OF_FAVOURITES)));
+    open_home(host, shell, PLAYING);
+    shell.update();
+    expect(count_tile_fetches(host) == 8, "the tiles out of view asked for their pictures");
+
+    // From the bottom of the list, over the second line's tiles, which the bar hides the rest of.
+    lv_area_t area;
+    lv_obj_get_coords(find_tiles(), &area);
+    const lv_point_t from{area.x1 + HomeView::TILE_SIZE / 2, area.y2 - 20};
+
+    host.drag(from, lv_point_t{from.x, from.y - 240});
+}
+
+static const char* check_home_tiles_scrolled(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    const auto list = find_tiles();
+    if (!list || is_in_view(list, get_tiles(list)[0])) {
+        return "the drag did not scroll the first line out of view";
+    }
+
+    return check_tiles(host, make_many_favourites(FOUR_LINES_OF_FAVOURITES), 0, FOUR_LINES_OF_FAVOURITES);
+}
+
+// More favourites than a page holds: scrolled to within a screen of the end of the first page, Home
+// asks for the second, and builds tiles for both.
+static constexpr size_t TWO_PAGES_OF_FAVOURITES = 150;
+
+static void home_tiles_pages(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(make_many_favourites(TWO_PAGES_OF_FAVOURITES)));
+    open_home(host, shell, PLAYING);
+    shell.update();
+    expect(get_tiles(find_tiles()).size() == PAGE_SIZE, "Home did not build a tile for each of the first page");
+
+    lv_obj_scroll_to_y(find_tiles(), LV_COORD_MAX, LV_ANIM_OFF);
+}
+
+static const char* check_home_tiles_pages(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (host.favourites().get_requests() != std::vector<uint32_t>{1, 2}) {
+        return "Home did not ask for the second page at the end of the first";
+    }
+
+    return check_tiles(host, make_many_favourites(TWO_PAGES_OF_FAVOURITES), 0, TWO_PAGES_OF_FAVOURITES);
+}
+
+// The artwork client's queue (main/backend/HttpClient.h, QUEUE_DEPTH), which sim/ does not build.
+static constexpr size_t ARTWORK_QUEUE_DEPTH = 16;
+
+// The most tiles in view at once: scrolled to where three lines show, the first by its last pixels.
+// With now playing opened over Home its cover is held beside every one of their pictures, and they
+// and the two covers are asked for in fewer requests than the artwork client's queue holds.
+static void home_tiles_most(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(make_many_favourites(FOUR_LINES_OF_FAVOURITES)));
+    open_home(host, shell, PLAYING);
+    shell.update();
+
+    const auto list = find_tiles();
+    lv_obj_scroll_to_y(list, lv_obj_get_height(get_tiles(list)[0]) - 4, LV_ANIM_OFF);
+    expect(count_tiles_in_view() == 12, "three lines of tiles are not in view");
+    expect(count_tile_fetches(host) == 12, "the tiles in view did not each ask for their picture once");
+
+    show_now_playing(shell);
+}
+
+static const char* check_home_tiles_most(const SimHost& host, const Shell& shell) {
+    if (!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE)) {
+        return "the now-playing screen's cover does not fit beside the tiles' pictures";
+    }
+
+    size_t held = 0;
+    for (const auto& favourite : make_many_favourites(FOUR_LINES_OF_FAVOURITES)) {
+        held += host.is_artwork_shown(get_favourite_artwork_id(favourite.number), HomeView::TILE_SIZE);
+    }
+    if (held != 12) {
+        return "the tiles in view under the now-playing screen do not hold their pictures";
+    }
+
+    return held + 2 <= ARTWORK_QUEUE_DEPTH ? nullptr
+                                           : "the tiles in view and the covers pass the artwork client's queue";
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -8035,6 +8742,23 @@ const std::vector<Scene>& get_scenes() {
         {"home-now-playing", home_now_playing, check_bar_opened<2>},
         {"home-now-playing-back", home_now_playing_back, check_home_now_playing_back, after_touches_ms(2)},
         {"home-reconnecting", home_reconnecting, check_home_reconnecting},
+        {"home-tiles", home_tiles, check_home_tiles},
+        {"home-tiles-unavailable", home_tiles_unavailable, check_home_tiles_unavailable},
+        {"home-tiles-picture-refused", home_tiles_picture_refused, check_home_tiles_picture_refused},
+        {"home-tiles-picture-again", home_tiles_picture_again, check_home_tiles_picture_again},
+        {"home-tiles-scrolled", home_tiles_scrolled, check_home_tiles_scrolled, after_touches_ms(1) + 1000},
+        {"home-tiles-pages", home_tiles_pages, check_home_tiles_pages},
+        {"home-tiles-most", home_tiles_most, check_home_tiles_most},
+        {"home-favourites-loading", home_favourites_loading, check_home_favourites_loading},
+        {"home-favourites-unreachable", home_favourites_unreachable, check_home_favourites_unreachable},
+        {"home-favourites-error", home_favourites_error, check_home_favourites_error},
+        {"home-favourites-unreadable", home_favourites_unreadable, check_home_favourites_error},
+        {"home-favourites-retry", home_favourites_retry, check_home_favourites_retry, after_touches_ms(1)},
+        {"home-favourites-empty", home_favourites_empty, check_home_favourites_empty},
+        {"home-favourites-changed", home_favourites_changed, check_home_favourites_asked_again},
+        {"home-favourites-reconnected", home_favourites_reconnected, check_home_favourites_asked_again},
+        {"home-favourites-after-connect", home_favourites_after_connect, check_home_favourites_after_connect},
+        {"home-favourites-changed-hidden", home_favourites_changed_hidden, check_home_favourites_asked_again},
         {"now-playing", now_playing, check_now_playing},
         {"now-playing-glyphs", now_playing_glyphs, check_now_playing},
         {"now-playing-paused", now_playing_paused},

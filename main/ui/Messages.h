@@ -29,6 +29,10 @@
 
 #define MSG_LIBRARY "Library"
 
+#define MSG_FAVOURITES "Favourites"
+#define MSG_FAVOURITES_LOADING "Looking up the favourites"
+#define MSG_FAVOURITES_EMPTY "No favourites yet. Mark an artist, an album or a playlist with its heart in the library"
+
 #define MSG_ARTISTS "Artists"
 #define MSG_ARTISTS_LOADING "Looking up the artists"
 #define MSG_ARTISTS_EMPTY "The library has no artists"

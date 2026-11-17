@@ -911,6 +911,32 @@ struct FavouriteChange {
     bool operator==(const FavouriteChange&) const = default;
 };
 
+// A favourite: the household's mark on an artist, an album or a playlist of the library, the same
+// for every display.
+struct Favourite {
+    // The favourite's id, which unmarks it.
+    int64_t id{};
+
+    // An artist, an album or a playlist.
+    ItemKind kind{};
+
+    // The item's id as the API gives it; empty while the favourite is not available.
+    std::string item_id;
+
+    // The artist's name, or the album's or the playlist's title.
+    std::string title;
+
+    // The id of the item's picture, as the API gives it; empty for an item without one, and while
+    // the favourite is not available.
+    std::string artwork_id;
+
+    // Whether the item can be opened and played now: Plex has it, and answers. A favourite that is
+    // not available keeps its title.
+    bool available{};
+
+    bool operator==(const Favourite&) const = default;
+};
+
 // The items the display asked the backend to mark or unmark as a favourite, and how that went. A
 // change is on its way until its answer, or until ANSWER_TIME_LIMIT_MS after it was sent; an
 // answer to a change that is no longer on its way changes nothing: the host reads one only while

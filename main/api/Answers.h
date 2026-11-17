@@ -70,6 +70,10 @@ const char* read_queue(int status, const char* body, size_t length, QueuePage& p
 // said went wrong, where it said so.
 const char* read_queue_answer(int status, const char* body, size_t length, std::string& task_id, std::string& error);
 
+// Reads the answer to GET /api/favourites, asked for with `per_page` PAGE_SIZE, as read_artists()
+// reads the artists. A favourite that is not available comes with its title, and is read as one.
+const char* read_favourites(int status, const char* body, size_t length, Page<Favourite>& page);
+
 // Reads the answer to POST /api/favourites, which is a 201 with the new favourite, or a 200 with
 // the favourite that marked the item already, into `favourite_id`: the favourite's id. `error` is
 // what the backend said went wrong, where it said so.

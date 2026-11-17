@@ -87,6 +87,10 @@ public:
     virtual void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                                    std::function<void(Page<Playlist>)> done) = 0;
 
+    // Asks, as request_artists() does, for a page of the favourites, by title.
+    virtual void request_favourites(uint32_t number, std::weak_ptr<void> scope,
+                                    std::function<void(Page<Favourite>)> done) = 0;
+
     // Asks, as request_artists() does, for page `number` of the queue of the chosen speaker's group,
     // or, `locate`, for the page that holds the track that is loaded, and page `number` while none
     // is. A view asks only while a speaker is chosen.
