@@ -104,8 +104,8 @@ QueueRequest ItemPresses::get_line_request() const {
         .kind = ItemKind::Album, .item_id = _album_id, .action = QueueAction::Play, .start_track_id = _item_id};
 }
 
-// As a PressButton shows it: a spinner turns before the buttons, where a track's Play was, and a
-// press on the line does not look pressed. The line's own colour is the surface ListView gives a row.
+// As a PressButton shows it: a spinner turns before the buttons, and a press on the line does not
+// look pressed. The line's own colour is the surface ListView gives a row.
 void ItemPresses::show_line_on_its_way(bool on_its_way) {
     if (on_its_way == (_line_spinner != nullptr)) {
         return;

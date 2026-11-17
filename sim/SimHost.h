@@ -528,7 +528,8 @@ public:
         _artwork.set_screen_lit(lit);
     }
 
-    // How many requests for artwork wait for the screen to wake.
+    // How many downloads of artwork have not started: waiting for the screen, or for the one under
+    // way.
     size_t count_artwork_waiting() const { return _artwork.count_waiting(); }
 
     // The artwork fetched from the backend, in order: what the cache had is not in it.
