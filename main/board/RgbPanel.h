@@ -10,17 +10,21 @@
 #include "lvgl.h"
 
 // The esp_lcd RGB panel with two framebuffers in PSRAM, and the LVGL display that draws straight
-// into them.
+// into them. The DMA reads two bounce buffers in internal RAM, which the panel's interrupts refill
+// from the current framebuffer.
 class RgbPanel {
     esp_lcd_panel_handle_t _panel{};
     SemaphoreHandle_t _vsync{};
-    // esp_timer's clock at the last vblank, in microseconds, truncated: only differences are used.
-    std::atomic<uint32_t> _last_vsync_us{};
+    SemaphoreHandle_t _taken{};
     std::atomic<bool> _stopped{};
     std::atomic<bool> _presenting{};
     lv_display_t* _display{};
 
 public:
+    // The core of the panel's interrupts, the refill's among them: the UI task's, which presents
+    // and restarts. Not core 0, WiFi's and the backend's.
+    static constexpr BaseType_t INTERRUPT_CORE = 1;
+
     RgbPanel() = default;
     RgbPanel(const RgbPanel&) = delete;
     RgbPanel& operator=(const RgbPanel&) = delete;
@@ -40,9 +44,11 @@ public:
     lv_display_t* get_display() const { return _display; }
 
 private:
-    void wait_vsync();
+    esp_err_t install();
     void present(uint8_t* framebuffer);
     static bool on_vsync(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* event_data,
                          void* user_ctx);
+    static bool on_framebuffer_taken(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* event_data,
+                                     void* user_ctx);
     static void flush(lv_display_t* display, const lv_area_t* area, uint8_t* px_map);
 };

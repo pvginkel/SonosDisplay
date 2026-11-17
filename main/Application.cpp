@@ -8,6 +8,7 @@
 
 #include "api/Answers.h"
 #include "api/Requests.h"
+#include "board/RgbPanel.h"
 #include "board/RunMark.h"
 #include "esp_heap_caps.h"
 #include "nvs.h"
@@ -21,6 +22,10 @@ LOG_TAG(Application);
 static constexpr uint32_t UI_TASK_STACK_SIZE = 16384;
 static constexpr UBaseType_t UI_TASK_PRIORITY = 2;
 static constexpr BaseType_t UI_TASK_CORE = 1;
+
+// The UI task presents and restarts the panel, whose waits for its interrupts hold only on their
+// core.
+static_assert(UI_TASK_CORE == RgbPanel::INTERRUPT_CORE);
 
 static constexpr uint32_t BACKEND_TASK_STACK_SIZE = 6144;
 static constexpr UBaseType_t BACKEND_TASK_PRIORITY = 1;

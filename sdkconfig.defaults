@@ -21,11 +21,18 @@ CONFIG_SPIRAM_USE_MALLOC=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 
-# CPU and scheduler. CONFIG_LCD_RGB_RESTART_IN_VSYNC stays off: on the S3 its restart always
-# scans out the first framebuffer, so with two the panel never shows the second (section 3).
+# CPU and scheduler
 
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_FREERTOS_HZ=1000
+
+# RGB panel: the DMA reads two bounce buffers in internal RAM, which the panel's interrupts refill
+# from the framebuffers in PSRAM through the data cache, in 64-byte lines. The interrupts run while
+# flash is written (section 3). CONFIG_LCD_RGB_RESTART_IN_VSYNC stays off: the driver restarts a
+# frame that came up short by itself, and a restart late in a vblank shifts that frame.
+
+CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
 # LVGL: its defaults, with these changes only
 

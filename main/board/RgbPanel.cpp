@@ -9,12 +9,40 @@
 
 LOG_TAG(RgbPanel);
 
+static constexpr uint32_t INSTALL_TASK_STACK_SIZE = 4096;
+
 esp_err_t RgbPanel::begin() {
-    ESP_LOGI(TAG, "Installing the RGB panel driver");
+    ESP_LOGI(TAG, "Installing the RGB panel driver on core %d", int(INTERRUPT_CORE));
 
     _vsync = xSemaphoreCreateBinary();
     ESP_RETURN_ON_FALSE(_vsync, ESP_ERR_NO_MEM, TAG, "Cannot create the vsync semaphore");
 
+    _taken = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(_taken, ESP_ERR_NO_MEM, TAG, "Cannot create the framebuffer semaphore");
+
+    // The driver allocates the panel's interrupts on the core that installs it.
+    struct Job {
+        RgbPanel* panel;
+        TaskHandle_t waiter;
+        esp_err_t result;
+    } job{this, xTaskGetCurrentTaskHandle(), ESP_FAIL};
+
+    const auto created = xTaskCreatePinnedToCore(
+        [](void* arg) {
+            auto job = (Job*)arg;
+            job->result = job->panel->install();
+            xTaskNotifyGive(job->waiter);
+            vTaskDelete(nullptr);
+        },
+        "lcd_install", INSTALL_TASK_STACK_SIZE, &job, uxTaskPriorityGet(nullptr), nullptr, INTERRUPT_CORE);
+    ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, TAG, "Cannot start the panel's install task");
+
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    return job.result;
+}
+
+esp_err_t RgbPanel::install() {
     esp_lcd_rgb_panel_config_t config{};
 
     config.clk_src = LCD_CLK_SRC_DEFAULT;
@@ -31,7 +59,7 @@ esp_err_t RgbPanel::begin() {
     config.data_width = LCD_DATA_WIDTH;
     config.bits_per_pixel = LCD_BITS_PER_PIXEL;
     config.num_fbs = LCD_FRAME_BUFFERS;
-    config.bounce_buffer_size_px = 0;
+    config.bounce_buffer_size_px = LCD_BOUNCE_BUFFER_PX;
     config.dma_burst_size = LCD_DMA_BURST_SIZE;
     config.hsync_gpio_num = LCD_GPIO_HSYNC;
     config.vsync_gpio_num = LCD_GPIO_VSYNC;
@@ -47,7 +75,10 @@ esp_err_t RgbPanel::begin() {
 
     esp_lcd_rgb_panel_event_callbacks_t callbacks{};
     callbacks.on_vsync = on_vsync;
+    callbacks.on_frame_buf_complete = on_framebuffer_taken;
 
+    // With CONFIG_LCD_RGB_ISR_IRAM_SAFE the driver refuses callbacks outside IRAM and a context
+    // outside internal RAM: this panel is a member of Board, a static in app_main.
     ESP_ERROR_RETURN(esp_lcd_rgb_panel_register_event_callbacks(_panel, &callbacks, this));
     ESP_ERROR_RETURN(esp_lcd_panel_reset(_panel));
     ESP_ERROR_RETURN(esp_lcd_panel_init(_panel));
@@ -75,14 +106,14 @@ esp_err_t RgbPanel::begin_lvgl() {
 }
 
 void RgbPanel::restart() {
-    // The driver restarts on the next vblank, and on the S3 always from fb0: its restart link is
-    // mounted there whatever buffer is current, and the transfer follows the current buffer
-    // only from the frame after. That frame from fb0 may be stale, or being drawn into, so this
-    // returns once it is past. The caller lights the backlight after it.
-    xSemaphoreTake(_vsync, 0);
+    // The driver restarts the transfer at the next vblank, on the framebuffer the refill took
+    // last: the current one, since a present returns only once the refill took it. The sign is
+    // cleared after the request, so a vblank between the two, which already restarted, costs a
+    // frame. The vblank's interrupt gives the sign before it restarts, and runs on this task's
+    // core, so the restart is done when the wait returns.
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_lcd_rgb_panel_restart(_panel));
-    wait_vsync();
-    wait_vsync();
+    xSemaphoreTake(_vsync, 0);
+    xSemaphoreTake(_vsync, pdMS_TO_TICKS(LCD_FRAME_TIMEOUT_MS));
 }
 
 bool RgbPanel::stop() {
@@ -102,8 +133,6 @@ bool RgbPanel::stop() {
     return true;
 }
 
-void RgbPanel::wait_vsync() { xSemaphoreTake(_vsync, pdMS_TO_TICKS(LCD_VSYNC_TIMEOUT_MS)); }
-
 void RgbPanel::present(uint8_t* framebuffer) {
     _presenting.store(true);
     if (_stopped.load()) {
@@ -111,32 +140,32 @@ void RgbPanel::present(uint8_t* framebuffer) {
         return;
     }
 
-    // Late in a frame the DMA has already read the link to the next one, so a swap made then
-    // would show the old buffer once more while LVGL draws into it. The swap waits for the
-    // next frame to start instead.
-    if (uint32_t(esp_timer_get_time()) - _last_vsync_us.load() > LCD_SWAP_DEADLINE_US) {
-        xSemaphoreTake(_vsync, 0);
-        wait_vsync();
-    }
-
-    // framebuffer is one of the panel's own, so the driver writes the cache back and points the
-    // end of every frame at it, rather than copying.
+    // framebuffer is one of the panel's own, so the driver only makes it the current one. The
+    // refill takes the current buffer as it begins copying a frame, and until then may copy from
+    // the old one, which LVGL draws into next. The refill's interrupt runs on this task's core:
+    // a sign it gives after the clear comes from a frame begun after the swap, and one begun
+    // between the swap and the clear costs a frame.
     esp_lcd_panel_draw_bitmap(_panel, 0, 0, LCD_H_RES, LCD_V_RES, framebuffer);
-
-    // The next vblank comes after the DMA moved to the new buffer: from then on LVGL may draw
-    // into the old one.
-    xSemaphoreTake(_vsync, 0);
-    wait_vsync();
+    xSemaphoreTake(_taken, 0);
+    xSemaphoreTake(_taken, pdMS_TO_TICKS(LCD_FRAME_TIMEOUT_MS));
 
     _presenting.store(false);
 }
 
-bool IRAM_ATTR RgbPanel::on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*, void* user_ctx) {
-    auto self = (RgbPanel*)user_ctx;
-    BaseType_t higher_priority_task_woken = pdFALSE;
+// Called from the panel's interrupts, which run while flash is written: in IRAM, and calling
+// nothing outside it.
 
-    self->_last_vsync_us.store(uint32_t(esp_timer_get_time()));
-    xSemaphoreGiveFromISR(self->_vsync, &higher_priority_task_woken);
+bool IRAM_ATTR RgbPanel::on_vsync(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*, void* user_ctx) {
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(((RgbPanel*)user_ctx)->_vsync, &higher_priority_task_woken);
+
+    return higher_priority_task_woken == pdTRUE;
+}
+
+bool IRAM_ATTR RgbPanel::on_framebuffer_taken(esp_lcd_panel_handle_t, const esp_lcd_rgb_panel_event_data_t*,
+                                              void* user_ctx) {
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    xSemaphoreGiveFromISR(((RgbPanel*)user_ctx)->_taken, &higher_priority_task_woken);
 
     return higher_priority_task_woken == pdTRUE;
 }

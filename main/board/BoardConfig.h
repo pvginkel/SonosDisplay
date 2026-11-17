@@ -30,6 +30,12 @@ constexpr size_t LCD_BITS_PER_PIXEL = 16;
 constexpr size_t LCD_FRAME_BUFFERS = 2;
 constexpr size_t LCD_DMA_BURST_SIZE = 64;
 
+// The DMA reads the picture from two bounce buffers of ten lines in internal RAM, 16,000 bytes
+// each, which the panel's interrupts refill from the current framebuffer. The driver refuses a
+// framebuffer that is not a whole number of them.
+constexpr size_t LCD_BOUNCE_BUFFER_PX = 10 * LCD_H_RES;
+static_assert(LCD_H_RES * LCD_V_RES % LCD_BOUNCE_BUFFER_PX == 0);
+
 constexpr gpio_num_t LCD_GPIO_HSYNC = GPIO_NUM_46;
 constexpr gpio_num_t LCD_GPIO_VSYNC = GPIO_NUM_3;
 constexpr gpio_num_t LCD_GPIO_DE = GPIO_NUM_5;
@@ -42,17 +48,13 @@ constexpr gpio_num_t LCD_GPIO_DATA[LCD_DATA_WIDTH] = {
     GPIO_NUM_48, GPIO_NUM_47, GPIO_NUM_21, GPIO_NUM_1,  GPIO_NUM_2,  GPIO_NUM_42, GPIO_NUM_41, GPIO_NUM_40,
 };
 
-// How long a flush waits for one vblank. A frame is 840 x 510 clocks, 30.6 ms at 14 MHz.
-constexpr uint32_t LCD_VSYNC_TIMEOUT_MS = 100;
+// How long a wait for a vblank, or for the refill to take a framebuffer, lasts at most. Each comes
+// once a frame, and a frame is 840 x 510 clocks, 30.6 ms at 14 MHz.
+constexpr uint32_t LCD_FRAME_TIMEOUT_MS = 100;
 
-// How long the stop before a restart waits for a present another task is in: its two vblank
-// waits and the cache writeback.
-constexpr uint32_t LCD_STOP_TIMEOUT_MS = 2 * LCD_VSYNC_TIMEOUT_MS + 50;
-
-// How far into a frame, counted from its vblank, a swap of framebuffers still takes effect at
-// the end of that frame. The DMA reads the link to the next buffer a few lines before the frame
-// ends, about 29 ms in; the rest is margin for the cache writeback and for preemption.
-constexpr uint32_t LCD_SWAP_DEADLINE_US = 20 * 1000;
+// How long the stop before a restart waits for a present another task is in: the swap, and its
+// one wait for the refill to take the framebuffer.
+constexpr uint32_t LCD_STOP_TIMEOUT_MS = LCD_FRAME_TIMEOUT_MS + 50;
 
 // I2C bus, shared by the expander and the touch controller.
 
