@@ -320,7 +320,10 @@ void HomeView::item_clicked(lv_event_t* event) {
                                                 .title = favourite.title,
                                                 .favourite_id = self->_sheet_presses->get_favourite_id()}));
     } else {
-        self->_shell->push(std::make_unique<TracksView>(self->_host, self->_shell,
-                                                        Album{.id = favourite.item_id, .title = favourite.title}));
+        self->_shell->push(
+            std::make_unique<TracksView>(self->_host, self->_shell,
+                                         Album{.id = favourite.item_id,
+                                               .title = favourite.title,
+                                               .favourite_id = self->_sheet_presses->get_favourite_id()}));
     }
 }

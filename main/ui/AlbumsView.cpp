@@ -36,10 +36,10 @@ void AlbumsView::build_row(lv_obj_t* row, size_t index) {
         lv_label_set_text(year, std::to_string(*album.year).c_str());
     }
 
-    create_queue_buttons(row, ItemKind::Album, album.id, album.favourite_id);
     make_openable(row);
 }
 
+// The albums' favourites are what their tracks screens open with.
 void AlbumsView::apply_favourite(const FavouriteChange& change) {
     for (auto& album : _albums.items) {
         album.favourite_id = change.apply(ItemKind::Album, album.id, album.favourite_id);

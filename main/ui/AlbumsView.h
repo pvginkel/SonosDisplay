@@ -1,8 +1,8 @@
 #pragma once
 
 // An artist's albums, newest first, as playing the artist queues them, each with the year it was
-// released where it has one. A press on an album opens its tracks, and its buttons play it, shuffle
-// it or add it to the queue, and mark it as a favourite or unmark it. The heading, the artist's
+// released where it has one. An album's row is its title and its year, and a press on it opens its
+// tracks, whose heading ends in the album's presses (TracksView). The heading, the artist's
 // name, ends in the artist's presses (ItemPresses): Play and Add to queue, which queue its albums
 // newest first, Shuffle, and the favourite toggle, which shows the favourite that marks the artist
 // as the screen was opened with it, then as the backend takes a mark or an unmark, and as the

@@ -11,12 +11,11 @@
 // the Shell's "Reconnecting" marker shows at the top right, the heading ends before it.
 //
 // A press on an available tile opens its sheet over the view: the favourite's title after a way
-// back, and under it the presses its item's row in the library has (ItemPresses), and, for an
-// artist or an album, the way to its albums or its tracks, which closes the sheet. A press beside
-// the sheet closes it too. Its toggle shows the favourite that marks the item: the tile's, until the
-// backend takes a mark or an unmark of the item from this display; the tile of a favourite unmarked
-// stays until the favourites come again. An artist's albums open with the favourite the toggle
-// shows.
+// back, and under it the item's presses (ItemPresses), and, for an artist or an album, the way to
+// its albums or its tracks, which closes the sheet. A press beside the sheet closes it too. Its
+// toggle shows the favourite that marks the item: the tile's, until the backend takes a mark or an
+// unmark of the item from this display; the tile of a favourite unmarked stays until the favourites
+// come again. An artist's albums and an album's tracks open with the favourite the toggle shows.
 
 #include <cstddef>
 #include <cstdint>
