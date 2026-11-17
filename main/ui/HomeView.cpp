@@ -1,24 +1,41 @@
 #include "HomeView.h"
 
+#include <memory>
 #include <utility>
 
+#include "AlbumsView.h"
 #include "Messages.h"
 #include "Shell.h"
 #include "Theme.h"
+#include "TracksView.h"
 #include "lv_support.h"
 
-// The entry into the library is as tall as the heading.
+// The entries, into the library and from a sheet into an item's albums or tracks, and the sheet's
+// way back are as tall as the heading.
 static constexpr int32_t ENTRY_HEIGHT = 64;
 static constexpr int32_t ENTRY_PADDING = 24;
 static constexpr int32_t ENTRY_GAP = 12;
+static constexpr int32_t SHEET_WIDTH = 600;
+static constexpr int32_t SHEET_PADDING = 24;
+static constexpr lv_opa_t SHEET_BACKDROP_OPA = LV_OPA_80;
 static constexpr lv_style_selector_t PRESSED =
     lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
 HomeView::HomeView(UiHost* host, Shell* shell)
     : ListView(host, shell, MSG_FAVOURITES), _revision(host->get_model().revision) {}
 
+void HomeView::do_render(lv_obj_t* parent) {
+    ListView::do_render(parent);
+
+    build_sheet(parent);
+}
+
 void HomeView::do_update() {
     ListView::do_update();
+
+    if (!lv_obj_has_flag(_sheet, LV_OBJ_FLAG_HIDDEN)) {
+        _sheet_presses->show_on_its_way();
+    }
 
     const auto revision = _host->get_model().revision;
     if (revision != _revision) {
@@ -43,28 +60,34 @@ const char* HomeView::get_empty_message() const { return MSG_FAVOURITES_EMPTY; }
 // The toggle's look while it marks nothing, which the message names.
 const char* HomeView::get_empty_icon() const { return ICON_HEART_OUTLINE; }
 
+// A button of an icon and a label on `background`, a Theme colour.
+static void create_entry(lv_obj_t* parent, const char* icon, const char* text, uint32_t background,
+                         lv_event_cb_t clicked, void* user_data) {
+    auto entry = lv_container_create(parent);
+    lv_obj_set_height(entry, ENTRY_HEIGHT);
+    lv_obj_set_style_pad_hor(entry, ENTRY_PADDING, LV_PART_MAIN);
+    lv_obj_set_style_pad_column(entry, ENTRY_GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(entry, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(entry, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_add_flag(entry, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(entry, Theme::color(background), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(entry, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_set_style_bg_opa(entry, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(entry, Theme::RADIUS, LV_PART_MAIN);
+    lv_obj_add_event_cb(entry, clicked, LV_EVENT_CLICKED, user_data);
+
+    auto icon_label = lv_label_create(entry);
+    lv_label_set_text(icon_label, icon);
+    lv_obj_set_style_text_font(icon_label, Theme::FONT_ICON, LV_PART_MAIN);
+    lv_obj_set_style_text_color(icon_label, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+
+    auto label = lv_label_create(entry);
+    lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, Theme::FONT_TITLE, LV_PART_MAIN);
+}
+
 void HomeView::do_render_heading(lv_obj_t* heading) {
-    auto library = lv_container_create(heading);
-    lv_obj_set_height(library, ENTRY_HEIGHT);
-    lv_obj_set_style_pad_hor(library, ENTRY_PADDING, LV_PART_MAIN);
-    lv_obj_set_style_pad_column(library, ENTRY_GAP, LV_PART_MAIN);
-    lv_obj_set_flex_flow(library, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(library, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_add_flag(library, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_style_bg_color(library, Theme::color(Theme::SURFACE), LV_PART_MAIN);
-    lv_obj_set_style_bg_color(library, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
-    lv_obj_set_style_bg_opa(library, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(library, Theme::RADIUS, LV_PART_MAIN);
-    lv_obj_add_event_cb(library, library_clicked, LV_EVENT_CLICKED, this);
-
-    auto library_icon = lv_label_create(library);
-    lv_label_set_text(library_icon, ICON_MUSIC_BOX_MULTIPLE);
-    lv_obj_set_style_text_font(library_icon, Theme::FONT_ICON, LV_PART_MAIN);
-    lv_obj_set_style_text_color(library_icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
-
-    auto library_label = lv_label_create(library);
-    lv_label_set_text(library_label, MSG_LIBRARY);
-    lv_obj_set_style_text_font(library_label, Theme::FONT_TITLE, LV_PART_MAIN);
+    create_entry(heading, ICON_MUSIC_BOX_MULTIPLE, MSG_LIBRARY, Theme::SURFACE, library_clicked, this);
 }
 
 // The picture over the title, which is cut where the tile ends.
@@ -84,6 +107,19 @@ void HomeView::build_row(lv_obj_t* row, size_t index) {
     lv_label_set_text(title, favourite.title.c_str());
 
     _tiles.push_back(Tile{.box = row, .artwork_id = favourite.artwork_id, .cover = std::move(cover)});
+
+    if (favourite.available) {
+        make_openable(row);
+    }
+}
+
+void HomeView::open_row(size_t index) { open_sheet(_favourites.items[index]); }
+
+// The tiles stay as they are: the backend's event of the change has the favourites asked for again.
+void HomeView::apply_favourite(const FavouriteChange& change) {
+    if (_sheet_presses) {
+        _sheet_presses->apply(change);
+    }
 }
 
 // Each cover deletes its picture's widget before it lets go of the picture.
@@ -123,6 +159,84 @@ void HomeView::show_pictures() {
     }
 }
 
+// Over the whole view, which it dims. A press beside the sheet closes it, as its way back does, and
+// one on the sheet between its buttons does nothing.
+void HomeView::build_sheet(lv_obj_t* parent) {
+    _sheet = lv_container_create(parent);
+    lv_obj_set_size(_sheet, LV_PCT(100), LV_PCT(100));
+    lv_obj_add_flag(_sheet, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(_sheet, Theme::color(Theme::BACKGROUND), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(_sheet, SHEET_BACKDROP_OPA, LV_PART_MAIN);
+    lv_obj_add_event_cb(_sheet, sheet_closed, LV_EVENT_CLICKED, this);
+    lv_obj_add_flag(_sheet, LV_OBJ_FLAG_HIDDEN);
+
+    auto panel = lv_container_create(_sheet);
+    lv_obj_set_width(panel, SHEET_WIDTH);
+    lv_obj_center(panel);
+    lv_obj_add_flag(panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(panel, Theme::color(Theme::SURFACE), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(panel, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(panel, Theme::RADIUS, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(panel, SHEET_PADDING, LV_PART_MAIN);
+    lv_obj_set_style_pad_row(panel, Theme::GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+
+    auto heading = lv_container_create(panel);
+    lv_obj_set_size(heading, LV_PCT(100), ENTRY_HEIGHT);
+    lv_obj_set_style_pad_column(heading, Theme::GAP, LV_PART_MAIN);
+    lv_obj_set_flex_flow(heading, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(heading, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    auto back = lv_container_create(heading);
+    lv_obj_set_size(back, ENTRY_HEIGHT, ENTRY_HEIGHT);
+    lv_obj_add_flag(back, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(back, Theme::color(Theme::BACKGROUND), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(back, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_set_style_bg_opa(back, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(back, Theme::RADIUS, LV_PART_MAIN);
+    lv_obj_add_event_cb(back, sheet_closed, LV_EVENT_CLICKED, this);
+
+    auto back_icon = lv_label_create(back);
+    lv_label_set_text(back_icon, ICON_ARROW_LEFT);
+    lv_obj_set_style_text_font(back_icon, Theme::FONT_ICON, LV_PART_MAIN);
+    lv_obj_set_style_text_color(back_icon, Theme::color(Theme::ACCENT), LV_PART_MAIN);
+    lv_obj_center(back_icon);
+
+    _sheet_title = lv_label_create(heading);
+    lv_obj_set_flex_grow(_sheet_title, 1);
+    lv_obj_set_height(_sheet_title, lv_font_get_line_height(Theme::FONT_HEADLINE));
+    lv_label_set_long_mode(_sheet_title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(_sheet_title, Theme::FONT_HEADLINE, LV_PART_MAIN);
+
+    _sheet_actions = lv_container_create(panel);
+    lv_obj_set_width(_sheet_actions, LV_PCT(100));
+    lv_obj_set_flex_flow(_sheet_actions, LV_FLEX_FLOW_ROW);
+}
+
+// The presses end the row, where a library row has them. What the sheet held before goes first,
+// its buttons before the presses they call on.
+void HomeView::open_sheet(const Favourite& favourite) {
+    lv_obj_clean(_sheet_actions);
+
+    _sheet_favourite = favourite;
+    lv_label_set_text(_sheet_title, favourite.title.c_str());
+
+    const auto opens = favourite.kind != ItemKind::Playlist;
+    lv_obj_set_flex_align(_sheet_actions, opens ? LV_FLEX_ALIGN_SPACE_BETWEEN : LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    if (favourite.kind == ItemKind::Artist) {
+        create_entry(_sheet_actions, ICON_MUSIC_BOX_MULTIPLE, MSG_ALBUMS, Theme::BACKGROUND, item_clicked, this);
+    } else if (opens) {
+        create_entry(_sheet_actions, ICON_MUSIC, MSG_TRACKS, Theme::BACKGROUND, item_clicked, this);
+    }
+
+    _sheet_presses =
+        std::make_unique<ItemPresses>(_host, _sheet_actions, favourite.kind, favourite.item_id, favourite.id);
+    _sheet_presses->show_on_its_way();
+
+    lv_obj_remove_flag(_sheet, LV_OBJ_FLAG_HIDDEN);
+}
+
 void HomeView::library_clicked(lv_event_t* event) {
     auto self = (HomeView*)lv_event_get_user_data(event);
 
@@ -133,4 +247,27 @@ void HomeView::scroll_ended(lv_event_t* event) {
     auto self = (HomeView*)lv_event_get_user_data(event);
 
     self->show_pictures();
+}
+
+// Hidden, not deleted: the press that closes it is on it.
+void HomeView::sheet_closed(lv_event_t* event) {
+    auto self = (HomeView*)lv_event_get_user_data(event);
+
+    lv_obj_add_flag(self->_sheet, LV_OBJ_FLAG_HIDDEN);
+}
+
+// The sheet closes first, so Home shows without it once the screen opened closes.
+void HomeView::item_clicked(lv_event_t* event) {
+    auto self = (HomeView*)lv_event_get_user_data(event);
+    const auto& favourite = self->_sheet_favourite;
+
+    lv_obj_add_flag(self->_sheet, LV_OBJ_FLAG_HIDDEN);
+
+    if (favourite.kind == ItemKind::Artist) {
+        self->_shell->push(std::make_unique<AlbumsView>(self->_host, self->_shell,
+                                                        Artist{.id = favourite.item_id, .title = favourite.title}));
+    } else {
+        self->_shell->push(std::make_unique<TracksView>(self->_host, self->_shell,
+                                                        Album{.id = favourite.item_id, .title = favourite.title}));
+    }
 }

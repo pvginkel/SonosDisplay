@@ -8699,6 +8699,564 @@ static const char* check_home_tiles_most(const SimHost& host, const Shell& shell
                                            : "the tiles in view and the covers pass the artwork client's queue";
 }
 
+// The tile of Home's whose title is this, scrolled into view once the Shell has built the screen.
+static lv_obj_t* show_tile(Shell& shell, const char* title) {
+    shell.update();
+
+    const auto list = find_tiles();
+    expect(list, "Home does not show the favourites as tiles");
+
+    lv_obj_t* tile = nullptr;
+    for (const auto candidate : get_tiles(list)) {
+        if (shows_title(lv_label_get_text(lv_obj_get_child(candidate, 1)), title)) {
+            expect(!tile, "two tiles have the title to touch");
+            tile = candidate;
+        }
+    }
+    expect(tile, "the tile to touch is not on Home");
+
+    lv_obj_scroll_to_view(tile, LV_ANIM_OFF);
+    lv_obj_update_layout(lv_screen_active());
+
+    return tile;
+}
+
+// Touches the tile of Home's whose title is this, scrolled into view first.
+static void tap_tile(SimHost& host, Shell& shell, const char* title) { tap_center(host, show_tile(shell, title)); }
+
+// The sheet over Home, which is on top: the box of what a tile offers, in the last of the view's
+// objects, which is over the others; nullptr while it is closed.
+static lv_obj_t* find_sheet() {
+    lv_obj_update_layout(lv_screen_active());
+
+    const auto view = lv_obj_get_child(lv_obj_get_child(lv_screen_active(), 0), -1);
+    const auto backdrop = lv_obj_get_child(view, -1);
+    if (lv_obj_get_child_count(view) != 2 || lv_obj_has_flag(backdrop, LV_OBJ_FLAG_HIDDEN)) {
+        return nullptr;
+    }
+
+    return lv_obj_get_child(backdrop, 0);
+}
+
+// The sheet's way back, at its heading's start, before its title.
+static lv_obj_t* get_sheet_back(lv_obj_t* sheet) { return lv_obj_get_child(lv_obj_get_child(sheet, 0), 0); }
+
+// The row under the sheet's heading: the way to the item's albums or tracks, where it has one, and
+// the presses after it, as a library row ends in them.
+static lv_obj_t* get_sheet_actions(lv_obj_t* sheet) { return lv_obj_get_child(sheet, 1); }
+
+// Opens the sheet of the tile whose title is this as a touch on the tile does, at once, so that the
+// touches a scene makes after it find what the sheet holds.
+static void open_tile(Shell& shell, const char* title) {
+    lv_obj_send_event(show_tile(shell, title), LV_EVENT_CLICKED, nullptr);
+    shell.update();
+
+    expect(find_sheet(), "the tile did not open its sheet");
+}
+
+// Touches the sheet's button that does `action`, or its favourite toggle, or its way back.
+static void tap_sheet_button(SimHost& host, QueueAction action) {
+    tap_center(host, find_queue_button(get_sheet_actions(find_sheet()), action));
+}
+
+static void tap_sheet_toggle(SimHost& host) {
+    tap_center(host, find_favourite_toggle(get_sheet_actions(find_sheet())));
+}
+
+static void tap_sheet_back(SimHost& host) { tap_center(host, get_sheet_back(find_sheet())); }
+
+// On the first tile, beside the sheet.
+static constexpr lv_point_t BESIDE_SHEET = {48, 200};
+
+// Home with the favourites, as the tiles' scenes open it.
+static void open_home_tiles(SimHost& host, Shell& shell) {
+    host.favourites().serve(200, make_favourite_pages(FAVOURITES));
+
+    open_home(host, shell, PLAYING);
+}
+
+// Home shows the sheet of the tile titled `title` over its tiles, with the bar under it: a way back
+// and the title, whole, and under them `entry`, the way to the item's albums or tracks, or, with
+// nullptr, nothing, before the presses the item's library row has: Play, Shuffle, Add to queue and
+// the favourite toggle, which shows the item `marked`, or not. Each is a target of PressButton::SIZE
+// or more, none runs into another, and the sheet is within the view, which ends where the bar begins.
+static const char* check_sheet(const SimHost& host, const Shell& shell, const char* title, const char* entry,
+                               bool marked) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    const auto sheet = find_sheet();
+    if (!sheet) {
+        return "the tile's sheet does not show";
+    }
+
+    lv_area_t view;
+    lv_area_t backdrop;
+    lv_area_t box;
+    lv_obj_get_coords(lv_obj_get_parent(lv_obj_get_parent(sheet)), &view);
+    lv_obj_get_coords(lv_obj_get_parent(sheet), &backdrop);
+    lv_obj_get_coords(sheet, &box);
+    if (backdrop.x1 != view.x1 || backdrop.y1 != view.y1 || backdrop.x2 != view.x2 || backdrop.y2 != view.y2) {
+        return "the sheet is not over the whole view";
+    }
+    if (box.x1 < view.x1 || box.y1 < view.y1 || box.x2 > view.x2 || box.y2 > view.y2) {
+        return "the sheet does not fit the view";
+    }
+
+    const auto back = get_sheet_back(sheet);
+    if (lv_obj_get_width(back) < PressButton::SIZE || lv_obj_get_height(back) < PressButton::SIZE ||
+        strcmp(lv_label_get_text(lv_obj_get_child(back, 0)), ICON_ARROW_LEFT)) {
+        return "the sheet's way back is not a target of its own";
+    }
+    if (strcmp(lv_label_get_text(lv_obj_get_child(lv_obj_get_child(sheet, 0), 1)), title)) {
+        return "the sheet's title is not the tile's, whole";
+    }
+
+    const auto actions = get_sheet_actions(sheet);
+    if (lv_obj_get_child_count(actions) != (entry ? 2u : 1u)) {
+        return entry ? "the sheet does not offer the item's screen"
+                     : "the sheet offers a screen the item does not have";
+    }
+
+    const auto buttons = find_queue_buttons(actions);
+    if (!buttons || lv_obj_get_child_count(buttons) != ITEM_BUTTONS) {
+        return "the sheet does not offer Play, Shuffle, Add to queue and the favourite toggle";
+    }
+
+    lv_area_t presses;
+    lv_area_t row;
+    lv_obj_get_coords(buttons, &presses);
+    lv_obj_get_coords(actions, &row);
+    if (presses.x2 != row.x2) {
+        return "the sheet's presses do not end its row, as they end a library row";
+    }
+
+    if (entry) {
+        const auto button = lv_obj_get_child(actions, 0);
+        lv_area_t area;
+        lv_obj_get_coords(button, &area);
+
+        if (strcmp(lv_label_get_text(lv_obj_get_child(button, 1)), entry) ||
+            lv_obj_get_height(button) < PressButton::SIZE) {
+            return "the way to the item's screen is not a target of its own, named for the screen";
+        }
+        if (area.x2 >= presses.x1) {
+            return "the way to the item's screen runs into the presses";
+        }
+    }
+
+    static const char* const ICONS[] = {ICON_PLAY, ICON_SHUFFLE_VARIANT, ICON_PLAYLIST_PLUS};
+    for (uint32_t i = 0; i < ITEM_BUTTONS; i++) {
+        const auto button = lv_obj_get_child(buttons, int32_t(i));
+        if (lv_obj_get_width(button) < PressButton::SIZE || lv_obj_get_height(button) < PressButton::SIZE) {
+            return "a press of the sheet is smaller than a target is";
+        }
+
+        const auto icon = i < 3 ? ICONS[i] : marked ? ICON_HEART : ICON_HEART_OUTLINE;
+        if (strcmp(lv_label_get_text(lv_obj_get_child(button, 0)), icon)) {
+            return i < 3    ? "the sheet's presses are not its library row's, in order"
+                   : marked ? "the sheet's toggle does not show the favourite that marks its item"
+                            : "the sheet's toggle shows a favourite where none marks its item";
+        }
+    }
+
+    return nullptr;
+}
+
+// Of the presses of the sheet open over Home, exactly those of `actions` show their press on its
+// way, and the toggle shows a change on its way, or not; every other one is at rest.
+static const char* check_sheet_presses(const std::vector<QueueAction>& actions, bool toggle) {
+    const auto row = get_sheet_actions(find_sheet());
+
+    for (const auto action : {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add}) {
+        const auto on_its_way = std::find(actions.begin(), actions.end(), action) != actions.end();
+        const auto button = find_queue_button(row, action);
+        if (on_its_way && !shows_on_its_way(button)) {
+            return "a press on its way does not show on the sheet's button";
+        }
+        if (!on_its_way && !shows_at_rest(button)) {
+            return "a button of the sheet whose press is not on its way is not at rest";
+        }
+    }
+
+    const auto button = find_favourite_toggle(row);
+    if (toggle && !shows_on_its_way(button)) {
+        return "a change of a favourite on its way does not show on the sheet's toggle";
+    }
+
+    return toggle || shows_at_rest(button) ? nullptr : "the sheet's toggle is not at rest";
+}
+
+// Nothing was sent, and no screen was asked for.
+static const char* check_nothing_sent_or_opened(const SimHost& host) {
+    if (!host.get_queue_requests().empty() || !host.get_favourite_requests().empty()) {
+        return "a press was sent";
+    }
+
+    return host.albums().get_requests().empty() && host.tracks().get_requests().empty() ? nullptr
+                                                                                        : "a screen was opened";
+}
+
+// What a touch on a tile opened: the sheet of `title`, at rest, over Home alone. Nothing was sent,
+// and no screen opened.
+static const char* check_tile_opened(const SimHost& host, const Shell& shell, const char* title, const char* entry) {
+    if (const auto problem = check_sheet(host, shell, title, entry, true)) {
+        return problem;
+    }
+    if (shell.count_views() != 1) {
+        return "a touch on a tile opened a screen";
+    }
+    if (const auto problem = check_sheet_presses({}, false)) {
+        return problem;
+    }
+
+    return check_nothing_sent_or_opened(host);
+}
+
+// A touch on an artist's tile opens its sheet: Björk, marked, with the way to her albums and the
+// presses of her row in the library.
+static void home_tile_artist(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+
+    tap_tile(host, shell, "Björk");
+}
+
+static const char* check_home_tile_artist(const SimHost& host, const Shell& shell) {
+    return check_tile_opened(host, shell, "Björk", MSG_ALBUMS);
+}
+
+// An album's tile: Ágætis byrjun, with the way to its tracks.
+static void home_tile_album(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+
+    tap_tile(host, shell, "Ágætis byrjun");
+}
+
+static const char* check_home_tile_album(const SimHost& host, const Shell& shell) {
+    return check_tile_opened(host, shell, "Ágætis byrjun", MSG_TRACKS);
+}
+
+// A playlist's tile: Avondeten, which has no screen, offers the presses alone.
+static void home_tile_playlist(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+
+    tap_tile(host, shell, "Avondeten");
+}
+
+static const char* check_home_tile_playlist(const SimHost& host, const Shell& shell) {
+    return check_tile_opened(host, shell, "Avondeten", nullptr);
+}
+
+// A touch on the tile of a favourite that is not available opens nothing: Dummy, whose album Plex
+// does not have.
+static void home_tile_unavailable(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+
+    tap_tile(host, shell, "Dummy");
+}
+
+// Home shows its tiles with no sheet over them, and nothing was sent or opened.
+static const char* check_home_tiles_closed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home_favourites(host, shell, FAVOURITES)) {
+        return problem;
+    }
+    if (find_sheet()) {
+        return "a sheet shows over Home";
+    }
+    if (shell.count_views() != 1) {
+        return "a screen opened over Home";
+    }
+
+    return check_nothing_sent_or_opened(host);
+}
+
+// The sheet's way back closes it.
+static void home_tile_back(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_sheet_back(host);
+}
+
+// A touch beside the sheet closes it too, and opens no tile under it.
+static void home_tile_beside(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    host.tap(BESIDE_SHEET.x, BESIDE_SHEET.y);
+}
+
+// The way to an artist's albums opens them over Home, the library's screen of them, and closes the
+// sheet.
+static void home_tile_albums(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_label(host, shell, MSG_ALBUMS);
+}
+
+static const char* check_home_tile_albums(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (const auto problem = check_albums_asked(host, "artist-3")) {
+        return problem;
+    }
+    if (const auto problem = check_heading("Björk")) {
+        return problem;
+    }
+    if (!host.get_queue_requests().empty() || !host.get_favourite_requests().empty()) {
+        return "a press was sent";
+    }
+
+    return check_titles(get_album_titles(), 0, ALBUMS.size());
+}
+
+// Back from the albums, Home shows its tiles with the sheet closed.
+static void home_tile_albums_back(SimHost& host, Shell& shell) {
+    home_tile_albums(host, shell);
+
+    host.tap(BACK.x, BACK.y);
+}
+
+static const char* check_home_tile_albums_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (shell.count_views() != 1 || find_sheet()) {
+        return "Home does not show its tiles alone";
+    }
+
+    return check_tiles(host, FAVOURITES, 0, FAVOURITES.size());
+}
+
+// The way to an album's tracks opens them over Home, and closes the sheet.
+static void home_tile_tracks(SimHost& host, Shell& shell) {
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_home_tiles(host, shell);
+    open_tile(shell, "Ágætis byrjun");
+
+    tap_label(host, shell, MSG_TRACKS);
+}
+
+static const char* check_home_tile_tracks(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+    if (host.tracks().get_requests() != std::vector<uint32_t>{1} ||
+        host.tracks().get_parent_ids() != std::vector<std::string>{"album-1"}) {
+        return "the album's tracks were not asked for once, from the first page";
+    }
+    if (const auto problem = check_heading("Ágætis byrjun")) {
+        return problem;
+    }
+
+    return check_titles(KVEIKUR, 0, KVEIKUR.size());
+}
+
+// A press on the sheet's Play and on its toggle, neither answered yet, and a second press on each:
+// each shows its press on its way, the toggle over the mark it showed, the second presses send
+// nothing, and the others are at rest. Home's tiles stay as they were, and nothing is said yet.
+static void home_tile_on_its_way(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_sheet_button(host, QueueAction::Play);
+    tap_sheet_toggle(host);
+    tap_sheet_button(host, QueueAction::Play);
+    tap_sheet_toggle(host);
+}
+
+static const char* check_home_tile_on_its_way(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Björk", MSG_ALBUMS, true)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_requests(
+            host, {{.kind = ItemKind::Artist, .item_id = "artist-3", .action = QueueAction::Play}},
+            {R"({"kind":"artist","item_id":"artist-3","action":"play","order":"newest_first"})"})) {
+        return problem;
+    }
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 503}}, {""})) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (const auto problem = check_sheet_presses({QueueAction::Play}, true)) {
+        return problem;
+    }
+
+    return check_tiles(host, FAVOURITES, 0, FAVOURITES.size());
+}
+
+// A press on a playlist's Shuffle, not answered yet, shows on its sheet opened again after it was
+// closed, and a press there sends nothing.
+static void home_tile_on_its_way_again(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Friday in the workshop");
+
+    tap_sheet_button(host, QueueAction::Shuffle);
+    tap_sheet_back(host);
+    tap_tile(host, shell, "Friday in the workshop");
+    tap_sheet_button(host, QueueAction::Shuffle);
+}
+
+static const char* check_home_tile_on_its_way_again(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Friday in the workshop", nullptr, true)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_requests(
+            host, {{.kind = ItemKind::Playlist, .item_id = "playlist-5", .action = QueueAction::Shuffle}},
+            {R"({"kind":"playlist","item_id":"playlist-5","action":"shuffle"})"})) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+
+    return check_sheet_presses({QueueAction::Shuffle}, false);
+}
+
+// An add from an album's sheet, which the backend takes: the bar says that it went, and the button
+// is at rest again.
+static void home_tile_add(SimHost& host, Shell& shell) {
+    host.answer_queue_requests(202, QUEUE_TAKEN);
+    open_home_tiles(host, shell);
+    open_tile(shell, "Kveikur");
+
+    tap_sheet_button(host, QueueAction::Add);
+}
+
+static const char* check_home_tile_add(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Kveikur", MSG_TRACKS, true)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_queue_requests(host, {{.kind = ItemKind::Album, .item_id = "album-6", .action = QueueAction::Add}},
+                                 {R"({"kind":"album","item_id":"album-6","action":"add"})"})) {
+        return problem;
+    }
+    if (const auto problem = check_added(host)) {
+        return problem;
+    }
+
+    return check_sheet_presses({}, false);
+}
+
+// The favourites without Björk: unmarked from her sheet.
+static std::vector<FavouriteFixture> make_without_bjork() {
+    auto favourites = FAVOURITES;
+    std::erase_if(favourites, [](const FavouriteFixture& favourite) { return favourite.title == "Björk"; });
+
+    return favourites;
+}
+
+// An unmark from Björk's sheet, which the backend takes, and then says, on the event stream, that
+// the favourites changed.
+static void home_tile_unmark(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_sheet_toggle(host);
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() {
+        host.answer_favourite_change(204, "");
+        host.favourites().serve(200, make_favourite_pages(make_without_bjork()));
+        host.send_favourites_changed();
+    });
+}
+
+// The unmark was sent and taken, and nothing was said; Home asked for the favourites again, and
+// shows them without Björk's tile.
+static const char* check_unmarked_from_tile(const SimHost& host) {
+    if (const auto problem = check_favourite_requests(
+            host, {{.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 503}}, {""})) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+    if (const auto problem = check_nothing_said()) {
+        return problem;
+    }
+    if (host.favourites().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "Home did not ask for the favourites again, once";
+    }
+
+    return check_tiles(host, make_without_bjork(), 0, FAVOURITES.size() - 1, FAVOURITES);
+}
+
+// The sheet stays open on Björk until it is closed, her toggle at rest and showing her unmarked,
+// and her tile is gone from Home under it.
+static const char* check_home_tile_unmark(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Björk", MSG_ALBUMS, false)) {
+        return problem;
+    }
+    if (const auto problem = check_sheet_presses({}, false)) {
+        return problem;
+    }
+
+    return check_unmarked_from_tile(host);
+}
+
+// Closed after the unmark, the sheet leaves Home without Björk's tile.
+static void home_tile_unmark_closed(SimHost& host, Shell& shell) {
+    home_tile_unmark(host, shell);
+
+    tap_sheet_back(host);
+}
+
+static const char* check_home_tile_unmark_closed(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (find_sheet()) {
+        return "the sheet did not close";
+    }
+
+    return check_unmarked_from_tile(host);
+}
+
+// The favourite the backend marks Björk with anew.
+static const char FAVOURITE_BJORK_AGAIN[] =
+    R"({"artwork_id":"ZmF2b3VyaXRlLw3","available":true,"created_at":"2026-11-17T09:31:40.654321+00:00","id":509,)"
+    R"("item_id":"artist-3","kind":"artist","subtitle":null,"title":"Björk"})";
+
+// Unmarked from her sheet, Björk is marked again from it: the second press sends a mark, and the
+// toggle shows the new favourite the backend took, which a third press, not answered, unmarks.
+static void home_tile_mark_again(SimHost& host, Shell& shell) {
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    tap_sheet_toggle(host);
+    host.answer_after(ANSWER_BEFORE_NEXT_MS, [&host]() { host.answer_favourite_change(204, ""); });
+    tap_sheet_toggle(host);
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_BJORK_AGAIN); });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_sheet_toggle(host);
+}
+
+static const char* check_home_tile_mark_again(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_sheet(host, shell, "Björk", MSG_ALBUMS, true)) {
+        return problem;
+    }
+    if (const auto problem =
+            check_favourite_requests(host,
+                                     {
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 503},
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3"},
+                                         {.kind = ItemKind::Artist, .item_id = "artist-3", .favourite_id = 509},
+                                     },
+                                     {"", R"({"kind":"artist","item_id":"artist-3"})", ""})) {
+        return problem;
+    }
+
+    return check_sheet_presses({}, true);
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -8759,6 +9317,22 @@ const std::vector<Scene>& get_scenes() {
         {"home-favourites-reconnected", home_favourites_reconnected, check_home_favourites_asked_again},
         {"home-favourites-after-connect", home_favourites_after_connect, check_home_favourites_after_connect},
         {"home-favourites-changed-hidden", home_favourites_changed_hidden, check_home_favourites_asked_again},
+        {"home-tile-artist", home_tile_artist, check_home_tile_artist},
+        {"home-tile-album", home_tile_album, check_home_tile_album},
+        {"home-tile-playlist", home_tile_playlist, check_home_tile_playlist},
+        {"home-tile-unavailable", home_tile_unavailable, check_home_tiles_closed},
+        {"home-tile-back", home_tile_back, check_home_tiles_closed},
+        {"home-tile-beside", home_tile_beside, check_home_tiles_closed},
+        {"home-tile-albums", home_tile_albums, check_home_tile_albums},
+        {"home-tile-albums-back", home_tile_albums_back, check_home_tile_albums_back, after_touches_ms(2)},
+        {"home-tile-tracks", home_tile_tracks, check_home_tile_tracks},
+        {"home-tile-on-its-way", home_tile_on_its_way, check_home_tile_on_its_way, after_touches_ms(4)},
+        {"home-tile-on-its-way-again", home_tile_on_its_way_again, check_home_tile_on_its_way_again,
+         after_touches_ms(4)},
+        {"home-tile-add", home_tile_add, check_home_tile_add},
+        {"home-tile-unmark", home_tile_unmark, check_home_tile_unmark},
+        {"home-tile-unmark-closed", home_tile_unmark_closed, check_home_tile_unmark_closed, after_touches_ms(2)},
+        {"home-tile-mark-again", home_tile_mark_again, check_home_tile_mark_again, after_touches_ms(4)},
         {"now-playing", now_playing, check_now_playing},
         {"now-playing-glyphs", now_playing_glyphs, check_now_playing},
         {"now-playing-paused", now_playing_paused},

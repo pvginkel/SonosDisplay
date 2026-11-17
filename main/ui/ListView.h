@@ -19,25 +19,17 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include "ItemPresses.h"
 #include "View.h"
 
 class Shell;
 
 class ListView : public View {
-    // The item of a row that ends in the queue's buttons, the row of those buttons, and the
-    // favourite that marks the item, which the favourite toggle after them shows: none for a
-    // track, whose row has no toggle.
-    struct QueueItem {
-        ItemKind kind;
-        std::string id;
-        lv_obj_t* buttons;
-        std::optional<int64_t> favourite_id;
-    };
-
     std::string _title;
     lv_obj_t* _heading{};
     lv_obj_t* _note{};
@@ -51,8 +43,8 @@ class ListView : public View {
     uint32_t _first_index{};
     // Whether the pages changed since the list was built.
     bool _changed{};
-    // The item of each row built with the queue's buttons, in the rows' order.
-    std::vector<QueueItem> _queue_items;
+    // The presses of each row built with the queue's buttons.
+    std::vector<std::unique_ptr<ItemPresses>> _presses;
     // The ids of the requests to queue an item, and of the changes of a favourite, that were on
     // their way when the buttons last showed them.
     std::vector<uint32_t> _shown_presses;
@@ -105,14 +97,10 @@ protected:
     // label.
     static lv_obj_t* create_row_title(lv_obj_t* row, const std::string& title);
 
-    // Ends this row, which build_row() was handed, with PressButtons that play its item, of this
-    // kind and with this id, shuffle it unless it is a track, and add it to the queue, and, unless
-    // it is a track, the favourite toggle, which shows whether a favourite marks it: the one with
-    // `favourite_id`, or none. A press on one asks the host for its request, unless that request is
-    // on its way: the button then shows so, on every row of the item, built before the press or
-    // after it. A press on the toggle marks the item, or unmarks it, unless a change of it is on
-    // its way, and the toggle shows what the backend took. A drag that starts on one still scrolls
-    // the list. Every row of a list has them, or none does.
+    // Ends this row, which build_row() was handed, with the presses of its item, of this kind and
+    // with this id (ItemPresses), the toggle showing the favourite with `favourite_id`, or none.
+    // Each shows its press on its way on every row of the item, built before the press or after it,
+    // and the toggle what the backend took. Every row of a list has them, or none does.
     void create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id,
                               std::optional<int64_t> favourite_id);
 
@@ -182,7 +170,5 @@ private:
     static void back_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
     static void row_clicked(lv_event_t* event);
-    static void queue_clicked(lv_event_t* event);
-    static void favourite_clicked(lv_event_t* event);
     static void scrolled(lv_event_t* event);
 };

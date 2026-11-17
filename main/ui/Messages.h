@@ -38,9 +38,11 @@
 #define MSG_ARTISTS_EMPTY "The library has no artists"
 #define MSG_JUMP_TO_LETTER "A–Z"
 
+#define MSG_ALBUMS "Albums"
 #define MSG_ALBUMS_LOADING "Looking up the albums"
 #define MSG_ALBUMS_EMPTY "The library has no albums of this artist"
 
+#define MSG_TRACKS "Tracks"
 #define MSG_TRACKS_LOADING "Looking up the tracks"
 #define MSG_TRACKS_EMPTY "The library has no tracks of this album"
 

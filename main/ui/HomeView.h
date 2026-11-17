@@ -3,11 +3,18 @@
 // The view the display opens on once a speaker is chosen, with the now-playing bar under it: the
 // favourites as tiles, by title, under a heading that ends in the entry into the library. A tile
 // shows its favourite's picture and title; one that is not available shows its title dimmed, and
-// no picture. A tile asks for its picture only while it shows in the list, and holds it only while
-// it draws it: the tiles look as the list is built, as a scroll of it ends, and at every change of
-// the model, which asks again for a picture the backend did not give. Home asks for the favourites
-// again whenever they may have changed unseen. While the Shell's "Reconnecting" marker shows at the
-// top right, the heading ends before it.
+// no picture, and opens nothing. A tile asks for its picture only while it shows in the list, and
+// holds it only while it draws it: the tiles look as the list is built, as a scroll of it ends,
+// and at every change of the model, which asks again for a picture the backend did not give. Home
+// asks for the favourites again whenever they may have changed unseen. While the Shell's
+// "Reconnecting" marker shows at the top right, the heading ends before it.
+//
+// A press on an available tile opens its sheet over the view: the favourite's title after a way
+// back, and under it the presses its item's row in the library has (ItemPresses), and, for an
+// artist or an album, the way to its albums or its tracks, which closes the sheet. A press beside
+// the sheet closes it too. Its toggle shows the favourite the tile was built from, and then what
+// the backend took of the presses on it; the tile of a favourite unmarked stays until the
+// favourites come again.
 
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +23,7 @@
 #include <vector>
 
 #include "Cover.h"
+#include "ItemPresses.h"
 #include "ListView.h"
 
 class HomeView : public ListView {
@@ -32,6 +40,15 @@ class HomeView : public ListView {
     std::vector<Tile> _tiles;
     // The model's revision when the tiles last looked.
     uint32_t _revision;
+    // The sheet over the whole view, hidden while it is closed; its title; and the row that holds
+    // the way to the item's albums or tracks and its presses, built as the sheet opens.
+    lv_obj_t* _sheet{};
+    lv_obj_t* _sheet_title{};
+    lv_obj_t* _sheet_actions{};
+    // The favourite the sheet last opened on, and the presses of its item, none before it first
+    // opens.
+    Favourite _sheet_favourite;
+    std::unique_ptr<ItemPresses> _sheet_presses;
 
 public:
     // The size of a tile's picture, and the tile's width.
@@ -40,13 +57,16 @@ public:
     HomeView(UiHost* host, Shell* shell);
 
 protected:
+    void do_render(lv_obj_t* parent) override;
     void do_update() override;
     PageWindow& get_pages() override { return _favourites; }
     void request_page(uint32_t page) override;
     void build_row(lv_obj_t* row, size_t index) override;
     int32_t get_tile_width() const override { return TILE_SIZE; }
     bool has_back() const override { return false; }
+    void open_row(size_t index) override;
     bool has_favourites() const override { return true; }
+    void apply_favourite(const FavouriteChange& change) override;
     const char* get_loading_message() const override;
     const char* get_empty_message() const override;
     const char* get_empty_icon() const override;
@@ -56,6 +76,10 @@ protected:
 
 private:
     void show_pictures();
+    void build_sheet(lv_obj_t* parent);
+    void open_sheet(const Favourite& favourite);
     static void library_clicked(lv_event_t* event);
     static void scroll_ended(lv_event_t* event);
+    static void sheet_closed(lv_event_t* event);
+    static void item_clicked(lv_event_t* event);
 };
