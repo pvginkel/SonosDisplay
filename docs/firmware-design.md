@@ -467,7 +467,9 @@ wired: `OTAManager` declares the callback and nothing calls it.
    and panel holds 16 pixels, about a microsecond at 14 MHz. `CONFIG_LCD_RGB_ISR_IRAM_SAFE` keeps
    the panel's interrupts and their callbacks in IRAM, so the refill also runs while flash is
    written, and `CONFIG_ESP32S3_DATA_CACHE_LINE_64B` has the data cache, through which the refill
-   reads PSRAM, fetch 64-byte lines. A frame that still comes up short, with fewer refills than a
+   reads PSRAM, fetch 64-byte lines, which Espressif's ESP-FAQ asks for in this mode (its LCD
+   page: "Therefore, it is necessary to enable CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y. Otherwise, it
+   may cause the screen to drift."). A frame that still comes up short, with fewer refills than a
    frame takes, is restarted by the driver itself at the next vblank.
 3. **Does not set `CONFIG_LCD_RGB_RESTART_IN_VSYNC`.** The skeleton set it, without bounce
    buffers, to make a drift last one frame instead of until the next wake, and the first display
