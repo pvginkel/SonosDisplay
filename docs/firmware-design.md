@@ -99,8 +99,9 @@ main/
     UiHost.h  Model.h       the only two doors between ui/ and the rest
     Shell.{h,cpp}  View.{h,cpp}  Theme.{h,cpp}  Messages.h  lv_support.{h,cpp}  log.h
     LoadingView.{h,cpp}  SpeakerPickerView.{h,cpp}  NowPlayingView.{h,cpp}
-    ListView.{h,cpp}        the paged list every library screen and the queue derive from
-    ArtistsView  AlbumsView  TracksView  PlaylistsView  QueueView   each .{h,cpp}
+    ListView.{h,cpp}        the paged list Home, every library screen and the queue derive from
+    HomeView  ArtistsView  AlbumsView  TracksView  PlaylistsView  QueueView   each .{h,cpp}
+    ItemPresses.{h,cpp}  PressButton.{h,cpp}   an item's Play, Shuffle, Add and favourite toggle
     NowPlayingBar.{h,cpp}   the bar under the content area
     Cover.{h,cpp}  Controls.{h,cpp}  shared by the now-playing screen and the bar
     fonts/                  generated .c files and icons.h
@@ -130,8 +131,8 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
 1. `app_main` constructs `Board` and calls `board.begin()`: panel, I2C bus, expander, touch,
    `lv_init()`, the LVGL display and input device. Then `Application(&board).begin()`, then it
    idles.
-2. `do_begin()` creates the UI task. It reads the speaker choice from NVS (section 4), then builds
-   the Shell with `LoadingView` ("Starting").
+2. `do_begin()` creates the UI task. It reads the speaker choice and the motion setting from NVS
+   (section 4), then builds the Shell with `LoadingView` ("Starting").
 3. `do_configuration_loaded(cJSON*)` runs on the UI task once WiFi is up. It copies `backendUrl`
    and `screenOffSeconds` out of the JSON, which esp-mdm frees when the hook returns. It then sets
    the loading text to "Checking for an update" and calls `lv_refr_now(nullptr)`, because the
@@ -139,7 +140,7 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
 4. `do_ready()` runs once MQTT is connected. It restarts the panel (section 3), starts the four
    backend tasks, asks for the speakers, the chosen speaker's playback and its group's volume, and
    calls `Shell::open()`, which replaces `LoadingView` with the app's first view: the speaker
-   picker or the now-playing screen (section 5).
+   picker or Home (section 5).
 5. `do_process()` calls `board.process()`, tells the artwork loader whether the screen is lit
    (section 7), settles the changes whose answer did not come in time (section 4), and calls the
    Shell's `update()`, which updates the top view and the bar. Once startup has settled it
@@ -368,7 +369,7 @@ is active high. ThermostatDisplay's interrupt handler posts a `std::function` to
 with the blocking, non-ISR call, which is unsafe, and its "gpio_interrupt_task" receives nothing.
 Neither is carried over. The new handler is `IRAM_ATTR` and only sets a `std::atomic<bool>`.
 `MotionSensor::poll()`, called from the UI loop, returns true when the flag was set or the pin
-reads high, so presence that lasts keeps the screen on.
+reads high, so presence that lasts keeps the screen on while motion wakes it (section 3).
 
 ### Not carried over
 
@@ -456,10 +457,10 @@ wired: `OTAManager` declares the callback and nothing calls it.
    the screen holds the loading view, and the restart that follows re-initialises the panel.
    There is no running screen to protect.
 
-The other flash writes are short: the speaker choice saved to NVS, esp-mdm storing new
-provisioning data (followed by a restart), and a coredump being erased after its upload at boot.
-Item 1 covers them, and the restart on the next wake puts right what it does not. After the
-speaker choice is saved, the app restarts the panel at once (`Board::resync_panel`).
+The other flash writes are short: the speaker choice and the motion setting saved to NVS, esp-mdm
+storing new provisioning data (followed by a restart), and a coredump being erased after its upload
+at boot. Item 1 covers them, and the restart on the next wake puts right what it does not. After
+either setting is saved, the app restarts the panel at once (`Board::resync_panel`).
 
 The loading view cannot animate during an update, since its task is blocked. It shows "Checking
 for an update" as a still frame (section 1, step 3).
@@ -518,8 +519,8 @@ restarts by itself when a frame comes up short. The costs:
 - an interrupt that copies 25 MB a second out of PSRAM, a third or more of core 0;
 - the frame-complete callback in place of the vblank as the sign that a swap took effect.
 
-The firmware itself writes flash only when the speaker choice is saved, and restarts the panel
-right after, so drift in use is not expected.
+The firmware itself writes flash only when the speaker choice or the motion setting is saved, and
+restarts the panel right after, so drift in use is not expected.
 
 ### Switching the backlight too fast browns the board out
 
@@ -538,12 +539,16 @@ runs on the UI task, from `board.process()`:
 - **Switching on:** `RgbPanel::restart()` first, which returns once the restarted frame is past
   (section 3, up to two frames), then the expander write.
 - **Switching off:** the expander write only. The panel keeps scanning and LVGL keeps drawing.
-- **Wake:** motion, or a touch. A touch on a dark screen wakes it and is swallowed until the
-  finger lifts, so it cannot press what was under it.
-- **Sleep:** `screenOffSeconds` after the last touch or motion. The default is 60; the device
-  configuration can set it (section 4). ThermostatDisplay's 20 seconds was a build setting.
+- **Wake:** a touch, or motion while the motion setting on Home lets it (section 5), which the
+  display stores (section 4). Switched off, `ScreenPower::handle_motion()` returns at once: motion
+  neither wakes the screen nor keeps it lit, though the sensor is still polled. This is for a
+  sensor too sensitive for its place; the firmware filters no motion. A touch on a dark screen
+  wakes it and is swallowed until the finger lifts, so it cannot press what was under it.
+- **Sleep:** `screenOffSeconds` after the last touch, or the last motion while motion wakes the
+  screen. The default is 60; the device configuration can set it (section 4). ThermostatDisplay's
+  20 seconds was a build setting.
 - **Boot:** the backlight comes on with the loading view only when `esp_reset_reason()` is
-  `ESP_RST_POWERON`. After any other reset the screen stays dark until motion or a touch. A
+  `ESP_RST_POWERON`. After any other reset the screen stays dark until it is woken. A
   display that restarts at night because WiFi dropped then stays dark, a brown-out cannot loop
   through the backlight, and the screen is still "off until the motion sensor or a touch wakes
   it".
@@ -609,10 +614,10 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   the handle and makes a new one. A connection idle for more than 1.5 seconds is closed before the
   next request: a server that closed it first would fail that request, and only a GET is retried.
 - **Three clients.** `backend_press` carries every press: transport commands, changes of the
-  volume and of groups, and the queue's play, shuffle, add and clear. `backend_api` carries every
-  fetch of the backend's state and of its lists. `backend_art` carries artwork. So a press waits
-  behind no fetch, however long one stalls, and behind no cover, only behind the presses sent
-  before it.
+  volume and of groups, the queue's play, shuffle, add and clear, and the favourites' marks and
+  unmarks. `backend_api` carries every fetch of the backend's state and of its lists.
+  `backend_art` carries artwork. So a press waits behind no fetch, however long one stalls, and
+  behind no cover, only behind the presses sent before it.
 - **A fetch merges.** Every request on `backend_api` is sent with `merges`: one equal to a request
   that still waits in the client, by method, path and body, goes as one with it, the later
   caller's scope and `done` taking the earlier's place. One under way merges with nothing. So a
@@ -622,11 +627,11 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   timeout below, and esp-tls gives a handshake up at its first step that ends 5 seconds or more
   after it began, so a request on the press path ends within about 30 seconds, but for a host
   lookup that misses lwIP's cache and a handshake whose every read comes just inside the timeout.
-  A change of the volume or of a group, or a request to play, shuffle or add, whose answer has not
-  come 30 seconds after it was sent (`ANSWER_TIME_LIMIT_MS`, `main/ui/Model.h`) is settled, so an
-  answer dropped on its way to the UI task, or a press stuck behind stalled ones, leaves nothing
-  on its way for good. Each carries an id, and an answer to one that is no longer on its way
-  changes nothing.
+  A change of the volume, of a group or of a favourite, or a request to play, shuffle or add, whose
+  answer has not come 30 seconds after it was sent (`ANSWER_TIME_LIMIT_MS`, `main/ui/Model.h`) is
+  settled, so an answer dropped on its way to the UI task, or a press stuck behind stalled ones,
+  leaves nothing on its way for good. Each carries an id, and an answer to one that is no longer
+  on its way changes nothing.
 - **One change of the volume on its way at most.** A press sends `{"delta": n}` to the group's
   volume: a step, which the speaker takes from the volume it has, where a level sent from the
   screen could undo a change made in the Sonos app. The presses made while a change is on its way
@@ -661,8 +666,24 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
 - **Clear** sends `DELETE /api/speakers/{id}/queue`. A 204 waits for the queue's events to show
   the empty queue; any other answer, or a failed request, is a Clear not taken. Nothing waits on
   a Clear, so it has no time limit.
+- **A favourite** marks an artist, an album or a playlist, the same for every display; a track
+  cannot be one. Every artist, album and playlist of the library carries `favourite_id`, the
+  favourite that marks it or `null`, which the firmware reads as required. A press marks an item
+  with `POST /api/favourites`, the body `kind` and `item_id`, and unmarks it with
+  `DELETE /api/favourites/{favourite_id}`. A mark is taken when answered 201, or 200 for an item
+  marked already, the answer's favourite holding the `id` that marks it now; an unmark when
+  answered 204, or 404 `RECORD_NOT_FOUND`: another client removed it, and the item is unmarked
+  either way. Any other answer, a failed request, or none within the time limit, is a change not
+  taken. The model (`Favouring`) holds the changes on their way, one an item at most, since a view
+  sends no second while one is on its way, and the newest 8 the backend took, which the views
+  apply to the items they hold; a view that missed more than 8 fetches its items again. Home lists
+  the favourites with `GET /api/favourites`, by title (`sort_by=title`), so a new mark lands in its
+  place. A favourite that is not available, which Plex does not have or does not answer for, keeps
+  its title; the firmware keeps its `item_id` and `artwork_id` only while it is available, and
+  refuses an available one without an `item_id`.
 - **The bodies are written in `main/api/Requests`** (`write_volume_change`,
-  `write_queue_request`), which `sim/` builds too, so a scene checks the body the device sends.
+  `write_queue_request`, `write_favourite_mark`), which `sim/` builds too, so a scene checks the
+  body the device sends.
 - **The body goes to PSRAM.** The task reads with `esp_http_client_open`,
   `esp_http_client_fetch_headers` and a read loop into a `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)`
   buffer sized from `Content-Length`, growing when there is none, and failing with
@@ -721,8 +742,9 @@ fields, no replay. `EventStream` owns the `backend_events` task and a second `es
 7. **Reconnect** after 1, 2, 4, 8, then 15 seconds, reset by `ready`.
 8. **After every `ready`** the app is told the stream is (re)connected, and fetches the speakers,
    the chosen speaker's playback and its group's volume again, since events sent while it was
-   away are gone; the queue screen, while it shows, asks again for the page at its top. There is
-   nothing to renew: every connection receives every event.
+   away are gone; the queue screen, while it shows, asks again for the page at its top; and
+   `Model::favourites_changes` moves, as on `favourites_changed` (below). There is nothing to
+   renew: every connection receives every event.
 
 **What the app does with an event.** `speakers_changed` fetches the speakers, and the group's
 volume, which a speaker joining or leaving the group changes. `playback_changed` and
@@ -731,9 +753,12 @@ speaker's own id is the whole filter: one that names it fetches the playback or 
 `queue_changed`, which fetches nothing itself: it and `playback_changed` move
 `Model::queue_changes`, and the queue screen, while it shows, asks again for the page at its top.
 One whose payload cannot be read is taken for the chosen speaker's. When the chosen speaker comes
-back into the speakers list, its playback and volume are fetched too. `task_event` reports the
-progress and end of the backend's tasks; the display reads the ends of those its own requests
-started (Requests, above).
+back into the speakers list, its playback and volume are fetched too. `favourites_changed` says
+that a favourite was marked or unmarked, on any display; its payload is not read. It moves
+`Model::favourites_changes` and fetches nothing itself: Home and the artists, albums and playlists
+ask again for the page at their top, at once while they show, and as they show again under a view
+that closed; the tracks and the queue do not. `task_event` reports the progress and end of the
+backend's tasks; the display reads the ends of those its own requests started (Requests, above).
 
 The UI works without the stream: commands go over `HttpClient` either way. While the stream has
 been down for more than five seconds the Shell shows a "Reconnecting" marker. The backend being
@@ -767,11 +792,14 @@ JSON carries `backendUrl`, and the model's schema requires it (section 6). If th
 or malformed all the same, the firmware does not crash: after `do_ready` it shows "No backend
 address in this display's IoT Support configuration" and starts no backend task.
 
-**The speaker choice** is the one thing stored on the display: NVS namespace `sonos`, key
-`speaker`, a string holding the speaker's id as the API gives it. It must not go into esp-mdm's
-namespace `prov`, whose unknown keys are deleted whenever provisioning data is renewed. Provision
-device rewrites the whole `nvs` partition, so a display provisioned again over USB asks for its
-speaker again.
+**Two settings are stored on the display**, in NVS namespace `sonos`: the speaker choice, key
+`speaker`, a string holding the speaker's id as the API gives it, and whether motion wakes the
+screen, key `motion_wakes`, a u8, 1 or 0. That key is absent until the setting is first switched,
+and motion wakes the screen while it is. Neither goes into esp-mdm's namespace `prov`, whose
+unknown keys are deleted whenever provisioning data is renewed. The motion setting is switched on
+the display (section 5), not in the device configuration. Provision device rewrites the whole
+`nvs` partition, so a display provisioned again over USB asks for its speaker again, and motion
+wakes it again.
 
 ### What this asks of the API design (task 6)
 
@@ -807,16 +835,20 @@ no FreeRTOS, no `esp-libs`, no `Application.h`. It has two doors to the rest of 
 both headers in `ui/`:
 
 - **`Model.h`**: plain structs holding what the views draw: the event stream's state, the
-  speakers and the chosen one with each one's group, the playback, the group's volume, the
-  pending changes of groups and the items asked to be queued, with the rules by which a command or
-  a press changes what they show (`Playback`, `Volume`), a change of a group settles (`Grouping`)
-  and a request to play, shuffle or add is watched to its end (`Queueing`); the time limit of a
-  press; the pages of a list a view holds (`PagedList`), the library's items and the queue's
-  entries; and `can_draw()`, which says whether the fonts draw a character.
-- **`UiHost.h`**: an abstract class with what a view may ask for: a speaker chosen, a transport
-  command, a step of the volume, a speaker added to the chosen speaker's group or removed from it, a
-  fetch again, a page of the artists, an artist's albums, an album's tracks, the playlists or the
-  queue, an item played, shuffled or added to the queue, the queue cleared, a piece of artwork.
+  speakers and the chosen one with each one's group, whether motion wakes the screen, the
+  playback, the group's volume, the pending changes of groups, the items asked to be queued and
+  the items asked to be marked or unmarked as a favourite, with the rules by which a command or a
+  press changes what they show (`Playback`, `Volume`), a change of a group settles (`Grouping`), a
+  request to play, shuffle or add is watched to its end (`Queueing`) and a change of a favourite
+  is settled and applied (`Favouring`, `FavouriteChange`); the time limit of a press; the counts
+  that tell a view to fetch the queue or the favourites again; the pages of a list a view holds
+  (`PagedList`), the library's items, the favourites and the queue's entries; and `can_draw()`,
+  which says whether the fonts draw a character.
+- **`UiHost.h`**: an abstract class with what a view may ask for: a speaker chosen, motion set to
+  wake the screen or not, a transport command, a step of the volume, a speaker added to the chosen
+  speaker's group or removed from it, a fetch again, a page of the artists, an artist's albums, an
+  album's tracks, the playlists, the favourites or the queue, an item played, shuffled or added to
+  the queue, an item marked or unmarked as a favourite, the queue cleared, a piece of artwork.
   `Application` implements it on the device; `sim/` implements it with fixtures.
 
 `ui/log.h` gives the views `UI_LOGI`, `UI_LOGW` and `UI_LOGE`: `ESP_LOGx` when `ESP_PLATFORM` is
@@ -844,8 +876,8 @@ code the device runs, and a scene can check the body the device would send.
   `pop()` and `update()`, so no frame draws a view at the wrong height.
 - **The first view.** `Shell::open()` shows the speaker picker while the display needs a speaker
   (`Model::needs_speaker()`: none is chosen, or the last list the backend answered lacks the
-  chosen one; a list never answered holds nothing), and the now-playing screen otherwise. From
-  then on `update()` keeps it the right one: when the hold begins or ends, every view gives way.
+  chosen one; a list never answered holds nothing), and Home otherwise. From then on `update()`
+  keeps it the right one: when the hold begins or ends, every view gives way.
 - **Views** are what PaperClock calls a UI: a class deriving from `View`, with `do_render(parent)`
   building its objects inside the content area, `do_update()` called from the loop while it is
   the top view, and `do_show()` when it shows again after the view over it closed. `Shell` keeps
@@ -864,37 +896,63 @@ code the device runs, and a scene can check the body the device would send.
   presses over the row's whole height. The chosen speaker's row has no control, only its tick where
   the controls sit: it does not leave its own group from here. The now-playing screen shows the
   cover at 400 px, title, artist and album, previous, play or pause, and next, and under them the
-  group's volume: down, the level, up; its top row holds the speaker button, the library button
-  and the queue button. The bar shows the cover at 80 px, title and artist, play or pause, next,
-  and the volume; a touch on its cover or its texts opens the now-playing screen, the library's
-  and the queue's way back to it. Both build from `Cover` and `Controls`, so the rules are in one
-  place: a control is live only while the playback lists its command or the volume allows the step,
-  and one that is not is `LV_STATE_DISABLED`, which LVGL sends no click. A play or pause shows at
-  once; next and previous wait for the speaker's event. A muted group shows as muted, and up stays
-  live while it does, also at the top of the range: a press on it unmutes the group, and the icon
-  shows unmuted at once (section 4). What came of a press is said for five seconds, once, by the
-  now-playing screen or, under any other view, the bar (`PressNotice`): a queued item's failure in
-  the backend's words before the rest, then "That did not go through" for a command, a change of
-  the volume or of a group, a request to queue or a Clear that was not taken, then "Added to the
-  queue".
+  group's volume: down, the level, up; its top row holds a way back to the view it was opened
+  over, the speaker button and the queue button. The bar shows the cover at 80 px, title and
+  artist, play or pause, next, and the volume; a touch on its cover or its texts opens the
+  now-playing screen over the view on top, Home or a library screen, or, under the queue, which
+  now playing opened, goes back to it. Both build from `Cover` and `Controls`, so the rules are in
+  one place: a control is live only while the playback lists its command or the volume allows
+  the step, and one that is not is `LV_STATE_DISABLED`, which LVGL sends no click. A play or
+  pause shows at once; next and previous wait for the speaker's event. A muted group shows as
+  muted, and up stays live while it does, also at the top of the range: a press on it unmutes the
+  group, and the icon shows unmuted at once (section 4). What came of a press is said for five
+  seconds, once, by the now-playing screen or, under any other view, the bar (`PressNotice`): a
+  queued item's failure in the backend's words before the rest, then "That did not go through" for
+  a command, a change of the volume, of a group or of a favourite, a request to queue or a Clear
+  that was not taken, then "Added to the queue".
+- **Home** is a `ListView` with no way back: its heading holds "Favourites" at Medium 40, then
+  the motion setting and the entry into the library, "Library", which opens the artists. The
+  motion setting is a 64 px button whose icon alone shows how it is set: the sensor in the accent
+  while motion wakes the screen, struck through in the secondary text's colour while only a touch
+  does. A press switches it, and the display stores it (section 4); the write is synchronous on
+  the UI task, so it has no on-its-way look. Under the heading every favourite is a tile, 160 px
+  wide, four to a line, its picture at 160 over its title, one line at Regular 32; one that is not
+  available shows its title dimmed, asks for no picture and opens nothing. A tile asks for its
+  picture only while any of it is in the list's box, and lets go of it out of view: the tiles look
+  as the list is built, as a scroll of it ends, and at every change of the model. While there are
+  none, Home says how a favourite is added, under a heart's outline. Loading, failure with Try
+  again, and the pages are a list's, as below. A press on an available tile opens a sheet over
+  Home, its backdrop dimmed: a way back and the favourite's title, and under them the presses of
+  its item as on its library row, after "Albums" for an artist or "Tracks" for an album, which
+  close the sheet and open the library's screen of them over Home; a playlist has the presses
+  alone. A press beside the sheet closes it, as its way back does. The sheet's toggle shows the
+  favourite that marks the item as Home holds it: the tile's own, then what the backend took of
+  this display's presses on it. A mark made elsewhere shows on the tiles once they come again, not
+  on an open sheet.
 - **The library and the queue.** Each is a `ListView`: a heading with a back button and the title
   at Medium 40, and rows of 72 px with their titles at Regular 32. It holds a `PagedList` and builds
   a row for each item held; within a screen of an end with a page past it, it asks for that page,
   and the list says, past its rows, that the page is on its way, or why it did not come with Try
-  again. Rows carry no covers. The library button opens the artists, as the backend sorts them;
+  again. Rows carry no covers. Home's library entry opens the artists, as the backend sorts them;
   an "A–Z" button beside them opens a grid of the letters the rows file under, 9 by 3 over the
   list, each as large a target as the grid allows, and a letter brings its first artist to the
   top. A button under it opens the playlists. A
   press on an artist's row opens its albums, newest first, each with its year where it has one; a
   press on an album's row opens its tracks. A playlist opens nothing: the backend does not list its
-  tracks. Every artist, album and playlist row ends in Play, Shuffle and Add to queue, every track
-  row in Play and Add to queue, 64 px each; a press on one does not open its row, and a drag that
-  starts on one still scrolls the list. The queue lists each entry's title and, beside it, its
-  artist. It opens on the page holding the loaded track, that row at the top and marked in the
-  accent; while no track of the queue is loaded, a line under the heading says it plays from
-  another source, or the screen says the queue is empty. While it shows it asks again for the page
-  at its top when `Model::queue_changes` moves, and once the event stream is back after a loss.
-  Clear ends its heading and asks to be confirmed over the list.
+  tracks. Every artist, album and playlist row ends in Play, Shuffle, Add to queue and the
+  favourite toggle, a heart while a favourite marks the item and its outline while none does, every
+  track row in Play and Add to queue, 64 px each (`ItemPresses`); a press on one does not open its
+  row, and a drag that starts on one still scrolls the list. A press shows as on its way from the
+  press until the backend answers it, or the time limit settles it: a turning spinner in the
+  button's place (`PressButton`), as on the speakers screen's group control, and a second press on
+  it sends nothing. The artists, albums and playlists apply at once what the backend took of this
+  display's presses on their toggles, and ask again for the page at their top whenever
+  `Model::favourites_changes` moves (section 4). The queue lists each entry's title and, beside
+  it, its artist. It opens on the page holding the loaded track, that row at the top and marked
+  in the accent; while no track of the queue is loaded, a line under the heading says it plays
+  from another source, or the screen says the queue is empty. While it shows it asks again for the
+  page at its top when `Model::queue_changes` moves, and once the event stream is back after a
+  loss. Clear ends its heading and asks to be confirmed over the list.
 - **`Theme`** sets up the dark theme once, with `lv_theme_default_init(disp, primary, secondary,
   true, font)`, and holds the palette and the type scale as named constants. Starting values:
   background `#101214`, surface `#1C1F24`, text `#F2F2F2`, secondary text `#A0A6AD`, accent
@@ -1167,7 +1225,7 @@ checks (`read_artwork`), the cache (`ArtworkCache`) and `ArtworkLoader`, which a
 | Size | Used for | Bytes each |
 |---|---|---|
 | 400 × 400 | now playing | 320,000 |
-| 160 × 160 | favourites tiles, album grids | 51,200 |
+| 160 × 160 | Home's tiles | 51,200 |
 | 80 × 80 | list rows, the now-playing bar | 12,800 |
 
 The cache holds images by artwork id and size, capped at 1.5 MiB in total. That is, for example,
@@ -1179,6 +1237,14 @@ an icon. A picture the backend did not give, or that was not kept, is asked for 
 change of the model, never on a timer. A view asks only for what is visible, and its requests die
 with it (the `scope` of section 4). Nothing is fetched while the screen is dark: what is asked for
 meanwhile, and still wanted, is fetched when it wakes.
+
+Home's list is 288 px tall and a line of tiles about 228 with its gap, so at most three lines,
+twelve tiles, are in view at once, and Home holds at most twelve pictures at 160: about 600 KB
+beside the now-playing screen's cover and the bar's, which stay held while now playing is open over
+it, all under the cap. The twelve tiles in view and the two covers ask in fewer requests than the
+artwork client's queue of 16 holds. A quick scroll while the first pictures are on their way can
+ask for more; a request the full queue refuses is answered as failed, and its tile asks again at the
+next scroll or change of the model.
 
 ### Lists
 
@@ -1275,3 +1341,11 @@ watchdog reset; whether a press still waits behind a stalled fetch on weak WiFi;
 scrolling, the A–Z grid and the rows' buttons under a finger; Play, Shuffle, Add and Clear on a
 speaker, the queue's mark, and its refetch on the events; up on a muted group; and free internal RAM
 with the largest list open, against the 60 KB target.
+
+What only a display shows of milestone 3's favourites and Home is still to see there: a mark's
+`POST` and an unmark's `DELETE` through `esp_http_client`, and the lists and Home fetched again on
+`favourites_changed`; how long a press shows on its way; the motion setting's NVS write and the
+panel restart after it, and that, switched off, motion neither wakes the screen nor keeps it lit;
+Home's tiles and their pictures, how much of a title Regular 32 leaves readable, whether the motion
+setting's icon reads as the setting without a label, the sheet under a finger, and free internal
+RAM with Home's pictures held.
