@@ -1,7 +1,7 @@
 #pragma once
 
-// An album's tracks, in disc and track order. A track's buttons play it or add it to the queue: a
-// track is never shuffled.
+// An album's tracks, in disc and track order. A press on a track's line plays the album from it,
+// and its button adds it to the queue: a track is never shuffled.
 
 #include <cstddef>
 #include <cstdint>

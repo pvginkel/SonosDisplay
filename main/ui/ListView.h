@@ -2,8 +2,8 @@
 
 // A screen of a list the backend gives in pages: a heading with a way back, unless the screen is
 // the root, and under it a row, or a tile, for every item held. A subclass holds the pages
-// (PagedList), asks the host for one, builds an item's row, which it may give the queue's buttons
-// and the favourite toggle, applies to its items the changes of a favourite the backend took, and
+// (PagedList), asks the host for one, builds an item's row, which it may give the item's presses
+// (ItemPresses), applies to its items the changes of a favourite the backend took, and
 // opens an item whose row it made openable; it may end the heading with its own, and say a line
 // under it. A list whose items carry a favourite, or are the favourites, asks for them again
 // whenever the favourites may have changed unseen. While the Shell's "Reconnecting" marker shows
@@ -43,10 +43,10 @@ class ListView : public View {
     uint32_t _first_index{};
     // Whether the pages changed since the list was built.
     bool _changed{};
-    // The presses of each row built with the queue's buttons.
+    // The presses of each row built with them.
     std::vector<std::unique_ptr<ItemPresses>> _presses;
     // The ids of the requests to queue an item, and of the changes of a favourite, that were on
-    // their way when the buttons last showed them.
+    // their way when the presses last showed them.
     std::vector<uint32_t> _shown_presses;
     std::vector<uint32_t> _shown_changes;
     // How many changes of a favourite the backend had taken when the view last applied them, and
@@ -103,6 +103,12 @@ protected:
     // and the toggle what the backend took. Every row of a list has them, or none does.
     void create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::string& item_id,
                               std::optional<int64_t> favourite_id);
+
+    // Makes this row, which build_row() was handed, the line of the track with `track_id`, with its
+    // presses (ItemPresses): a press on it plays the album with `album_id` from the track, and Add
+    // to queue ends it. Each shows its press on its way as create_queue_buttons()'s do. Every row of
+    // a list has them, or none does.
+    void create_track_presses(lv_obj_t* row, const std::string& album_id, const std::string& track_id);
 
     // Whether the subclass's items carry the favourite that marks each, as artists, albums and
     // playlists do, or are the favourites. The list then applies to them the changes of a favourite

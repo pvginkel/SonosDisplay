@@ -690,7 +690,8 @@ enum class ItemKind {
 // What a press on an item of the library does with the queue of the chosen speaker's group, as
 // the API names it.
 enum class QueueAction {
-    // Replaces the queue with the item, and plays it in order: an artist's albums newest first.
+    // Replaces the queue with the item, and plays it in order: an artist's albums newest first, an
+    // album from the track its request starts at (QueueRequest::start_track_id).
     Play,
     // Replaces the queue with the item, and plays it shuffled. A track is never shuffled.
     Shuffle,
@@ -706,6 +707,12 @@ struct QueueRequest {
     std::string item_id;
 
     QueueAction action{};
+
+    // The track an album's Play starts at, by its id as the API gives it: the whole album replaces
+    // the queue, the tracks before it first, and playback starts at it. Only an album's Play names
+    // one, which the API refuses with any other kind or action; none plays the album from its
+    // first track.
+    std::optional<std::string> start_track_id;
 
     bool operator==(const QueueRequest&) const = default;
 };
@@ -767,8 +774,8 @@ struct Queueing {
         return std::any_of(sending.begin(), sending.end(), [id](const Sent& sent) { return sent.id == id; });
     }
 
-    // Whether a request for this item and action is on its way. A view shows the button that sent
-    // it so, and a press on that button sends no second one.
+    // Whether this request is on its way: the same item, action and start track. A view shows the
+    // press that sent it so, and that press sends no second one.
     bool is_on_its_way(const QueueRequest& request) const {
         return std::any_of(sending.begin(), sending.end(),
                            [&request](const Sent& sent) { return sent.request == request; });

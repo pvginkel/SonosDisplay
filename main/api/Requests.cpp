@@ -64,7 +64,9 @@ std::optional<std::string> write_queue_request(const QueueRequest& request) {
     if (!root || !cJSON_AddStringToObject(root.get(), "kind", kind_name(request.kind)) ||
         !cJSON_AddStringToObject(root.get(), "item_id", request.item_id.c_str()) ||
         !cJSON_AddStringToObject(root.get(), "action", action_name(request.action)) ||
-        (ordered && !cJSON_AddStringToObject(root.get(), "order", "newest_first"))) {
+        (ordered && !cJSON_AddStringToObject(root.get(), "order", "newest_first")) ||
+        (request.start_track_id &&
+         !cJSON_AddStringToObject(root.get(), "start_track_id", request.start_track_id->c_str()))) {
         return std::nullopt;
     }
 

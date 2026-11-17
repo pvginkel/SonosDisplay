@@ -442,6 +442,12 @@ void ListView::create_queue_buttons(lv_obj_t* row, ItemKind kind, const std::str
     _presses.push_back(std::make_unique<ItemPresses>(_host, row, kind, item_id, favourite_id));
 }
 
+void ListView::create_track_presses(lv_obj_t* row, const std::string& album_id, const std::string& track_id) {
+    lv_obj_set_style_pad_right(row, QUEUE_BUTTONS_END, LV_PART_MAIN);
+
+    _presses.push_back(std::make_unique<ItemPresses>(_host, row, album_id, track_id));
+}
+
 // The changes the backend took since the view last applied them go to the subclass's items, and
 // each toggle built shows what they leave of its item's favourite. A view that missed more of them
 // than are held, or while the favourites may have changed unseen, asks for its items again, which

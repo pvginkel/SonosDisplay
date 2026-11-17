@@ -29,4 +29,8 @@ public:
 
     // Whether the button shows its press on its way.
     static bool is_on_its_way(const lv_obj_t* button);
+
+    // Builds in `parent` the spinner a button shows while its press is on its way, SIZE across, for
+    // a press on what is no button: a track's line (ItemPresses).
+    static lv_obj_t* create_spinner(lv_obj_t* parent);
 };

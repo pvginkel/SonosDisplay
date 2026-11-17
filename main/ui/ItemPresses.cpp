@@ -8,14 +8,16 @@
 #include "lv_support.h"
 
 static constexpr int32_t BUTTON_GAP = 8;
+static constexpr lv_style_selector_t PRESSED =
+    lv_style_selector_t(LV_PART_MAIN) | lv_style_selector_t(LV_STATE_PRESSED);
 
-// The queue's buttons of an item, in order: a track is never shuffled.
+// The queue's buttons of an item, in order: a track's line plays it, and a track is never shuffled.
 static std::span<const QueueAction> get_queue_actions(ItemKind kind) {
     static constexpr QueueAction ALL[] = {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add};
-    static constexpr QueueAction UNSHUFFLED[] = {QueueAction::Play, QueueAction::Add};
+    static constexpr QueueAction TRACK[] = {QueueAction::Add};
 
     if (kind == ItemKind::Track) {
-        return UNSHUFFLED;
+        return TRACK;
     }
 
     return ALL;
@@ -56,6 +58,16 @@ ItemPresses::ItemPresses(UiHost* host, lv_obj_t* parent, ItemKind kind, std::str
     }
 }
 
+ItemPresses::ItemPresses(UiHost* host, lv_obj_t* line, std::string album_id, std::string track_id)
+    : ItemPresses(host, line, ItemKind::Track, std::move(track_id), std::nullopt) {
+    _line = line;
+    _album_id = std::move(album_id);
+
+    lv_obj_add_flag(line, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(line, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_add_event_cb(line, line_clicked, LV_EVENT_CLICKED, this);
+}
+
 void ItemPresses::apply(const FavouriteChange& change) {
     const auto favourite_id = change.apply(_kind, _item_id, _favourite_id);
     if (favourite_id == _favourite_id) {
@@ -77,9 +89,37 @@ void ItemPresses::show_on_its_way() {
         PressButton::show_on_its_way(lv_obj_get_child(_buttons, int32_t(i)), on_its_way);
     }
 
+    if (_line) {
+        show_line_on_its_way(model.queueing.is_on_its_way(get_line_request()));
+    }
+
     if (_kind != ItemKind::Track) {
         PressButton::show_on_its_way(lv_obj_get_child(_buttons, -1), model.favouring.is_on_its_way(_kind, _item_id));
     }
+}
+
+QueueRequest ItemPresses::get_line_request() const {
+    return QueueRequest{
+        .kind = ItemKind::Album, .item_id = _album_id, .action = QueueAction::Play, .start_track_id = _item_id};
+}
+
+// As a PressButton shows it: a spinner turns before the buttons, where a track's Play was, and a
+// press on the line does not look pressed. The line's own colour is the surface ListView gives a row.
+void ItemPresses::show_line_on_its_way(bool on_its_way) {
+    if (on_its_way == (_line_spinner != nullptr)) {
+        return;
+    }
+
+    lv_obj_set_style_bg_color(_line, Theme::color(on_its_way ? Theme::SURFACE : Theme::SURFACE_PRESSED), PRESSED);
+
+    if (!on_its_way) {
+        lv_obj_delete(_line_spinner);
+        _line_spinner = nullptr;
+        return;
+    }
+
+    _line_spinner = PressButton::create_spinner(_line);
+    lv_obj_move_to_index(_line_spinner, int32_t(lv_obj_get_index(_buttons)));
 }
 
 // A press whose request is on its way sends nothing; the item's other buttons still send theirs.
@@ -89,6 +129,16 @@ void ItemPresses::queue_clicked(lv_event_t* event) {
     const auto place = size_t(lv_obj_get_index(lv_event_get_current_target_obj(event)));
     const QueueRequest request{
         .kind = self->_kind, .item_id = self->_item_id, .action = get_queue_actions(self->_kind)[place]};
+
+    if (!self->_host->get_model().queueing.is_on_its_way(request)) {
+        self->_host->queue_item(request);
+    }
+}
+
+// A press while the line's request is on its way sends nothing.
+void ItemPresses::line_clicked(lv_event_t* event) {
+    auto self = (ItemPresses*)lv_event_get_user_data(event);
+    const auto request = self->get_line_request();
 
     if (!self->_host->get_model().queueing.is_on_its_way(request)) {
         self->_host->queue_item(request);

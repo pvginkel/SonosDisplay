@@ -3448,14 +3448,24 @@ static lv_obj_t* find_queue_buttons(const lv_obj_t* row) {
     return last && lv_obj_check_type(last, &lv_obj_class) ? last : nullptr;
 }
 
+// The spinner a track's line shows before its buttons while its press is on its way, if it shows
+// one.
+static lv_obj_t* find_line_spinner(const lv_obj_t* row) {
+    const auto before = find_queue_buttons(row) ? lv_obj_get_child(row, -2) : nullptr;
+
+    return before && lv_obj_check_type(before, &lv_spinner_class) ? before : nullptr;
+}
+
 // Whether this object of a list is the row of an item, and not the state of a page past them: it
-// holds labels, its title first, and may end in the queue's buttons.
+// holds labels, its title first, and may end in the queue's buttons, a track's line's spinner
+// before them while its press is on its way.
 static bool is_row(const lv_obj_t* obj) {
     if (!lv_obj_check_type(obj, &lv_obj_class) || !lv_obj_get_child_count(obj)) {
         return false;
     }
 
-    const auto labels = lv_obj_get_child_count(obj) - (find_queue_buttons(obj) ? 1 : 0);
+    const auto labels =
+        lv_obj_get_child_count(obj) - (find_queue_buttons(obj) ? 1 : 0) - (find_line_spinner(obj) ? 1 : 0);
     if (!labels) {
         return false;
     }
@@ -5215,6 +5225,10 @@ static void expect_queue_rules() {
     QueueRequest request{.kind = ItemKind::Album, .item_id = "album-\"1\"", .action = QueueAction::Play};
     expect(write_queue_request(request) == R"({"kind":"album","item_id":"album-\"1\"","action":"play"})",
            "an id was not written as a JSON string");
+    request.start_track_id = "track-\"4\"";
+    expect(write_queue_request(request) ==
+               R"({"kind":"album","item_id":"album-\"1\"","action":"play","start_track_id":"track-\"4\""})",
+           "an album's play from a track did not name the track, as a JSON string");
 
     static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
     Queueing queueing;
@@ -5230,6 +5244,18 @@ static void expect_queue_rules() {
                !queueing.is_on_its_way(
                    QueueRequest{.kind = ItemKind::Album, .item_id = "album-2", .action = QueueAction::Add}),
            "a request on its way was not told by its item and action alone");
+    const auto from_track = [](const char* track_id) {
+        return QueueRequest{
+            .kind = ItemKind::Album, .item_id = "album-1", .action = QueueAction::Play, .start_track_id = track_id};
+    };
+    Queueing apart;
+    apart.sent(from_track("track-1"), 1000);
+    expect(apart.is_on_its_way(from_track("track-1")) && !apart.is_on_its_way(from_track("track-2")) &&
+               !apart.is_on_its_way(press(QueueAction::Play)),
+           "an album's play from a track was not told apart from its play from another track, or from its start");
+    apart.sent(press(QueueAction::Play), 1000);
+    expect(apart.is_on_its_way(press(QueueAction::Play)) && apart.is_on_its_way(from_track("track-1")),
+           "an album's play from its start and from a track were not each on its way");
     expect(!queueing.task_ended(TaskEnd{.task_id = "task-9", .error = "other"}) && queueing.ended.size() == 1,
            "an end that came while a request was on its way was not held");
     queueing.taken(id, "task-7");
@@ -5281,24 +5307,24 @@ static void expect_queue_rules() {
 }
 
 // How many buttons end the row of an artist, an album or a playlist: Play, Shuffle, Add to queue and
-// the favourite toggle. A track's has Play and Add to queue alone.
+// the favourite toggle. A track's has Add to queue alone: a press on its line plays it.
 static constexpr uint32_t ITEM_BUTTONS = 4;
-static constexpr uint32_t TRACK_BUTTONS = 2;
+static constexpr uint32_t TRACK_BUTTONS = 1;
 
-// The button that does `action` at the end of this row: Play first, then Shuffle where the row has
-// it, then Add to queue, and the favourite toggle last where the row has it.
+// The button that does `action` at the end of this row: Play, Shuffle, Add to queue and the
+// favourite toggle, or a track's Add to queue alone.
 static lv_obj_t* find_queue_button(const lv_obj_t* row, QueueAction action) {
     const auto buttons = find_queue_buttons(row);
     expect(buttons, "the row does not end in the queue's buttons");
 
     const auto count = lv_obj_get_child_count(buttons);
     expect(count == ITEM_BUTTONS || count == TRACK_BUTTONS, "the row does not end in the buttons of an item");
-    expect(action != QueueAction::Shuffle || count == ITEM_BUTTONS, "the row has no Shuffle");
+    expect(action == QueueAction::Add || count == ITEM_BUTTONS, "a track's row has a button other than Add to queue");
 
     const auto index = action == QueueAction::Play      ? 0
                        : action == QueueAction::Shuffle ? 1
                        : count == ITEM_BUTTONS          ? 2
-                                                        : 1;
+                                                        : 0;
     return lv_obj_get_child(buttons, index);
 }
 
@@ -5328,12 +5354,43 @@ static bool shows_at_rest(const lv_obj_t* button) {
     return lv_obj_get_child_count(button) == 1 && !lv_obj_has_flag(lv_obj_get_child(button, 0), LV_OBJ_FLAG_HIDDEN);
 }
 
+// Whether a press on a track's line looks pressed: it takes the colour of a row pressed, where the
+// line's own is the surface.
+static bool looks_pressed(lv_obj_t* row, uint32_t pressed) {
+    lv_style_value_t color;
+    const auto found = lv_obj_get_local_style_prop(row, LV_STYLE_BG_COLOR, &color,
+                                                   lv_style_selector_t(LV_PART_MAIN) | LV_STATE_PRESSED);
+
+    return found == LV_STYLE_RES_FOUND && lv_color_eq(color.color, Theme::color(pressed));
+}
+
+// Whether a track's line shows its press on its way as a button does: a spinner as large as a
+// button turns before its buttons, and a press on the line does not look pressed.
+static bool shows_line_on_its_way(lv_obj_t* row) {
+    const auto spinner = find_line_spinner(row);
+    if (!spinner) {
+        return false;
+    }
+
+    lv_area_t area;
+    lv_obj_get_coords(spinner, &area);
+
+    return lv_area_get_width(&area) == PressButton::SIZE && lv_area_get_height(&area) == PressButton::SIZE &&
+           looks_pressed(row, Theme::SURFACE);
+}
+
+// Whether a track's line is at rest: it takes a press, which looks pressed, and shows no spinner.
+static bool shows_line_at_rest(lv_obj_t* row) {
+    return !find_line_spinner(row) && lv_obj_has_flag(row, LV_OBJ_FLAG_CLICKABLE) &&
+           looks_pressed(row, Theme::SURFACE_PRESSED);
+}
+
 // The rows that show presses on their way, by title, and the actions of those presses.
 using Presses = std::vector<std::pair<std::string, std::vector<QueueAction>>>;
 
 // Of the queue's buttons of the list on screen, exactly those of `presses` show their press on its
-// way, and of the favourite toggles exactly those of the rows titled in `toggles`; every other one
-// is at rest.
+// way, a track's Play being its line, and of the favourite toggles exactly those of the rows titled
+// in `toggles`; every other one is at rest.
 static const char* check_presses(const Presses& presses, const std::vector<std::string>& toggles = {}) {
     const auto list = find_list();
     if (!list) {
@@ -5361,14 +5418,25 @@ static const char* check_presses(const Presses& presses, const std::vector<std::
             }
         }
 
+        const auto track = !find_favourite_toggle(row);
         for (const auto action : {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add}) {
-            if (action == QueueAction::Shuffle && !find_favourite_toggle(row)) {
+            if (action == QueueAction::Shuffle && track) {
                 continue;
             }
 
             const auto on_its_way =
                 pressed != presses.end() &&
                 std::find(pressed->second.begin(), pressed->second.end(), action) != pressed->second.end();
+            if (action == QueueAction::Play && track) {
+                if (on_its_way && !shows_line_on_its_way(row)) {
+                    return "a press on its way does not show on its track's line";
+                }
+                if (!on_its_way && !shows_line_at_rest(row)) {
+                    return "a track's line whose press is not on its way is not at rest";
+                }
+                continue;
+            }
+
             const auto button = find_queue_button(row, action);
             if (on_its_way && !shows_on_its_way(button)) {
                 return "a press on its way does not show on its button";
@@ -5402,14 +5470,14 @@ static const char* check_added(const SimHost& host) {
     return says(MSG_ADDED_TO_QUEUE) ? nullptr : "the bar does not say that the add went";
 }
 
-// Every row of the list on screen ends in the queue's buttons, three and the favourite toggle, or
-// two without Shuffle and the toggle, each at rest: no press is on its way.
+// Every row of the list on screen ends in the queue's buttons, three and the favourite toggle, or a
+// track's Add to queue alone, and every press, a track's line's too, is at rest: none is on its way.
 static const char* check_queue_buttons(size_t count) {
     for (const auto row : get_rows(find_list())) {
         const auto buttons = find_queue_buttons(row);
         if (!buttons || lv_obj_get_child_count(buttons) != (count == 3 ? ITEM_BUTTONS : TRACK_BUTTONS)) {
             return count == 3 ? "a row does not offer Play, Shuffle, Add to queue and the favourite toggle"
-                              : "a row does not offer Play and Add to queue alone";
+                              : "a track's row does not offer Add to queue alone";
         }
     }
 
@@ -5571,13 +5639,15 @@ static const char* check_albums_long_title(const SimHost&, const Shell& shell) {
     return title.y1 >= shown.y1 && title.y2 <= shown.y2 ? nullptr : "the row with the long title is not on screen";
 }
 
-// A press on a track's Play and Add to queue; a track offers no Shuffle.
+// A press on a track's line plays its album from the track, and a press on another track's Add to
+// queue adds that track alone: a track's row offers no Play and no Shuffle, and the bar says that
+// the add went.
 static void tracks_queue(SimHost& host, Shell& shell) {
     host.answer_queue_requests(202, QUEUE_TAKEN);
     host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
     open_tracks(host, shell);
 
-    tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Play);
+    tap_row(host, shell, KVEIKUR[0].c_str());
     tap_queue_button(host, shell, KVEIKUR[1].c_str(), QueueAction::Add);
 }
 
@@ -5585,23 +5655,54 @@ static const char* check_tracks_queue(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_screen<TracksView>(shell, 2)) {
         return problem;
     }
-    if (const auto problem = check_queue_buttons(2)) {
+    if (const auto problem = check_queue_buttons(1)) {
         return problem;
     }
-    if (const auto problem =
-            check_queue_requests(host,
-                                 {
-                                     {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Play},
-                                     {.kind = ItemKind::Track, .item_id = "track-2", .action = QueueAction::Add},
-                                 },
-                                 {
-                                     R"({"kind":"track","item_id":"track-1","action":"play"})",
-                                     R"({"kind":"track","item_id":"track-2","action":"add"})",
-                                 })) {
+    if (const auto problem = check_queue_requests(
+            host,
+            {
+                {.kind = ItemKind::Album,
+                 .item_id = "album-12",
+                 .action = QueueAction::Play,
+                 .start_track_id = "track-1"},
+                {.kind = ItemKind::Track, .item_id = "track-2", .action = QueueAction::Add},
+            },
+            {
+                R"({"kind":"album","item_id":"album-12","action":"play","start_track_id":"track-1"})",
+                R"({"kind":"track","item_id":"track-2","action":"add"})",
+            })) {
         return problem;
     }
 
     return check_added(host);
+}
+
+// A drag that starts on a track's line scrolls the list, and sends nothing.
+static void tracks_queue_drag(SimHost& host, Shell& shell) {
+    const auto many = make_many_tracks();
+    host.tracks().serve(200, make_pages(many, make_tracks_body));
+    open_tracks(host, shell);
+
+    lv_area_t area;
+    lv_obj_get_coords(show_row(shell, many[2].c_str()), &area);
+    const lv_point_t from{(area.x1 + area.x2) / 2, (area.y1 + area.y2) / 2};
+
+    host.drag(from, lv_point_t{from.x, from.y - 160});
+}
+
+static const char* check_tracks_queue_drag(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+    if (!host.get_queue_requests().empty()) {
+        return "a drag that started on a track's line played it";
+    }
+    if (const auto problem = check_queue_buttons(1)) {
+        return problem;
+    }
+
+    return lv_obj_get_scroll_y(find_list()) > 0 ? nullptr
+                                                : "a drag that started on a track's line did not scroll the list";
 }
 
 // A press on a playlist's Play, Shuffle and Add to queue, each on the playlist of its row.
@@ -5878,38 +5979,83 @@ static const char* check_albums_queue_on_its_way(const SimHost& host, const Shel
     return check_presses({{"Átta", {QueueAction::Play, QueueAction::Shuffle, QueueAction::Add}}});
 }
 
-// A press on a track's Play and Add to queue, none answered yet, and a second press on its Add:
-// both buttons show their press on its way, and the second press sends nothing.
+// A press on a track's line and its Add to queue, none answered yet, a second press on each, and a
+// press on the third track's line: the first track's line and Add to queue and the third's line
+// show their press on its way, each line its own, the second presses send nothing, and the other
+// tracks are at rest.
 static void tracks_queue_on_its_way(SimHost& host, Shell& shell) {
     host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
     open_tracks(host, shell);
 
-    tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Play);
+    tap_row(host, shell, KVEIKUR[0].c_str());
     tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Add);
+    tap_row(host, shell, KVEIKUR[0].c_str());
     tap_queue_button(host, shell, KVEIKUR[0].c_str(), QueueAction::Add);
+    tap_row(host, shell, KVEIKUR[2].c_str());
 }
 
 static const char* check_tracks_queue_on_its_way(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_screen<TracksView>(shell, 2)) {
         return problem;
     }
-    if (const auto problem =
-            check_queue_requests(host,
-                                 {
-                                     {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Play},
-                                     {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Add},
-                                 },
-                                 {
-                                     R"({"kind":"track","item_id":"track-1","action":"play"})",
-                                     R"({"kind":"track","item_id":"track-1","action":"add"})",
-                                 })) {
+    if (const auto problem = check_queue_requests(
+            host,
+            {
+                {.kind = ItemKind::Album,
+                 .item_id = "album-12",
+                 .action = QueueAction::Play,
+                 .start_track_id = "track-1"},
+                {.kind = ItemKind::Track, .item_id = "track-1", .action = QueueAction::Add},
+                {.kind = ItemKind::Album,
+                 .item_id = "album-12",
+                 .action = QueueAction::Play,
+                 .start_track_id = "track-3"},
+            },
+            {
+                R"({"kind":"album","item_id":"album-12","action":"play","start_track_id":"track-1"})",
+                R"({"kind":"track","item_id":"track-1","action":"add"})",
+                R"({"kind":"album","item_id":"album-12","action":"play","start_track_id":"track-3"})",
+            })) {
         return problem;
     }
     if (const auto problem = check_nothing_said()) {
         return problem;
     }
 
-    return check_presses({{KVEIKUR[0], {QueueAction::Play, QueueAction::Add}}});
+    return check_presses({{KVEIKUR[0], {QueueAction::Play, QueueAction::Add}}, {KVEIKUR[2], {QueueAction::Play}}});
+}
+
+// A press on a track's line, answered once it is on its way: the line is at rest again, and
+// nothing is said of a play taken.
+static void tracks_queue_answered(SimHost& host, Shell& shell) {
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_tracks(host, shell);
+
+    tap_row(host, shell, KVEIKUR[0].c_str());
+    host.answer_after(after_touches_ms(1), [&host]() { host.answer_queue_request(202, QUEUE_TAKEN); });
+}
+
+static const char* check_tracks_queue_answered(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 2)) {
+        return problem;
+    }
+    if (host.count_unanswered_queue_requests()) {
+        return "the answer did not come";
+    }
+    if (const auto problem = check_queue_requests(
+            host,
+            {{.kind = ItemKind::Album,
+              .item_id = "album-12",
+              .action = QueueAction::Play,
+              .start_track_id = "track-1"}},
+            {R"({"kind":"album","item_id":"album-12","action":"play","start_track_id":"track-1"})"})) {
+        return problem;
+    }
+    if (const auto problem = check_queue_buttons(1)) {
+        return problem;
+    }
+
+    return check_nothing_said();
 }
 
 // A press on a playlist's Shuffle, not answered yet, and a second one: the button shows its press
@@ -9736,6 +9882,7 @@ const std::vector<Scene>& get_scenes() {
         {"albums-queue", albums_queue, check_albums_queue, after_touches_ms(3)},
         {"albums-long-title", albums_long_title, check_albums_long_title},
         {"tracks-queue", tracks_queue, check_tracks_queue, after_touches_ms(2)},
+        {"tracks-queue-drag", tracks_queue_drag, check_tracks_queue_drag, 1000},
         {"playlists-queue", playlists_queue, check_playlists_queue, after_touches_ms(3)},
         {"queue-not-taken", queue_not_taken, check_queue_not_taken, after_touches_ms(1)},
         {"queue-failed", queue_failed, check_queue_failed, 800},
@@ -9745,7 +9892,8 @@ const std::vector<Scene>& get_scenes() {
         {"queue-failed-now-playing", queue_failed_now_playing, check_queue_failed_now_playing, 1000},
         {"artists-queue-on-its-way", artists_queue_on_its_way, check_artists_queue_on_its_way, after_touches_ms(4)},
         {"albums-queue-on-its-way", albums_queue_on_its_way, check_albums_queue_on_its_way, after_touches_ms(4)},
-        {"tracks-queue-on-its-way", tracks_queue_on_its_way, check_tracks_queue_on_its_way, after_touches_ms(3)},
+        {"tracks-queue-on-its-way", tracks_queue_on_its_way, check_tracks_queue_on_its_way, after_touches_ms(5)},
+        {"tracks-queue-answered", tracks_queue_answered, check_tracks_queue_answered, after_touches_ms(1) + 300},
         {"playlists-queue-on-its-way", playlists_queue_on_its_way, check_playlists_queue_on_its_way,
          after_touches_ms(2)},
         {"albums-queue-answered", albums_queue_answered, check_albums_queue_answered, ATTA_ANSWER_MS + 300},

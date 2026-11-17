@@ -43,12 +43,18 @@ void PressButton::show_on_its_way(lv_obj_t* button, bool on_its_way) {
         return;
     }
 
-    auto spinner = lv_spinner_create(button);
-    lv_obj_set_size(spinner, LV_PCT(100), LV_PCT(100));
+    create_spinner(button);
+}
+
+bool PressButton::is_on_its_way(const lv_obj_t* button) { return lv_obj_get_child_count(button) > 1; }
+
+lv_obj_t* PressButton::create_spinner(lv_obj_t* parent) {
+    auto spinner = lv_spinner_create(parent);
+    lv_obj_set_size(spinner, SIZE, SIZE);
     lv_obj_set_style_arc_width(spinner, SPINNER_ARC_WIDTH, LV_PART_MAIN);
     lv_obj_set_style_arc_width(spinner, SPINNER_ARC_WIDTH, LV_PART_INDICATOR);
     lv_obj_set_style_arc_color(spinner, Theme::color(Theme::SURFACE_PRESSED), LV_PART_MAIN);
     lv_obj_set_style_arc_color(spinner, Theme::color(Theme::ACCENT), LV_PART_INDICATOR);
-}
 
-bool PressButton::is_on_its_way(const lv_obj_t* button) { return lv_obj_get_child_count(button) > 1; }
+    return spinner;
+}
