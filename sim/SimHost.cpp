@@ -31,6 +31,17 @@ void SimHost::choose_speaker(const std::string& id) {
     refresh_volume();
 }
 
+void SimHost::set_motion_wakes(bool wakes) {
+    _motion_settings.push_back(wakes);
+
+    if (wakes == _model.motion_wakes) {
+        return;
+    }
+
+    _model.motion_wakes = wakes;
+    _model.revision++;
+}
+
 void SimHost::refresh_speakers() {
     if (_model.speakers.state != LoadState::Loaded) {
         _model.speakers.state = LoadState::Loading;

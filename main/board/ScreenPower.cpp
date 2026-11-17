@@ -52,7 +52,17 @@ bool ScreenPower::handle_touch(bool pressed) {
     return false;
 }
 
+void ScreenPower::set_motion_wakes(bool wakes) {
+    ESP_LOGI(TAG, "%s", wakes ? "Motion wakes the screen" : "Only a touch wakes the screen");
+
+    _motion_wakes = wakes;
+}
+
 void ScreenPower::handle_motion() {
+    if (!_motion_wakes) {
+        return;
+    }
+
     _last_activity_ms = esp_get_millis();
 
     if (_state == State::Off) {

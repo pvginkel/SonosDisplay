@@ -10,8 +10,8 @@
 #include "TracksView.h"
 #include "lv_support.h"
 
-// The entries, into the library and from a sheet into an item's albums or tracks, and the sheet's
-// way back are as tall as the heading.
+// The entries, into the library and from a sheet into an item's albums or tracks, the motion
+// setting and the sheet's way back are as tall as the heading.
 static constexpr int32_t ENTRY_HEIGHT = 64;
 static constexpr int32_t ENTRY_PADDING = 24;
 static constexpr int32_t ENTRY_GAP = 12;
@@ -35,6 +35,10 @@ void HomeView::do_update() {
 
     if (!lv_obj_has_flag(_sheet, LV_OBJ_FLAG_HIDDEN)) {
         _sheet_presses->show_on_its_way();
+    }
+
+    if (_host->get_model().motion_wakes != _shows_motion_wakes) {
+        show_motion();
     }
 
     const auto revision = _host->get_model().revision;
@@ -95,8 +99,32 @@ static void create_entry(lv_obj_t* parent, const char* icon, const char* text, u
     lv_obj_set_style_text_font(label, Theme::FONT_TITLE, LV_PART_MAIN);
 }
 
+// The motion setting is an icon alone, so the title keeps its room beside the "Reconnecting" marker.
 void HomeView::do_render_heading(lv_obj_t* heading) {
+    auto motion = lv_container_create(heading);
+    lv_obj_set_size(motion, ENTRY_HEIGHT, ENTRY_HEIGHT);
+    lv_obj_add_flag(motion, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(motion, Theme::color(Theme::SURFACE), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(motion, Theme::color(Theme::SURFACE_PRESSED), PRESSED);
+    lv_obj_set_style_bg_opa(motion, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(motion, Theme::RADIUS, LV_PART_MAIN);
+    lv_obj_add_event_cb(motion, motion_clicked, LV_EVENT_CLICKED, this);
+
+    _motion_icon = lv_label_create(motion);
+    lv_obj_set_style_text_font(_motion_icon, Theme::FONT_ICON, LV_PART_MAIN);
+    lv_obj_center(_motion_icon);
+    show_motion();
+
     create_entry(heading, ICON_MUSIC_BOX_MULTIPLE, MSG_LIBRARY, Theme::SURFACE, library_clicked, this);
+}
+
+// On, the sensor in the accent; off, the sensor struck through, in the secondary text's colour.
+void HomeView::show_motion() {
+    _shows_motion_wakes = _host->get_model().motion_wakes;
+
+    lv_label_set_text(_motion_icon, _shows_motion_wakes ? ICON_MOTION_SENSOR : ICON_MOTION_SENSOR_OFF);
+    lv_obj_set_style_text_color(_motion_icon, Theme::color(_shows_motion_wakes ? Theme::ACCENT : Theme::TEXT_SECONDARY),
+                                LV_PART_MAIN);
 }
 
 // The picture over the title, which is cut where the tile ends.
@@ -251,6 +279,12 @@ void HomeView::open_sheet(const Favourite& favourite, std::optional<int64_t> fav
     _sheet_presses->show_on_its_way();
 
     lv_obj_remove_flag(_sheet, LV_OBJ_FLAG_HIDDEN);
+}
+
+void HomeView::motion_clicked(lv_event_t* event) {
+    auto self = (HomeView*)lv_event_get_user_data(event);
+
+    self->_host->set_motion_wakes(!self->_host->get_model().motion_wakes);
 }
 
 void HomeView::library_clicked(lv_event_t* event) {

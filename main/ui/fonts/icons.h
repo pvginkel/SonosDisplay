@@ -26,3 +26,5 @@
 #define ICON_PLAYLIST_PLAY "\xF3\xB0\x90\x91"  // U+F0411
 #define ICON_HEART "\xF3\xB0\x8B\x91"  // U+F02D1
 #define ICON_HEART_OUTLINE "\xF3\xB0\x8B\x95"  // U+F02D5
+#define ICON_MOTION_SENSOR "\xF3\xB0\xB6\x91"  // U+F0D91
+#define ICON_MOTION_SENSOR_OFF "\xF3\xB1\x90\xB5"  // U+F1435

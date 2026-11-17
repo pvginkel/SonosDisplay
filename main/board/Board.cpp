@@ -37,8 +37,8 @@ esp_err_t Board::begin() {
     ESP_ERROR_RETURN(i2c_new_master_bus(&bus_config, &_i2c_bus));
 
     // The screen is lit at boot only after a power-on reset. After any other reset it stays dark
-    // until motion or a touch, so a brown-out cannot loop through the backlight, and a display
-    // that restarts at night stays dark.
+    // until it is woken, so a brown-out cannot loop through the backlight, and a display that
+    // restarts at night stays dark.
     const auto reset_reason = esp_reset_reason();
     const auto lit = reset_reason == ESP_RST_POWERON;
 

@@ -22,3 +22,5 @@ playlist_plus F0412
 playlist_play F0411
 heart F02D1
 heart_outline F02D5
+motion_sensor F0D91
+motion_sensor_off F1435

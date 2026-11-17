@@ -5,9 +5,9 @@
 class Ch422g;
 class RgbPanel;
 
-// The only code that switches the backlight: wake on motion or a touch, sleep after a while,
-// and never two switches within a second (docs/firmware-design.md, section 3). Runs on the UI
-// task.
+// The only code that switches the backlight: wake on a touch, or on motion while motion wakes the
+// screen, sleep after a while, and never two switches within a second (docs/firmware-design.md,
+// section 3). Runs on the UI task.
 class ScreenPower {
 public:
     enum class State {
@@ -27,6 +27,7 @@ private:
     int64_t _last_switch_ms{};
     int64_t _last_activity_ms{};
     int64_t _timeout_ms;
+    bool _motion_wakes{true};
 
 public:
     static constexpr uint32_t DEFAULT_TIMEOUT_SECONDS = 60;
@@ -38,6 +39,10 @@ public:
     // `lit` says whether the expander's first write switched the backlight on.
     void begin(bool lit);
     void set_timeout_seconds(uint32_t seconds);
+
+    // Whether motion wakes the screen and keeps it lit, as a touch does; when it does not, motion
+    // is ignored. Motion wakes it until this says otherwise.
+    void set_motion_wakes(bool wakes);
 
     // Called for every touch read. Returns whether the touch reaches the UI.
     bool handle_touch(bool pressed);

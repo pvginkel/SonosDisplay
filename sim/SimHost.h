@@ -159,6 +159,7 @@ private:
     std::vector<std::optional<Touch>> _taps;
     // What answers on LVGL's clock, and from when.
     std::vector<std::pair<uint32_t, std::function<void()>>> _later;
+    std::vector<bool> _motion_settings;
     std::vector<Command> _commands;
     std::optional<Answer> _command_answer;
     std::optional<Answer> _next_playback;
@@ -205,6 +206,7 @@ public:
     Model& model() { return _model; }
     const Model& get_model() const override { return _model; }
     void choose_speaker(const std::string& id) override;
+    void set_motion_wakes(bool wakes) override;
     void refresh_speakers() override;
     void refresh_playback() override;
     void refresh_volume() override;
@@ -272,6 +274,9 @@ public:
     // What the backend answers every command from here on, read as the device reads it. Without
     // it a command stays on its way.
     void answer_commands(int status, const char* body) { _command_answer = Answer{status, body}; }
+
+    // What the views have set the motion setting to, in order, a setting it had already among them.
+    const std::vector<bool>& get_motion_settings() const { return _motion_settings; }
 
     // The commands the views have sent, in order.
     const std::vector<Command>& get_commands() const { return _commands; }

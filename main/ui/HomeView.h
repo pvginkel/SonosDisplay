@@ -1,13 +1,14 @@
 #pragma once
 
 // The view the display opens on once a speaker is chosen, with the now-playing bar under it: the
-// favourites as tiles, by title, under a heading that ends in the entry into the library. A tile
-// shows its favourite's picture and title; one that is not available shows its title dimmed, and
-// no picture, and opens nothing. A tile asks for its picture only while it shows in the list, and
-// holds it only while it draws it: the tiles look as the list is built, as a scroll of it ends,
-// and at every change of the model, which asks again for a picture the backend did not give. Home
-// asks for the favourites again whenever they may have changed unseen. While the Shell's
-// "Reconnecting" marker shows at the top right, the heading ends before it.
+// favourites as tiles, by title, under a heading that ends in the setting of whether motion wakes
+// the screen, which a press switches and whose icon shows which way it is set, and the entry into
+// the library. A tile shows its favourite's picture and title; one that is not available shows its
+// title dimmed, and no picture, and opens nothing. A tile asks for its picture only while it shows
+// in the list, and holds it only while it draws it: the tiles look as the list is built, as a
+// scroll of it ends, and at every change of the model, which asks again for a picture the backend
+// did not give. Home asks for the favourites again whenever they may have changed unseen. While
+// the Shell's "Reconnecting" marker shows at the top right, the heading ends before it.
 //
 // A press on an available tile opens its sheet over the view: the favourite's title after a way
 // back, and under it the presses its item's row in the library has (ItemPresses), and, for an
@@ -44,6 +45,9 @@ class HomeView : public ListView {
     };
 
     PagedList<Held> _favourites;
+    // The motion setting's icon, and the setting it shows.
+    lv_obj_t* _motion_icon{};
+    bool _shows_motion_wakes{};
     // The tiles built, in the order of the favourites they were built from.
     std::vector<Tile> _tiles;
     // The model's revision when the tiles last looked.
@@ -83,9 +87,11 @@ protected:
     void do_list_built() override;
 
 private:
+    void show_motion();
     void show_pictures();
     void build_sheet(lv_obj_t* parent);
     void open_sheet(const Favourite& favourite, std::optional<int64_t> favourite_id);
+    static void motion_clicked(lv_event_t* event);
     static void library_clicked(lv_event_t* event);
     static void scroll_ended(lv_event_t* event);
     static void sheet_closed(lv_event_t* event);

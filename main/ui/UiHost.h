@@ -28,6 +28,10 @@ public:
     // display. Nothing changes when it is the chosen one already.
     virtual void choose_speaker(const std::string& id) = 0;
 
+    // Has motion wake the screen and keep it lit, or, `wakes` false, only a touch, and stores the
+    // setting on the display. Nothing changes when it is set so already.
+    virtual void set_motion_wakes(bool wakes) = 0;
+
     // Asks the backend for the speakers again.
     virtual void refresh_speakers() = 0;
 

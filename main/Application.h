@@ -41,6 +41,7 @@ public:
 
     const Model& get_model() const override { return _model; }
     void choose_speaker(const std::string& id) override;
+    void set_motion_wakes(bool wakes) override;
     void refresh_speakers() override;
     void refresh_playback() override;
     void refresh_volume() override;
@@ -75,6 +76,7 @@ private:
     void run();
     void begin_backend();
     void load_speaker_choice();
+    void load_motion_setting();
     void speakers_answered(HttpResponse&& response);
     void playback_answered(HttpResponse&& response);
     void volume_answered(HttpResponse&& response);

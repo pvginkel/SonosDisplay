@@ -1054,6 +1054,10 @@ struct Model {
     // chosen. Only a pick changes it: the list may lack it.
     std::string speaker_id;
 
+    // Whether motion wakes the screen and keeps it lit, as stored on the display; while it does not,
+    // only a touch wakes it.
+    bool motion_wakes{true};
+
     // What the chosen speaker plays.
     Playback playback;
 

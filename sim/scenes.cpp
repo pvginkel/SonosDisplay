@@ -2992,7 +2992,7 @@ static const char* check_group_not_taken_later(const SimHost& host, const Shell&
 }
 
 // Home, the root, with the bar under it: its entry into the library, a target of the size of the
-// others, at the heading's end.
+// others, at the heading's end, and the motion setting before it, on.
 static void home(SimHost& host, Shell& shell) { open_home(host, shell, PLAYING); }
 
 // The box of the button whose label says this, on screen.
@@ -3011,6 +3011,38 @@ static std::optional<lv_area_t> find_button_of(const char* text) {
     return area;
 }
 
+// Home's setting of whether motion wakes the screen: a target of the size of the others in the
+// heading, just before the entry into the library, whose icon is the sensor in the accent while
+// motion wakes the screen, `wakes`, and the sensor struck through, in the secondary text's colour,
+// while only a touch does.
+static const char* check_motion_setting(bool wakes) {
+    lv_obj_update_layout(lv_screen_active());
+
+    std::vector<lv_obj_t*> found;
+    find_labels(lv_screen_active(), wakes ? ICON_MOTION_SENSOR : ICON_MOTION_SENSOR_OFF, found);
+    if (found.size() != 1 || says(wakes ? ICON_MOTION_SENSOR_OFF : ICON_MOTION_SENSOR)) {
+        return wakes ? "the motion setting does not show that motion wakes the screen"
+                     : "the motion setting does not show that only a touch wakes the screen";
+    }
+    if (!lv_color_eq(lv_obj_get_style_text_color(found[0], LV_PART_MAIN),
+                     Theme::color(wakes ? Theme::ACCENT : Theme::TEXT_SECONDARY))) {
+        return "the motion setting's icon is not in its setting's colour";
+    }
+
+    lv_area_t button;
+    lv_obj_get_coords(lv_obj_get_parent(found[0]), &button);
+    if (lv_area_get_height(&button) < 64 || lv_area_get_width(&button) < 64) {
+        return "the motion setting is smaller than a touch target";
+    }
+
+    const auto entry = find_button_of(MSG_LIBRARY);
+    if (!entry || button.y1 != entry->y1 || button.x2 + 1 + Theme::GAP != entry->x1) {
+        return "the motion setting is not just before the entry into the library";
+    }
+
+    return nullptr;
+}
+
 static const char* check_home_screen(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_home(host, shell)) {
         return problem;
@@ -3027,7 +3059,12 @@ static const char* check_home_screen(const SimHost& host, const Shell& shell) {
         return "the entry into the library is smaller than a touch target";
     }
 
-    return entry->x2 == 800 - 1 - Theme::PADDING ? nullptr : "the entry into the library is not at the heading's end";
+    if (entry->x2 != 800 - 1 - Theme::PADDING) {
+        return "the entry into the library is not at the heading's end";
+    }
+
+    // Motion wakes the screen until the setting is first changed.
+    return check_motion_setting(true);
 }
 
 // The hold on the picker begins while views are open over Home: the list that arrives lacks the
@@ -3088,7 +3125,7 @@ static const char* check_home_now_playing_back(const SimHost& host, const Shell&
     return shell.count_views() == 1 ? nullptr : "the now-playing screen did not close";
 }
 
-// Home's heading ends before the "Reconnecting" marker, at the top right.
+// Home's heading ends before the "Reconnecting" marker, at the top right, with its title whole.
 static void home_reconnecting(SimHost& host, Shell& shell) {
     host.model().stream_state = StreamState::Disconnected;
     host.model().stream_down_since = lv_tick_get() - 10 * 1000;
@@ -3110,7 +3147,14 @@ static const char* check_home_reconnecting(const SimHost& host, const Shell& she
         return "Home does not offer the library beside the marker";
     }
 
-    return entry->x2 < marker->x1 - Theme::GAP ? nullptr : "the entry into the library is not clear of the marker";
+    if (entry->x2 >= marker->x1 - Theme::GAP) {
+        return "the entry into the library is not clear of the marker";
+    }
+    if (!says(MSG_FAVOURITES)) {
+        return "Home's title is cut beside the marker";
+    }
+
+    return check_motion_setting(true);
 }
 
 // The marker over the now-playing screen's cover moves to the top right as its back button closes
@@ -9318,6 +9362,63 @@ static const char* check_home_tile_mark_again_reopened(const SimHost& host, cons
     return check_sheet_presses({}, true);
 }
 
+// A press on Home's motion setting switches it off, and the setting shows it.
+static void home_motion_off(SimHost& host, Shell& shell) {
+    open_home(host, shell, PLAYING);
+
+    tap_label(host, shell, ICON_MOTION_SENSOR);
+}
+
+static const char* check_home_motion(const SimHost& host, const Shell& shell, const std::vector<bool>& settings) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (shell.count_views() != 1) {
+        return "a press on the motion setting opened a screen";
+    }
+    if (host.get_motion_settings() != settings) {
+        return "the presses on the motion setting did not switch it as pressed";
+    }
+
+    return check_motion_setting(host.get_model().motion_wakes);
+}
+
+static const char* check_home_motion_off(const SimHost& host, const Shell& shell) {
+    return check_home_motion(host, shell, {false});
+}
+
+// A second press on the motion setting switches it on again.
+static void home_motion_on(SimHost& host, Shell& shell) {
+    open_home(host, shell, PLAYING);
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+
+    const auto setting = find_label_center(lv_screen_active(), ICON_MOTION_SENSOR, false);
+    expect(setting.has_value(), "Home does not show the motion setting");
+
+    host.tap(setting->x, setting->y);
+    host.tap(setting->x, setting->y);
+}
+
+static const char* check_home_motion_on(const SimHost& host, const Shell& shell) {
+    return check_home_motion(host, shell, {false, true});
+}
+
+// Home opened on a display that stored the setting off shows it off, and sets nothing.
+static void home_motion_stored_off(SimHost& host, Shell& shell) {
+    host.model().motion_wakes = false;
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_motion_stored_off(const SimHost& host, const Shell& shell) {
+    if (host.get_model().motion_wakes) {
+        return "the setting stored off is on";
+    }
+
+    return check_home_motion(host, shell, {});
+}
+
 const std::vector<Scene>& get_scenes() {
     static const std::vector<Scene> scenes = {
         {"loading", loading, check_no_bar},
@@ -9361,6 +9462,9 @@ const std::vector<Scene>& get_scenes() {
         {"home-now-playing", home_now_playing, check_bar_opened<2>},
         {"home-now-playing-back", home_now_playing_back, check_home_now_playing_back, after_touches_ms(2)},
         {"home-reconnecting", home_reconnecting, check_home_reconnecting},
+        {"home-motion-off", home_motion_off, check_home_motion_off},
+        {"home-motion-on", home_motion_on, check_home_motion_on, after_touches_ms(2)},
+        {"home-motion-stored-off", home_motion_stored_off, check_home_motion_stored_off},
         {"home-tiles", home_tiles, check_home_tiles},
         {"home-tiles-unavailable", home_tiles_unavailable, check_home_tiles_unavailable},
         {"home-tiles-picture-refused", home_tiles_picture_refused, check_home_tiles_picture_refused},

@@ -37,10 +37,11 @@ static constexpr size_t ARTWORK_MAX_RESPONSE = 512 * 1024;
 static constexpr int MIN_SCREEN_OFF_SECONDS = 10;
 static constexpr int MAX_SCREEN_OFF_SECONDS = 3600;
 
-// Where the speaker choice is stored: not in esp-mdm's namespace, whose unknown keys are deleted
-// when provisioning data is renewed.
-static constexpr char SPEAKER_NVS_NAMESPACE[] = "sonos";
+// Where the speaker choice and whether motion wakes the screen are stored: not in esp-mdm's
+// namespace, whose unknown keys are deleted when provisioning data is renewed.
+static constexpr char NVS_NAMESPACE[] = "sonos";
 static constexpr char SPEAKER_NVS_KEY[] = "speaker";
+static constexpr char MOTION_NVS_KEY[] = "motion_wakes";
 
 // certs/homelab-root.pem, which main/CMakeLists.txt embeds with a NUL after its last byte.
 extern const char homelab_root_pem[] asm("_binary_homelab_root_pem_start");
@@ -115,7 +116,7 @@ static std::optional<std::string> join_body(const std::string& speaker_id) {
 
 static esp_err_t read_speaker_choice(std::string& id) {
     nvs_handle_t handle;
-    auto err = nvs_open(SPEAKER_NVS_NAMESPACE, NVS_READONLY, &handle);
+    auto err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
     if (err != ESP_OK) {
         return err;
     }
@@ -139,10 +140,39 @@ static esp_err_t read_speaker_choice(std::string& id) {
 
 static esp_err_t write_speaker_choice(const std::string& id) {
     nvs_handle_t handle;
-    ESP_ERROR_RETURN(nvs_open(SPEAKER_NVS_NAMESPACE, NVS_READWRITE, &handle));
+    ESP_ERROR_RETURN(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle));
     DEFER(nvs_close(handle));
 
     ESP_ERROR_RETURN(nvs_set_str(handle, SPEAKER_NVS_KEY, id.c_str()));
+
+    return nvs_commit(handle);
+}
+
+static esp_err_t read_motion_setting(bool& wakes) {
+    nvs_handle_t handle;
+    auto err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    DEFER(nvs_close(handle));
+
+    uint8_t value;
+    err = nvs_get_u8(handle, MOTION_NVS_KEY, &value);
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    wakes = value != 0;
+
+    return ESP_OK;
+}
+
+static esp_err_t write_motion_setting(bool wakes) {
+    nvs_handle_t handle;
+    ESP_ERROR_RETURN(nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle));
+    DEFER(nvs_close(handle));
+
+    ESP_ERROR_RETURN(nvs_set_u8(handle, MOTION_NVS_KEY, wakes ? 1 : 0));
 
     return nvs_commit(handle);
 }
@@ -161,6 +191,7 @@ void Application::run() {
     Theme::begin(_board->get_display());
 
     load_speaker_choice();
+    load_motion_setting();
 
     _shell = std::make_unique<Shell>(this);
     _shell->begin(_board->get_display());
@@ -254,6 +285,35 @@ void Application::load_speaker_choice() {
     } else {
         ESP_LOGE(TAG, "Cannot read the speaker choice: %s", esp_err_to_name(err));
     }
+}
+
+// The key is not found until the setting is first changed, and motion wakes the screen until then.
+void Application::load_motion_setting() {
+    const auto err = read_motion_setting(_model.motion_wakes);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "Cannot read whether motion wakes the screen: %s", esp_err_to_name(err));
+    }
+
+    _board->get_screen_power().set_motion_wakes(_model.motion_wakes);
+}
+
+void Application::set_motion_wakes(bool wakes) {
+    if (wakes == _model.motion_wakes) {
+        return;
+    }
+
+    const auto err = write_motion_setting(wakes);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Cannot store whether motion wakes the screen: %s", esp_err_to_name(err));
+    }
+
+    // A flash write can shift the picture until the panel is restarted (docs/firmware-design.md,
+    // section 3).
+    _board->resync_panel();
+
+    _board->get_screen_power().set_motion_wakes(wakes);
+    _model.motion_wakes = wakes;
+    model_changed();
 }
 
 void Application::choose_speaker(const std::string& id) {
