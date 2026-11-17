@@ -7293,6 +7293,42 @@ static const char* check_artists_favourite_back(const SimHost& host, const Shell
     return check_heading_presses({}, false, false);
 }
 
+// A mark of Átta from the heading of its tracks, opened from Sigur Rós's albums, answered, and back:
+// the albums hold the mark on Átta alone. Kveikur's tracks, opened from its row, show no mark, and
+// Átta's, opened again, show it marked, without asking for the album.
+static void albums_favourite_back(SimHost& host, Shell& shell) {
+    open_album(host, shell, "Átta");
+
+    tap_heading_toggle(host);
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS,
+                      [&host]() { host.answer_favourite_change(201, FAVOURITE_ATTA); });
+    host.tap(BACK.x, BACK.y);
+    tap_row(host, shell, "Kveikur");
+    host.answer_after(3 * SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS, []() {
+        expect(!check_heading("Kveikur") && !check_heading_marked(false),
+               "Kveikur's tracks did not open, or show the mark Átta took");
+    });
+    host.tap(BACK.x, BACK.y);
+    tap_row(host, shell, "Átta");
+}
+
+static const char* check_albums_favourite_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 3)) {
+        return problem;
+    }
+    if (host.tracks().get_parent_ids() != std::vector<std::string>{"album-1", "album-2", "album-1"}) {
+        return "Átta's, Kveikur's and Átta's tracks did not open, one after the other";
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1} || !host.album().get_requests().empty()) {
+        return "the albums or an album were asked for again";
+    }
+    if (const auto problem = check_favourites_taken(host, 1)) {
+        return problem;
+    }
+
+    return check_heading_presses({}, false, true);
+}
+
 // A mark from the heading of Sigur Rós's albums while they are on their way, answered, and an unmark
 // of the favourite it made, not answered yet, and the albums come: the list is built, and the
 // heading's toggle shows her marked still, and its change on its way.
@@ -7552,6 +7588,46 @@ static std::vector<std::string> with_mark(std::vector<std::string> pages, size_t
     cJSON_Delete(root);
 
     return pages;
+}
+
+// Átta marked and unmarked from the heading of its tracks, opened from Sigur Rós's albums, each
+// answered before the next press, more times than the model holds the changes of, the last a mark,
+// and back: the albums missed changes, so they ask for the albums again, which the backend answers
+// with Átta marked by the last mark, and Átta's tracks, opened again from its row, show it marked.
+static void albums_favourite_missed_back(SimHost& host, Shell& shell) {
+    open_album(host, shell, "Átta");
+    host.albums().serve(200, with_mark(make_pages(ALBUMS, make_albums_body), 0, 42));
+
+    for (size_t i = 0; i < MISSED_CHANGES; i++) {
+        tap_heading_toggle(host);
+        host.answer_after(uint32_t(i + 1) * SimHost::TAP_INTERVAL_MS + ANSWER_BEFORE_NEXT_MS, [&host, i]() {
+            if (i % 2) {
+                host.answer_favourite_change(204, "");
+            } else {
+                host.answer_favourite_change(201, FAVOURITE_ATTA);
+            }
+        });
+    }
+    host.tap(BACK.x, BACK.y);
+    tap_row(host, shell, "Átta");
+}
+
+static const char* check_albums_favourite_missed_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 3)) {
+        return problem;
+    }
+    if (const auto problem = check_favourites_taken(host, MISSED_CHANGES)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums did not ask for the albums again";
+    }
+    if (host.tracks().get_parent_ids() != std::vector<std::string>{"album-1", "album-1"} ||
+        !host.album().get_requests().empty()) {
+        return "Átta's tracks did not open again, or its album was asked for";
+    }
+
+    return check_heading_presses({}, false, true);
 }
 
 // When the scenes of a mark made elsewhere have the event stream say so: after the screen opens,
@@ -10387,6 +10463,7 @@ const std::vector<Scene>& get_scenes() {
          ANSWER_TIME_LIMIT_MS + 1000},
         {"albums-favourite-copies", albums_favourite_copies, check_albums_favourite_copies, after_touches_ms(4)},
         {"artists-favourite-back", artists_favourite_back, check_artists_favourite_back, after_touches_ms(4)},
+        {"albums-favourite-back", albums_favourite_back, check_albums_favourite_back, after_touches_ms(6)},
         {"artists-favourite-page", artists_favourite_page, check_artists_favourite_page, after_touches_ms(3) + 300},
         {"albums-favourite-page", albums_favourite_page, check_albums_favourite_page, after_touches_ms(3) + 300},
         {"playlists-favourite-page", playlists_favourite_page, check_playlists_favourite_page,
@@ -10394,6 +10471,8 @@ const std::vector<Scene>& get_scenes() {
         {"albums-favourite-under", albums_favourite_under, check_albums_favourite_under, after_touches_ms(2)},
         {"albums-favourite-missed", albums_favourite_missed, check_albums_favourite_missed,
          after_touches_ms(MISSED_CHANGES + 1)},
+        {"albums-favourite-missed-back", albums_favourite_missed_back, check_albums_favourite_missed_back,
+         after_touches_ms(MISSED_CHANGES + 3)},
         {"artists-favourites-changed", artists_favourites_changed, check_artists_favourites_changed,
          after_touches_ms(3)},
         {"artists-favourites-reconnected", artists_favourites_reconnected, check_artists_favourites_reconnected,
