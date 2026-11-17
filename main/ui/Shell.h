@@ -5,8 +5,8 @@
 // Shell's, which is how it stays at the bottom of every screen: it shows under every view that has it (View::has_bar())
 // while the display is not held on the speaker picker, and the content area ends where it begins.
 //
-// It also decides which view the app opens on: now playing, or the speaker picker while the
-// display is held on it (Model::needs_speaker()).
+// It also decides which view the app opens on: Home, or the speaker picker while the display is
+// held on it (Model::needs_speaker()).
 
 #include <memory>
 #include <optional>

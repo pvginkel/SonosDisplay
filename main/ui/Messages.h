@@ -27,6 +27,8 @@
 
 #define MSG_VOLUME_UNKNOWN "–"
 
+#define MSG_LIBRARY "Library"
+
 #define MSG_ARTISTS "Artists"
 #define MSG_ARTISTS_LOADING "Looking up the artists"
 #define MSG_ARTISTS_EMPTY "The library has no artists"

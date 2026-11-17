@@ -92,8 +92,8 @@ void NowPlayingView::create_buttons(lv_obj_t* parent) {
     lv_obj_set_style_pad_column(row, Theme::GAP, LV_PART_MAIN);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
 
+    create_button(row, ICON_ARROW_LEFT, back_clicked, this);
     create_button(row, ICON_SPEAKER, speaker_clicked, this);
-    create_button(row, ICON_MUSIC_BOX_MULTIPLE, library_clicked, this);
     create_button(row, ICON_PLAYLIST_PLAY, queue_clicked, this);
 }
 
@@ -243,16 +243,16 @@ void NowPlayingView::apply_texts(const Playback& playback) {
     lv_label_set_text_lines(_detail, detail, COLUMN_WIDTH, detail_lines);
 }
 
+void NowPlayingView::back_clicked(lv_event_t* event) {
+    auto self = (NowPlayingView*)lv_event_get_user_data(event);
+
+    self->_shell->back();
+}
+
 void NowPlayingView::speaker_clicked(lv_event_t* event) {
     auto self = (NowPlayingView*)lv_event_get_user_data(event);
 
     self->_shell->open_speaker_picker();
-}
-
-void NowPlayingView::library_clicked(lv_event_t* event) {
-    auto self = (NowPlayingView*)lv_event_get_user_data(event);
-
-    self->_shell->open_library();
 }
 
 void NowPlayingView::queue_clicked(lv_event_t* event) {

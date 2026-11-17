@@ -17,6 +17,7 @@
 #include "AlbumsView.h"
 #include "ArtistsView.h"
 #include "Controls.h"
+#include "HomeView.h"
 #include "LoadingView.h"
 #include "Messages.h"
 #include "NowPlayingView.h"
@@ -303,7 +304,8 @@ static const char* const UNREADABLE_VOLUMES[] = {
 };
 
 // Where the now-playing screen's controls are.
-static constexpr lv_point_t SPEAKER_BUTTON = {488, 56};
+static constexpr lv_point_t NOW_PLAYING_BACK = {488, 56};
+static constexpr lv_point_t SPEAKER_BUTTON = {568, 56};
 static constexpr lv_point_t PLAY_PAUSE = {612, 324};
 static constexpr lv_point_t NEXT = {724, 324};
 static constexpr lv_point_t TRY_AGAIN = {612, 332};
@@ -344,6 +346,13 @@ static void expect(bool condition, const char* what) {
 template <typename T>
 static bool shows(const Shell& shell) {
     return dynamic_cast<const T*>(shell.get_current()) != nullptr;
+}
+
+// Opens the now-playing screen as a touch on the bar does, at once.
+static void show_now_playing(Shell& shell) {
+    shell.open_now_playing();
+    shell.update();
+    expect(shows<NowPlayingView>(shell), "the now-playing screen did not open");
 }
 
 // Whether a label that is on screen says this.
@@ -655,11 +664,11 @@ static void open_before_list(SimHost& host, Shell& shell, const char* speaker_id
     host.model().speaker_id = speaker_id;
 
     shell.open();
-    expect(shows<NowPlayingView>(shell), "a stored choice did not open on the now-playing screen");
+    expect(shows<HomeView>(shell), "a stored choice did not open on Home");
 }
 
-// The list that arrives lacks the stored speaker: the display leaves the now-playing screen and
-// is held on the picker, nothing is marked, and the choice stays stored.
+// The list that arrives lacks the stored speaker: the display leaves Home and is held on the
+// picker, nothing is marked, and the choice stays stored.
 static void speakers_missing(SimHost& host, Shell& shell) {
     open_before_list(host, shell, "speaker-shed");
 
@@ -720,6 +729,7 @@ static void speakers_glyphs(SimHost& host, Shell& shell) {
     host.answer_volume(200, SPEAKER);
 
     shell.open();
+    show_now_playing(shell);
     shell.open_speaker_picker();
 }
 
@@ -1138,9 +1148,9 @@ static const char* check_missing_pick(const SimHost& host, const Shell&) {
     return host.get_model().speaker_id == "speaker-library" ? nullptr : "the touch did not pick the second speaker";
 }
 
-// The now-playing screen as the app opens it: a speaker chosen that the list has, and a playback
-// and the speaker answered.
-static void open_now_playing(SimHost& host, Shell& shell, const char* playback, const char* speaker = SPEAKER) {
+// Home as the app opens it: a speaker chosen that the list has, and a playback and the speaker
+// answered.
+static void open_home(SimHost& host, Shell& shell, const char* playback, const char* speaker = SPEAKER) {
     host.model().speaker_id = "speaker-garage";
     answer_speakers(host);
     host.answer_playback(200, playback);
@@ -1149,6 +1159,13 @@ static void open_now_playing(SimHost& host, Shell& shell, const char* playback, 
     expect(host.get_model().volume.is_known(), "the speaker fixture was not read as a speaker");
 
     shell.open();
+    expect(shows<HomeView>(shell), "a chosen speaker did not open on Home");
+}
+
+// The now-playing screen, opened over Home.
+static void open_now_playing(SimHost& host, Shell& shell, const char* playback, const char* speaker = SPEAKER) {
+    open_home(host, shell, playback, speaker);
+    show_now_playing(shell);
 }
 
 // The covers held are the loaded track's and no other: the now-playing screen's at its size, and
@@ -1190,6 +1207,30 @@ static const char* check_now_playing(const SimHost& host, const Shell& shell) {
     return check_cover(host, shell);
 }
 
+// Home with the bar under it, the bar showing the loaded track's cover and no screen holding one at
+// its own size.
+static const char* check_home(const SimHost& host, const Shell& shell) {
+    if (!shows<HomeView>(shell)) {
+        return "the display is not on Home";
+    }
+    if (!shell.shows_bar()) {
+        return "Home does not show the bar";
+    }
+
+    const auto& playback = host.get_model().playback;
+    if (playback.state == LoadState::Loaded && playback.track && !playback.track->artwork_id.empty() &&
+        !host.is_artwork_shown(playback.track->artwork_id, BAR_COVER_SIZE)) {
+        return "the bar does not show the loaded track's cover";
+    }
+    for (const auto& fetch : host.get_artwork_fetches()) {
+        if (fetch.size == COVER_SIZE && host.is_artwork_shown(fetch.artwork_id, COVER_SIZE)) {
+            return "a cover is held at the now-playing screen's size";
+        }
+    }
+
+    return nullptr;
+}
+
 static void now_playing(SimHost& host, Shell& shell) {
     open_now_playing(host, shell, PLAYING);
 
@@ -1202,8 +1243,9 @@ static void now_playing(SimHost& host, Shell& shell) {
                                    .album = "Ágætis byrjun",
                                    .artwork_id = ARTWORK_PLAYING},
            "the playing fixture's track was not read as it is");
-    expect(host.get_artwork_fetches() == std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}},
-           "the playing track's cover was not fetched once, at the screen's size");
+    // The bar's first, under Home.
+    const std::vector<ArtworkFetch> fetches = {{ARTWORK_PLAYING, BAR_COVER_SIZE}, {ARTWORK_PLAYING, COVER_SIZE}};
+    expect(host.get_artwork_fetches() == fetches, "the playing track's cover was not fetched once at each size");
 
     const auto& volume = host.get_model().volume;
     expect(volume.level == 24 && !volume.muted && volume.shown() == 24, "the speaker fixture's volume was not read");
@@ -1385,9 +1427,9 @@ static const char* check_refused_later(const SimHost& host, const Shell& shell) 
     return check_now_playing(host, shell);
 }
 
-// The first pick: from the picker the display is held on to the now-playing screen, where the
-// playback is on its way.
-static void now_playing_loading(SimHost& host, Shell& shell) {
+// The first pick: the hold on the picker ends, and the display gives way to Home, where the bar
+// says that the playback is on its way.
+static void home_first_pick(SimHost& host, Shell& shell) {
     answer_speakers(host);
 
     shell.open();
@@ -1396,7 +1438,7 @@ static void now_playing_loading(SimHost& host, Shell& shell) {
     host.tap(FIRST_SPEAKER.x, FIRST_SPEAKER.y);
 }
 
-static const char* check_loading(const SimHost& host, const Shell& shell) {
+static const char* check_first_pick(const SimHost& host) {
     if (host.get_model().speaker_id != "speaker-garage") {
         return "the touch did not pick the first speaker";
     }
@@ -1405,6 +1447,39 @@ static const char* check_loading(const SimHost& host, const Shell& shell) {
     }
     if (host.get_model().volume.state != LoadState::Loading) {
         return "the pick did not ask for the volume";
+    }
+
+    return nullptr;
+}
+
+static const char* check_home_first_pick(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_first_pick(host)) {
+        return problem;
+    }
+    if (shell.count_views() != 1) {
+        return "the picker did not give way to Home";
+    }
+    if (!says(MSG_PLAYBACK_LOADING)) {
+        return "the bar does not say that the playback is on its way";
+    }
+
+    return check_home(host, shell);
+}
+
+// The same, and a touch on the bar: the now-playing screen opens over Home while the playback is on
+// its way.
+static void now_playing_loading(SimHost& host, Shell& shell) {
+    home_first_pick(host, shell);
+
+    host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+static const char* check_loading(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_first_pick(host)) {
+        return problem;
+    }
+    if (shell.count_views() != 2) {
+        return "the now-playing screen did not open over Home";
     }
 
     return check_now_playing(host, shell);
@@ -1418,6 +1493,7 @@ static void now_playing_unreachable(SimHost& host, Shell& shell) {
     host.model().volume.state = LoadState::Unreachable;
 
     shell.open();
+    show_now_playing(shell);
 }
 
 // An error after a playback: the error shows, and the playback is kept.
@@ -1484,6 +1560,7 @@ static void now_playing_unreadable(SimHost& host, Shell& shell) {
     expect(playback.state == LoadState::Failed && playback.error.empty(), "a bare array was not read as a failure");
 
     shell.open();
+    show_now_playing(shell);
 }
 
 // A touch on "Try again" asks for the playback and the volume again.
@@ -1494,6 +1571,7 @@ static void now_playing_retry(SimHost& host, Shell& shell) {
     host.model().volume.state = LoadState::Unreachable;
 
     shell.open();
+    show_now_playing(shell);
 
     host.tap(TRY_AGAIN.x, TRY_AGAIN.y);
 }
@@ -2233,7 +2311,9 @@ static void expect_no_cover_for_a_closed_view() {
     host.model().speaker_id = "speaker-garage";
     host.answer_playback(200, PLAYING);
     shell.open();
-    expect(host.get_artwork_fetches().size() == 1, "the now-playing screen did not ask for its cover");
+    show_now_playing(shell);
+    expect(host.get_artwork_fetches().back() == ArtworkFetch{ARTWORK_PLAYING, COVER_SIZE},
+           "the now-playing screen did not ask for its cover");
 
     shell.replace(std::make_unique<LoadingView>(&host, MSG_STARTING));
     host.answer_artwork();
@@ -2270,7 +2350,7 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
 
     // Back on the first track: its cover is in the cache.
     expect(!shown(PLAYING), "a cover the display has was not shown at once");
-    expect(host.get_artwork_fetches().size() == 2, "a cover the display has was fetched again");
+    expect(host.get_artwork_fetches().size() == 3, "a cover the display has was fetched again");
 
     // A failure hides the cover with the track, and the next answer brings both back.
     host.answer_playback(502, ERROR_SPEAKER);
@@ -2283,7 +2363,9 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
 }
 
 static const char* check_cover_change(const SimHost& host, const Shell& shell) {
+    // The bar's first, under Home.
     const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PLAYING, BAR_COVER_SIZE},
         {ARTWORK_PLAYING, COVER_SIZE},
         {ARTWORK_PAUSED, COVER_SIZE},
         {ARTWORK_PAUSED, COVER_SIZE},
@@ -2355,24 +2437,25 @@ static void now_playing_cover_refused(SimHost& host, Shell& shell) {
     };
     const auto fetched = [&host]() { return host.get_artwork_fetches().size(); };
 
-    // An image that fails its checks: the placeholder stays, and nothing asks again by itself.
+    // An image that fails its checks: the placeholder stays, and nothing asks again by itself. The
+    // bar under Home asked first.
     host.answer_artwork_with(200, with(2, 0x08));
     open_now_playing(host, shell, PLAYING);
     shell.update();
-    expect(fetched() == 1 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
+    expect(fetched() == 2 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
            "an image that fails its checks is shown, or was asked for again with nothing changed");
 
     // The backend out of reach: the next change of what plays asked again, to no avail.
     host.set_artwork_reachable(false);
     plays(PLAYING);
-    expect(fetched() == 2 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
+    expect(fetched() == 3 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
            "a cover the backend did not give was not asked for again when what plays changed");
 
     // The album's next track has the same cover, and brings it.
     host.set_artwork_reachable(true);
     host.answer_artwork_as_made();
     plays(PLAYING_LAST);
-    expect(fetched() == 3 && host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
+    expect(fetched() == 4 && host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
            "the cover did not come with the album's next track");
 
     // No picture has the next track's id.
@@ -2382,10 +2465,8 @@ static void now_playing_cover_refused(SimHost& host, Shell& shell) {
 
 static const char* check_cover_refused(const SimHost& host, const Shell& shell) {
     const std::vector<ArtworkFetch> fetches = {
-        {ARTWORK_PLAYING, COVER_SIZE},
-        {ARTWORK_PLAYING, COVER_SIZE},
-        {ARTWORK_PLAYING, COVER_SIZE},
-        {ARTWORK_PAUSED, COVER_SIZE},
+        {ARTWORK_PLAYING, BAR_COVER_SIZE}, {ARTWORK_PLAYING, COVER_SIZE}, {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},     {ARTWORK_PAUSED, COVER_SIZE},
     };
     if (host.get_artwork_fetches() != fetches) {
         return "the covers were not asked for as the tracks changed";
@@ -2444,14 +2525,14 @@ static void open_bar(SimHost& host, Shell& shell, const char* playback, const ch
     expect(shell.shows_bar(), "the picker reached from the now-playing screen does not show the bar");
 }
 
-// The bar under the picker: the cover at its own size, beside the one the now-playing screen
-// under the picker still holds.
+// The bar under the picker: the cover at its own size, which the bar under Home fetched, beside
+// the one the now-playing screen under the picker still holds.
 static void bar(SimHost& host, Shell& shell) {
     open_bar(host, shell, PLAYING);
 
     const std::vector<ArtworkFetch> fetches = {
-        {ARTWORK_PLAYING, COVER_SIZE},
         {ARTWORK_PLAYING, BAR_COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
     };
     expect(host.get_artwork_fetches() == fetches, "the bar's cover was not fetched once, at the bar's size");
 
@@ -2764,9 +2845,10 @@ static void bar_cover_change(SimHost& host, Shell& shell) {
 }
 
 static const char* check_bar_cover_change(const SimHost& host, const Shell& shell) {
+    // The bar's first, under Home.
     const std::vector<ArtworkFetch> fetches = {
-        {ARTWORK_PLAYING, COVER_SIZE},
         {ARTWORK_PLAYING, BAR_COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
         {ARTWORK_PAUSED, BAR_COVER_SIZE},
         {ARTWORK_PAUSED, COVER_SIZE},
     };
@@ -2778,19 +2860,22 @@ static const char* check_bar_cover_change(const SimHost& host, const Shell& shel
 }
 
 // A touch on the bar's cover, from the speakers screen: the screen closes, and the now-playing
-// screen under it is the top view again.
+// screen under it, over Home, is the top view again.
 static void bar_open_cover(SimHost& host, Shell& shell) {
     open_bar(host, shell, PLAYING);
 
     host.tap(BAR_COVER.x, BAR_COVER.y);
 }
 
+// The now-playing screen is the top view, over `VIEWS` - 1 others: down to Home where it was in the
+// stack, or over the screen the bar was touched on where it was not.
+template <size_t VIEWS>
 static const char* check_bar_opened(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_now_playing(host, shell)) {
         return problem;
     }
 
-    return shell.count_views() == 1 ? nullptr : "the views over the now-playing screen did not close";
+    return shell.count_views() == VIEWS ? nullptr : "the now-playing screen is not over the views it should be";
 }
 
 // A touch on the bar's texts, from the speakers screen.
@@ -2811,18 +2896,12 @@ static void bar_open_failed_list(SimHost& host, Shell& shell) {
     host.tap(BAR_ABOVE_TEXTS.x, BAR_ABOVE_TEXTS.y);
 }
 
-// The now-playing screen is not the root, as it is not once a home screen is: with none in the
-// stack a touch on the bar opens one on top, and with one under the top view it closes the views
-// over it and none under it.
+// The now-playing screen is not the root, Home is: with none in the stack a touch on the bar opens
+// one on top, and with one under the top view it closes the views over it and none under it.
 static void bar_open_not_root(SimHost& host, Shell& shell) {
-    host.model().speaker_id = "speaker-garage";
-    answer_speakers(host);
-    host.answer_playback(200, PLAYING);
-    host.answer_volume(200, SPEAKER);
-
-    shell.replace(std::make_unique<SpeakerPickerView>(&host, &shell));
+    open_home(host, shell, PLAYING);
     shell.update();
-    expect(shell.shows_bar(), "the speakers screen at the root does not show the bar");
+    expect(shell.shows_bar(), "Home does not show the bar");
 
     host.tap(BAR_COVER.x, BAR_COVER.y);
     host.tap(SPEAKER_BUTTON.x, SPEAKER_BUTTON.y);
@@ -2858,7 +2937,7 @@ static const char* check_bar_controls(const SimHost& host, const Shell& shell) {
     if (host.get_volume_changes() != std::vector<int>{Volume::STEP, -Volume::STEP}) {
         return "the bar's up and down did not send their steps";
     }
-    if (shell.count_views() != 2) {
+    if (shell.count_views() != 3) {
         return "a touch on the bar's controls changed the views";
     }
 
@@ -2910,6 +2989,149 @@ static const char* check_group_not_taken_later(const SimHost& host, const Shell&
     }
 
     return check_bar(host, shell);
+}
+
+// Home, the root, with the bar under it: its entry into the library, a target of the size of the
+// others, at the heading's end.
+static void home(SimHost& host, Shell& shell) { open_home(host, shell, PLAYING); }
+
+// The box of the button whose label says this, on screen.
+static std::optional<lv_area_t> find_button_of(const char* text) {
+    lv_obj_update_layout(lv_screen_active());
+
+    std::vector<lv_obj_t*> found;
+    find_labels(lv_screen_active(), text, found);
+    if (found.size() != 1) {
+        return std::nullopt;
+    }
+
+    lv_area_t area;
+    lv_obj_get_coords(lv_obj_get_parent(found[0]), &area);
+
+    return area;
+}
+
+static const char* check_home_screen(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (shell.count_views() != 1) {
+        return "Home is not the root";
+    }
+
+    const auto entry = find_button_of(MSG_LIBRARY);
+    if (!entry) {
+        return "Home does not offer the library";
+    }
+    if (lv_area_get_height(&*entry) < 64 || lv_area_get_width(&*entry) < 64) {
+        return "the entry into the library is smaller than a touch target";
+    }
+
+    return entry->x2 == 800 - 1 - Theme::PADDING ? nullptr : "the entry into the library is not at the heading's end";
+}
+
+// The hold on the picker begins while views are open over Home: the list that arrives lacks the
+// chosen speaker, and every view gives way to the picker.
+static void home_hold_begins(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+    shell.open_queue();
+    expect(shell.count_views() == 3, "the queue did not open over the now-playing screen");
+
+    host.answer_speakers(200, SPEAKERS_EMPTY);
+}
+
+static const char* check_home_hold_begins(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_held(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 1 ? nullptr : "the views did not give way to the picker";
+}
+
+// The hold ends: the list that arrives has the chosen speaker again, and the picker gives way to
+// Home.
+static void home_hold_ends(SimHost& host, Shell& shell) {
+    home_hold_begins(host, shell);
+    shell.update();
+    expect(!check_home_hold_begins(host, shell), "the display is not held on the picker");
+
+    host.answer_speakers(200, SPEAKERS);
+}
+
+static const char* check_home_hold_ends(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 1 ? nullptr : "the picker did not give way to Home";
+}
+
+// A touch on the bar opens the now-playing screen over Home.
+static void home_now_playing(SimHost& host, Shell& shell) {
+    open_home(host, shell, PLAYING);
+
+    host.tap(BAR_COVER.x, BAR_COVER.y);
+}
+
+// The now-playing screen's back button closes it: Home shows again, with the bar.
+static void home_now_playing_back(SimHost& host, Shell& shell) {
+    home_now_playing(host, shell);
+
+    host.tap(NOW_PLAYING_BACK.x, NOW_PLAYING_BACK.y);
+}
+
+static const char* check_home_now_playing_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 1 ? nullptr : "the now-playing screen did not close";
+}
+
+// Home's heading ends before the "Reconnecting" marker, at the top right.
+static void home_reconnecting(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+
+    open_home(host, shell, PLAYING);
+}
+
+static const char* check_home_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home(host, shell)) {
+        return problem;
+    }
+    if (const auto problem = check_marker(true)) {
+        return problem;
+    }
+
+    const auto entry = find_button_of(MSG_LIBRARY);
+    const auto marker = find_button_of(MSG_RECONNECTING);
+    if (!entry || !marker) {
+        return "Home does not offer the library beside the marker";
+    }
+
+    return entry->x2 < marker->x1 - Theme::GAP ? nullptr : "the entry into the library is not clear of the marker";
+}
+
+// The marker over the now-playing screen's cover moves to the top right as its back button closes
+// it over Home.
+static void now_playing_back_reconnecting(SimHost& host, Shell& shell) {
+    host.model().stream_state = StreamState::Disconnected;
+    host.model().stream_down_since = lv_tick_get() - 10 * 1000;
+    open_now_playing(host, shell, PLAYING);
+
+    shell.update();
+    expect(!check_marker(false), "the marker does not show over the now-playing screen's cover");
+
+    host.tap(NOW_PLAYING_BACK.x, NOW_PLAYING_BACK.y);
+}
+
+static const char* check_now_playing_back_reconnecting(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_home_reconnecting(host, shell)) {
+        return problem;
+    }
+
+    return shell.count_views() == 1 ? nullptr : "the now-playing screen did not close";
 }
 
 // An artist of a fixture: its title, and the letter it files under.
@@ -3134,11 +3356,9 @@ static const char* const UNREADABLE_ARTISTS[] = {
     R"("meta":{"page":1,"per_page":100,"total":1}})",
 };
 
-// Where the artists screen's back button and the button that opens its letters are, and the now
-// playing screen's library button.
+// Where the artists screen's back button and the button that opens its letters are.
 static constexpr lv_point_t BACK = {64, 48};
 static constexpr lv_point_t JUMP = {728, 136};
-static constexpr lv_point_t LIBRARY_BUTTON = {568, 56};
 
 // Where the list's top is, on a screen with the bar.
 static constexpr int32_t LIST_TOP = 96;
@@ -3291,7 +3511,7 @@ static RowPlace scroll_list(Shell& shell, bool to_end) {
 }
 
 static void open_artists(SimHost& host, Shell& shell) {
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
 
     shell.open_library();
     expect(shell.shows_bar(), "the artists screen does not show the bar");
@@ -3373,12 +3593,12 @@ static void expect_in_place(const RowPlace& place, const char* what) {
     expect(row && get_place(row).top == place.top, what);
 }
 
-// The now-playing screen's library button opens the artists, over it, with the bar under them.
+// Home's entry into the library opens the artists, over it, with the bar under them.
 static void library_open(SimHost& host, Shell& shell) {
     host.artists().serve(200, make_artist_pages(LIBRARY));
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
 
-    host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
+    tap_label(host, shell, MSG_LIBRARY);
 }
 
 static const char* check_library_open(const SimHost& host, const Shell& shell) {
@@ -3386,7 +3606,7 @@ static const char* check_library_open(const SimHost& host, const Shell& shell) {
         return problem;
     }
     if (shell.count_views() != 2) {
-        return "the artists screen did not open over the now-playing screen";
+        return "the artists screen did not open over Home";
     }
     if (host.artists().get_requests() != std::vector<uint32_t>{1}) {
         return "the artists were not asked for once, from the first page";
@@ -3895,7 +4115,7 @@ static void artists_back(SimHost& host, Shell& shell) {
 }
 
 static const char* check_artists_back(const SimHost& host, const Shell& shell) {
-    if (const auto problem = check_now_playing(host, shell)) {
+    if (const auto problem = check_home(host, shell)) {
         return problem;
     }
 
@@ -3904,31 +4124,31 @@ static const char* check_artists_back(const SimHost& host, const Shell& shell) {
 
 // What the now-playing screen said is not said again once a view over it closes, however soon.
 static void now_playing_refused_back(SimHost& host, Shell& shell) {
-    host.artists().serve(200, make_artist_pages(LIBRARY));
     open_now_playing(host, shell, PLAYING);
     host.answer_commands(409, ERROR_NOT_AVAILABLE);
     host.answer_next_playback(200, PLAYING_LAST);
 
     host.tap(NEXT.x, NEXT.y);
-    host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
-    host.tap(BACK.x, BACK.y);
+    host.tap(SPEAKER_BUTTON.x, SPEAKER_BUTTON.y);
+    host.tap(FIRST_SPEAKER.x, FIRST_SPEAKER.y);
 }
 
 static const char* check_now_playing_refused_back(const SimHost& host, const Shell& shell) {
     if (const auto problem = check_refused(host, shell)) {
         return problem;
     }
-    if (shell.count_views() != 1) {
-        return "the artists screen did not close";
+    if (shell.count_views() != 2) {
+        return "the speakers screen did not close";
     }
     if (says(MSG_COMMAND_NOT_TAKEN)) {
-        return "the now-playing screen still says what it said before the artists screen opened over it";
+        return "the now-playing screen still says what it said before the speakers screen opened over it";
     }
 
     return check_now_playing(host, shell);
 }
 
-// A touch on the bar's cover, or on its texts, from the artists screen.
+// A touch on the bar's cover, or on its texts, from the artists screen: the now-playing screen
+// opens over it.
 static void artists_bar_cover(SimHost& host, Shell& shell) {
     open_library(host, shell, LIBRARY);
 
@@ -3939,6 +4159,24 @@ static void artists_bar_texts(SimHost& host, Shell& shell) {
     open_library(host, shell, LIBRARY);
 
     host.tap(BAR_TEXTS.x, BAR_TEXTS.y);
+}
+
+// The now-playing screen's back button goes back to the view it was opened over: the artists.
+static void artists_now_playing_back(SimHost& host, Shell& shell) {
+    artists_bar_cover(host, shell);
+
+    host.tap(NOW_PLAYING_BACK.x, NOW_PLAYING_BACK.y);
+}
+
+static const char* check_artists_now_playing_back(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_artists_screen(shell)) {
+        return problem;
+    }
+    if (shell.count_views() != 2) {
+        return "the now-playing screen did not close back to the artists over Home";
+    }
+
+    return check_rows(LIBRARY, 0, LIBRARY.size());
 }
 
 // The "Reconnecting" marker at the heading's right, clear of the button beside the list.
@@ -3957,18 +4195,18 @@ static const char* check_artists_reconnecting(const SimHost& host, const Shell& 
     return check_marker(true);
 }
 
-// The marker over the now-playing screen's cover moves to the top right as the library opens over
-// it while it shows.
+// Home's entry into the library ends before the marker, which stays at the top right as the library
+// opens over Home.
 static void library_open_reconnecting(SimHost& host, Shell& shell) {
     host.model().stream_state = StreamState::Disconnected;
     host.model().stream_down_since = lv_tick_get() - 10 * 1000;
     host.artists().serve(200, make_artist_pages(LIBRARY));
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
 
     shell.update();
-    expect(!check_marker(false), "the marker does not show over the now-playing screen's cover");
+    expect(!check_marker(true), "the marker does not show at Home's top right");
 
-    host.tap(LIBRARY_BUTTON.x, LIBRARY_BUTTON.y);
+    tap_label(host, shell, MSG_LIBRARY);
 }
 
 static const char* check_library_open_reconnecting(const SimHost& host, const Shell& shell) {
@@ -4408,7 +4646,7 @@ static const char* check_albums_empty(const SimHost&, const Shell& shell) {
 // The albums' end: the album without a date shows no year.
 static void albums_end(SimHost& host, Shell& shell) {
     host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
     shell.push(std::make_unique<AlbumsView>(&host, &shell, Artist{.id = "artist-29", .title = "Sigur Rós"}));
 
     scroll_list(shell, true);
@@ -4576,9 +4814,9 @@ static const char* check_tracks(const SimHost& host, const Shell& shell) {
     return check_titles(KVEIKUR, 0, KVEIKUR.size());
 }
 
-// The tracks screen of an album the scene's host answers for, over the now-playing screen.
+// The tracks screen of an album the scene's host answers for, over Home.
 static void open_tracks(SimHost& host, Shell& shell) {
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
 
     shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-12", .title = "Complete Recordings"}));
 }
@@ -4687,7 +4925,8 @@ static const char* check_tracks_back(const SimHost&, const Shell& shell) {
     return check_album_rows();
 }
 
-// A touch on the bar's texts, from the tracks, three screens over the now-playing screen.
+// A touch on the bar's texts, from the tracks, three screens over Home: the now-playing screen opens
+// over them.
 static void tracks_bar_texts(SimHost& host, Shell& shell) {
     tracks(host, shell);
 
@@ -4751,9 +4990,9 @@ static void playlists_artists_failed(SimHost& host, Shell& shell) {
     host.tap(PLAYLISTS_BUTTON.x, PLAYLISTS_BUTTON.y);
 }
 
-// The playlists screen over the now-playing screen.
+// The playlists screen over Home.
 static void open_playlists(SimHost& host, Shell& shell) {
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
 
     shell.push(std::make_unique<PlaylistsView>(&host, &shell));
 }
@@ -5198,10 +5437,10 @@ static const char* check_artists_queue_drag(const SimHost& host, const Shell& sh
     return lv_obj_get_scroll_y(find_list()) > 0 ? nullptr : "a drag that started on Play did not scroll the list";
 }
 
-// The albums screen of Sigur Rós, over the now-playing screen.
+// The albums screen of Sigur Rós, over Home.
 static void open_albums_screen(SimHost& host, Shell& shell) {
     host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
 
     shell.push(std::make_unique<AlbumsView>(
         &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
@@ -5491,8 +5730,8 @@ static void queue_failed_now_playing(SimHost& host, Shell& shell) {
 }
 
 static const char* check_queue_failed_now_playing(const SimHost& host, const Shell& shell) {
-    if (!shows<NowPlayingView>(shell) || shell.count_views() != 1) {
-        return "the touch on the bar did not bring the now-playing screen";
+    if (!shows<NowPlayingView>(shell) || shell.count_views() != 3) {
+        return "the touch on the bar did not open the now-playing screen over the albums";
     }
 
     return check_task_failed(host);
@@ -6408,7 +6647,7 @@ static const char COPIES[] =
 
 // An unmark of one of two copies, answered 204: the favourite marked both, so both show unmarked.
 static void albums_favourite_copies(SimHost& host, Shell& shell) {
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
     host.albums().serve(200, {COPIES});
     shell.push(std::make_unique<AlbumsView>(
         &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
@@ -6805,7 +7044,7 @@ static const char FAVOURITE_AGAETIS_BYRJUN[] =
 // holds it.
 static void albums_favourite_copies_changed(SimHost& host, Shell& shell) {
     const std::vector<std::string> unmarked = with_mark(with_mark({COPIES}, 0, std::nullopt), 1, std::nullopt);
-    open_now_playing(host, shell, PLAYING);
+    open_home(host, shell, PLAYING);
     host.albums().serve(200, unmarked);
     shell.push(std::make_unique<AlbumsView>(
         &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
@@ -7100,7 +7339,7 @@ static void open_queue(SimHost& host, Shell& shell, const std::vector<EntryFixtu
 }
 
 static const char* check_queue_screen(const Shell& shell) {
-    if (const auto problem = check_screen<QueueView>(shell, 2)) {
+    if (const auto problem = check_screen<QueueView>(shell, 3)) {
         return problem;
     }
 
@@ -7789,6 +8028,13 @@ const std::vector<Scene>& get_scenes() {
         {"speakers-group-no-answer", speakers_group_no_answer, check_group_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
         {"speakers-group-late-answer", speakers_group_late_answer, check_group_late_answer,
          ANSWER_TIME_LIMIT_MS + 1000},
+        {"home", home, check_home_screen},
+        {"home-first-pick", home_first_pick, check_home_first_pick},
+        {"home-hold-begins", home_hold_begins, check_home_hold_begins},
+        {"home-hold-ends", home_hold_ends, check_home_hold_ends},
+        {"home-now-playing", home_now_playing, check_bar_opened<2>},
+        {"home-now-playing-back", home_now_playing_back, check_home_now_playing_back, after_touches_ms(2)},
+        {"home-reconnecting", home_reconnecting, check_home_reconnecting},
         {"now-playing", now_playing, check_now_playing},
         {"now-playing-glyphs", now_playing_glyphs, check_now_playing},
         {"now-playing-paused", now_playing_paused},
@@ -7799,12 +8045,13 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-refused", now_playing_refused, check_refused_said},
         {"now-playing-refused-later", now_playing_refused, check_refused_later, AFTER_NOTICE_MS},
         {"now-playing-refused-back", now_playing_refused_back, check_now_playing_refused_back, after_touches_ms(3)},
-        {"now-playing-loading", now_playing_loading, check_loading},
+        {"now-playing-loading", now_playing_loading, check_loading, after_touches_ms(2)},
         {"now-playing-unreachable", now_playing_unreachable, check_now_playing},
         {"now-playing-error", now_playing_error},
         {"now-playing-unreadable", now_playing_unreadable},
         {"now-playing-retry", now_playing_retry, check_playback_retry},
         {"now-playing-reconnecting", now_playing_reconnecting, check_now_playing_reconnecting},
+        {"now-playing-back-reconnecting", now_playing_back_reconnecting, check_now_playing_back_reconnecting},
         {"now-playing-speakers", now_playing_speakers, check_speakers_open},
         {"now-playing-same-speaker", now_playing_same_speaker, check_same_speaker},
         {"now-playing-other-speaker", now_playing_other_speaker, check_other_speaker},
@@ -7847,9 +8094,9 @@ const std::vector<Scene>& get_scenes() {
         {"bar-volume-muted-down", bar_volume_muted_down, check_bar_volume_muted_down},
         {"bar-volume-refused", bar_volume_refused, check_bar_volume_refused},
         {"bar-cover-change", bar_cover_change, check_bar_cover_change},
-        {"bar-open-cover", bar_open_cover, check_bar_opened},
-        {"bar-open-texts", bar_open_texts, check_bar_opened},
-        {"bar-open-failed-list", bar_open_failed_list, check_bar_opened},
+        {"bar-open-cover", bar_open_cover, check_bar_opened<2>},
+        {"bar-open-texts", bar_open_texts, check_bar_opened<2>},
+        {"bar-open-failed-list", bar_open_failed_list, check_bar_opened<2>},
         {"bar-open-not-root", bar_open_not_root, check_bar_open_not_root, after_touches_ms(3)},
         {"bar-controls", bar_controls, check_bar_controls, after_touches_ms(5)},
         {"library-open", library_open, check_library_open},
@@ -7873,8 +8120,9 @@ const std::vector<Scene>& get_scenes() {
         {"artists-page-late-ask", artists_page_late_ask, check_artists_page_late_ask},
         {"artists-page-unbuilt", artists_page_unbuilt, check_artists_page_unbuilt},
         {"artists-back", artists_back, check_artists_back},
-        {"artists-bar-cover", artists_bar_cover, check_bar_opened},
-        {"artists-bar-texts", artists_bar_texts, check_bar_opened},
+        {"artists-bar-cover", artists_bar_cover, check_bar_opened<3>},
+        {"artists-bar-texts", artists_bar_texts, check_bar_opened<3>},
+        {"artists-now-playing-back", artists_now_playing_back, check_artists_now_playing_back, after_touches_ms(2)},
         {"artists-reconnecting", artists_reconnecting, check_artists_reconnecting},
         {"library-open-reconnecting", library_open_reconnecting, check_library_open_reconnecting},
         {"artists-pages-open", artists_pages_open, check_artists_pages_open},
@@ -7897,7 +8145,7 @@ const std::vector<Scene>& get_scenes() {
         {"tracks-unreadable", tracks_unreadable, check_tracks_error},
         {"tracks-empty", tracks_empty, check_tracks_empty},
         {"tracks-back", tracks_back, check_tracks_back, after_touches_ms(3)},
-        {"tracks-bar-texts", tracks_bar_texts, check_bar_opened, after_touches_ms(3)},
+        {"tracks-bar-texts", tracks_bar_texts, check_bar_opened<5>, after_touches_ms(3)},
         {"playlists", playlists, check_playlists},
         {"playlists-row", playlists_row, check_playlists_row, after_touches_ms(2)},
         {"playlists-artists-failed", playlists_artists_failed, check_playlists},
@@ -7986,8 +8234,8 @@ const std::vector<Scene>& get_scenes() {
         {"queue-screen-clear-cancel", queue_screen_clear_cancel, check_queue_screen_clear_cancel, after_touches_ms(2)},
         {"queue-screen-clear-not-taken", queue_screen_clear_not_taken, check_queue_screen_clear_not_taken,
          after_touches_ms(2)},
-        {"queue-screen-bar-cover", queue_screen_bar_cover, check_bar_opened, after_touches_ms(1)},
-        {"queue-screen-bar-texts", queue_screen_bar_texts, check_bar_opened, after_touches_ms(1)},
+        {"queue-screen-bar-cover", queue_screen_bar_cover, check_bar_opened<2>, after_touches_ms(1)},
+        {"queue-screen-bar-texts", queue_screen_bar_texts, check_bar_opened<2>, after_touches_ms(1)},
         {"queue-screen-reconnecting", queue_screen_reconnecting, check_queue_screen_reconnecting},
         {"queue-screen-reconnected", queue_screen_reconnected, check_queue_screen_reconnected, after_touches_ms(2)},
         {"queue-screen-reconnected-clear", queue_screen_reconnected_clear, check_queue_screen_reconnected_clear,

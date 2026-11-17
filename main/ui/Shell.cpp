@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "ArtistsView.h"
+#include "HomeView.h"
 #include "Messages.h"
 #include "NowPlayingView.h"
 #include "QueueView.h"
@@ -103,7 +104,7 @@ void Shell::show_first_view() {
     if (*_held) {
         replace(std::make_unique<SpeakerPickerView>(_host, this));
     } else {
-        replace(std::make_unique<NowPlayingView>(_host, this));
+        replace(std::make_unique<HomeView>(_host, this));
     }
 }
 

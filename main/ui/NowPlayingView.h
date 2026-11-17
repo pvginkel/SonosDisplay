@@ -3,9 +3,9 @@
 // What the chosen speaker plays: the track's cover, or a drawn placeholder while there is none to
 // show, the title, artist and album, and previous, play or pause, and next, each live only while
 // the speaker allows its command. Under them the
-// volume of the speaker's group: down, the level, and up. The speaker button at the top opens the
-// speaker picker, the library button beside it the library, and the queue button the queue of the
-// speaker's group. While the playback is on its way,
+// volume of the speaker's group: down, the level, and up. The back button at the top goes back to
+// the view the screen was opened over, the speaker button beside it opens the speaker picker, and
+// the queue button the queue of the speaker's group. While the playback is on its way,
 // nothing is loaded or the backend gave none, it says so instead. What came of a press
 // (PressNotice) is said over the cover's foot.
 
@@ -56,8 +56,8 @@ private:
     void apply();
     void apply_texts(const Playback& playback);
     void apply_notice();
+    static void back_clicked(lv_event_t* event);
     static void speaker_clicked(lv_event_t* event);
-    static void library_clicked(lv_event_t* event);
     static void queue_clicked(lv_event_t* event);
     static void retry_clicked(lv_event_t* event);
 };
