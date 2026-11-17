@@ -35,9 +35,6 @@ public:
     // before esp-mdm ships the log.
     void log_state();
 
-    // Puts right a picture that drifted, as switching the screen on does. Up to two frames.
-    void resync_panel() { _panel.restart(); }
-
     lv_display_t* get_display() const { return _panel.get_display(); }
     ScreenPower& get_screen_power() { return _screen_power; }
 

@@ -260,11 +260,6 @@ void Application::do_ready() {
 
     _board->log_state();
 
-    // Startup reads and writes flash (WiFi's and the PHY's data in NVS, the update and core dump
-    // checks), and each access can shift the picture until the panel is restarted. Startup is
-    // over here, so the picture is put right once now rather than at the next wake.
-    _board->resync_panel();
-
     if (_model.backend_url.empty()) {
         // No crash and no restart: the display says what is missing.
         if (_loading_view) {
@@ -312,10 +307,6 @@ void Application::set_motion_wakes(bool wakes) {
         ESP_LOGE(TAG, "Cannot store whether motion wakes the screen: %s", esp_err_to_name(err));
     }
 
-    // A flash write can shift the picture until the panel is restarted (docs/firmware-design.md,
-    // section 3).
-    _board->resync_panel();
-
     _board->get_screen_power().set_motion_wakes(wakes);
     _model.motion_wakes = wakes;
     model_changed();
@@ -332,10 +323,6 @@ void Application::choose_speaker(const std::string& id) {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Cannot store the speaker choice: %s", esp_err_to_name(err));
     }
-
-    // A flash write can shift the picture until the panel is restarted (docs/firmware-design.md,
-    // section 3).
-    _board->resync_panel();
 
     _model.speaker_id = id;
     _model.playback.speaker_changed();
@@ -1090,16 +1077,14 @@ void Application::do_process() {
         _shell->update();
     }
 
-    // After the Shell's update, so a cover it asked for counts as a request under way. do_ready
-    // restarted the panel before the backend's first connections were opened, and the first view
-    // opened while they were; once they are made, the panel is restarted again.
+    // Marks the run's Settled stage once, for the next boot's log (RunMark). After the Shell's
+    // update, so a cover it asked for counts as a request under way.
     if (!_settled && has_settled()) {
         _settled = true;
 
-        ESP_LOGI(TAG, "Startup has settled; restarting the panel");
+        ESP_LOGI(TAG, "Startup has settled");
 
         RunMark::reached(RunMark::Stage::Settled);
-        _board->resync_panel();
     }
 
     log_memory();
