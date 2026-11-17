@@ -904,32 +904,33 @@ void Application::request_artwork(const std::string& artwork_id, int32_t size, s
     });
 }
 
-// Over backend_art, so a command is never queued behind a cover. The client drops the request,
-// and its answer, once the view that asked is gone or wants another cover.
-void Application::fetch_artwork(ArtworkRequest&& request) {
-    auto path =
-        "/api/artwork/" + encode_segment(request.artwork_id) + "?size=" + std::to_string(request.size) + "&format=lvgl";
-    auto scope = request.scope;
+// Over backend_art, so a command is never queued behind a cover. In the app's own scope: the loader
+// starts a download only while a view wants it, and keeps its answer whether or not one still does.
+void Application::fetch_artwork(ArtworkDownload&& download) {
+    auto path = "/api/artwork/" + encode_segment(download.artwork_id) + "?size=" + std::to_string(download.size) +
+                "&format=lvgl";
 
-    _art_client->send(HttpRequest{.path = std::move(path), .max_response = ARTWORK_MAX_RESPONSE}, std::move(scope),
-                      [this, request = std::move(request)](HttpResponse&& response) {
-                          artwork_answered(request, std::move(response));
+    _art_client->send(HttpRequest{.path = std::move(path), .max_response = ARTWORK_MAX_RESPONSE}, _scope,
+                      [this, download = std::move(download)](HttpResponse&& response) {
+                          artwork_answered(download, std::move(response));
                       });
 }
 
-void Application::artwork_answered(const ArtworkRequest& request, HttpResponse&& response) {
+void Application::artwork_answered(const ArtworkDownload& download, HttpResponse&& response) {
     // HttpClient logged a transport error, and an answer over the limit.
     if (response.err != ESP_OK) {
-        _artwork.unanswered(request);
+        _artwork.unanswered();
         return;
     }
 
-    const auto problem =
-        _artwork.answered(request, response.status, ArtworkBody(std::move(response.body)), response.length);
-    if (problem) {
-        ESP_LOGW(TAG, "GET artwork at %d px answered %d, %s", int(request.size), response.status, problem);
+    const auto outcome = _artwork.answered(response.status, ArtworkBody(std::move(response.body)), response.length);
+    if (outcome.problem) {
+        ESP_LOGW(TAG, "GET artwork at %d px answered %d, %s", int(download.size), response.status, outcome.problem);
+    } else if (!outcome.handed) {
+        ESP_LOGI(TAG, "Artwork at %d px is in with no view waiting for it, kept: %zu bytes, %zu in the cache",
+                 int(download.size), response.length, _artwork.get_cache().get_bytes());
     } else {
-        ESP_LOGI(TAG, "Artwork at %d px is in: %zu bytes, %zu in the cache", int(request.size), response.length,
+        ESP_LOGI(TAG, "Artwork at %d px is in: %zu bytes, %zu in the cache", int(download.size), response.length,
                  _artwork.get_cache().get_bytes());
     }
 }
@@ -1049,7 +1050,8 @@ void Application::do_process() {
     _board->process();
 
     // Nothing is fetched for a screen nobody sees: a cover asked for in the dark comes once the
-    // screen wakes.
+    // screen wakes. On every pass, which is also where a download whose answer HttpClient dropped
+    // on its way is found.
     _artwork.set_screen_lit(_board->get_screen_power().is_lit());
 
     const auto now = lv_tick_get();

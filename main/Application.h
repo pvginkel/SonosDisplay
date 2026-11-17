@@ -30,7 +30,7 @@ class Application : public ApplicationBase, public UiHost {
     std::unique_ptr<HttpClient> _press_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
-    ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
+    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }};
     // The scope of the app's own requests, which lives as long as the app.
     std::shared_ptr<void> _scope{std::make_shared<int>(0)};
     int64_t _last_memory_log_ms{};
@@ -93,8 +93,8 @@ private:
     void favourite_answered(uint32_t change, bool marks, HttpResponse&& response);
     void clear_answered(HttpResponse&& response);
     void task_event_received(const cJSON* payload);
-    void fetch_artwork(ArtworkRequest&& request);
-    void artwork_answered(const ArtworkRequest& request, HttpResponse&& response);
+    void fetch_artwork(ArtworkDownload&& download);
+    void artwork_answered(const ArtworkDownload& download, HttpResponse&& response);
     void event_received(const std::string& type, const cJSON* payload);
     bool has_settled() const;
     void model_changed() { _model.revision++; }

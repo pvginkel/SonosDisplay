@@ -266,12 +266,14 @@ private:
     std::vector<std::string> _favourite_request_bodies;
     std::vector<UnansweredFavouriteChange> _unanswered_favourite_changes;
     std::optional<Answer> _favourite_answer;
-    ArtworkLoader _artwork{[this](ArtworkRequest&& request) { fetch_artwork(std::move(request)); }};
+    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }};
     std::vector<ArtworkFetch> _artwork_fetches;
     std::optional<ArtworkAnswer> _artwork_answer;
     bool _artwork_held{};
     bool _artwork_reachable{true};
-    std::vector<ArtworkRequest> _held_artwork;
+    bool _screen_lit{true};
+    std::optional<ArtworkDownload> _held_artwork;
+    size_t _artwork_unwaited{};
     ListFixture<Artist> _artists{"artists", read_artists};
     ListFixture<Album> _albums{"albums", read_albums};
     ListFixture<AlbumTrack> _tracks{"tracks", read_tracks};
@@ -325,8 +327,8 @@ public:
 
     // What the device does on every turn of its loop: the answers due by now come, a change of a
     // group or of the volume past its time limit is settled and the speakers or the volume are
-    // asked for again, and a request to queue an item or a change of a favourite past its time
-    // limit is settled.
+    // asked for again, a request to queue an item or a change of a favourite past its time limit
+    // is settled, and the artwork's loader is told whether the screen is lit.
     void process();
 
     // Runs `answer` in process() once LVGL's clock has moved on by `ms` from now, as an answer that
@@ -507,12 +509,24 @@ public:
     // From here on a request for artwork stays on its way until answer_artwork().
     void hold_artwork() { _artwork_held = true; }
 
-    // Answers the requests for artwork that are on their way. As on the device, one whose asker
-    // is gone or wants another picture by now is dropped unanswered.
+    // Answers the request for artwork on its way, if there is one, whether or not a view still
+    // waits for it, as the device does. The one the display sends next stays on its way.
     void answer_artwork();
 
+    // Drops the answer to the request for artwork on its way, as HttpClient drops one the UI
+    // task's queue has no room for. The display finds it at its loop's next pass, process(), or at
+    // the next request for artwork.
+    void drop_artwork() { _held_artwork.reset(); }
+
+    // How many answers to requests for artwork came with no view waiting for them any more, which
+    // the device logs.
+    size_t count_artwork_unwaited() const { return _artwork_unwaited; }
+
     // Switches the screen off, or on. The device fetches no artwork while it is dark.
-    void set_screen_lit(bool lit) { _artwork.set_screen_lit(lit); }
+    void set_screen_lit(bool lit) {
+        _screen_lit = lit;
+        _artwork.set_screen_lit(lit);
+    }
 
     // How many requests for artwork wait for the screen to wake.
     size_t count_artwork_waiting() const { return _artwork.count_waiting(); }
@@ -546,6 +560,6 @@ private:
     void group_change_answered(const UnansweredGroupChange& change, int status, const char* body);
     void queue_answered(uint32_t request, int status, const char* body);
     void favourite_answered(const UnansweredFavouriteChange& change, int status, const char* body);
-    void fetch_artwork(ArtworkRequest&& request);
-    void answer_artwork(const ArtworkRequest& request);
+    void fetch_artwork(ArtworkDownload&& download);
+    void answer_artwork(const ArtworkDownload& download);
 };

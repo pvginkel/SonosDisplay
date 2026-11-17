@@ -2245,8 +2245,8 @@ static void expect_cache_rules() {
            "an image larger than the cache was kept");
 }
 
-// Two requests for one image that are both on their way get the same image, and a later one gets
-// it from the cache.
+// Two requests for one image wait on one download and get the same image, and a later one gets it
+// from the cache.
 static void expect_one_image_for_two_requests() {
     SimHost host;
     host.hold_artwork();
@@ -2260,12 +2260,13 @@ static void expect_one_image_for_two_requests() {
     request(images[0]);
     request(images[1]);
     expect(!images[0] && !images[1], "artwork was handed over before the backend answered");
+    expect(host.get_artwork_fetches().size() == 1, "an image on its way was downloaded a second time");
 
     host.answer_artwork();
     expect(images[0] && images[0] == images[1], "two requests for one image did not get the same one");
 
     request(images[2]);
-    expect(images[2] == images[0] && host.get_artwork_fetches().size() == 2, "a cached image was fetched again");
+    expect(images[2] == images[0] && host.get_artwork_fetches().size() == 1, "a cached image was fetched again");
 }
 
 // With the cache full of covers that are on screen, one more is fetched and not kept: its asker is
@@ -2300,7 +2301,8 @@ static void expect_no_cover_beside_a_full_screen() {
     expect(images.back() != nullptr && !host.is_artwork_shown("a", COVER_SIZE), "a cover off screen was not freed");
 }
 
-// A view that closes takes its request with it.
+// A view that closes takes its request with it: the cover that comes after it is never handed to
+// it.
 static void expect_no_cover_for_a_closed_view() {
     SimHost host;
     host.hold_artwork();
@@ -2312,21 +2314,90 @@ static void expect_no_cover_for_a_closed_view() {
     host.answer_playback(200, PLAYING);
     shell.open();
     show_now_playing(shell);
+
+    // The bar's, under Home, went first.
+    host.answer_artwork();
     expect(host.get_artwork_fetches().back() == ArtworkFetch{ARTWORK_PLAYING, COVER_SIZE},
            "the now-playing screen did not ask for its cover");
 
     shell.replace(std::make_unique<LoadingView>(&host, MSG_STARTING));
     host.answer_artwork();
     expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "a view that closed was handed its cover");
+    expect(host.count_artwork_unwaited() == 2, "a cover that came for no view was not counted");
+}
+
+// A download the backend does not answer, or whose answer is dropped on its way, leaves no view
+// waiting on it: each that waited is told there is no picture, and the next ask downloads it again.
+static void expect_no_wait_on_a_lost_download() {
+    SimHost host;
+    host.hold_artwork();
+
+    const auto scope = std::make_shared<int>(0);
+    size_t told = 0;
+    Artwork image;
+    const auto request = [&]() {
+        host.request_artwork(ARTWORK_PLAYING, COVER_SIZE, scope, [&](Artwork artwork) {
+            told += !artwork;
+            image = std::move(artwork);
+        });
+    };
+    const auto fetched = [&host]() { return host.get_artwork_fetches().size(); };
+
+    request();
+    request();
+    host.set_artwork_reachable(false);
+    host.answer_artwork();
+    expect(told == 2, "a view was left waiting on a download the backend did not answer");
+    host.set_artwork_reachable(true);
+
+    // Dropped on its way: the loop's next pass finds it.
+    request();
+    request();
+    expect(fetched() == 2, "a cover the backend did not answer was not downloaded again");
+    host.drop_artwork();
+    host.process();
+    expect(told == 4, "a view was left waiting on a download whose answer was dropped");
+
+    // Dropped on its way, and asked for again before the loop's next pass.
+    request();
+    host.drop_artwork();
+    request();
+    expect(told == 5 && fetched() == 4, "a request joined a download whose answer was dropped");
+
+    host.answer_artwork();
+    expect(image != nullptr && told == 5, "the cover did not come with the next ask");
+}
+
+// A download that has not started when no view wants it any longer is not made.
+static void expect_no_download_nobody_waits_for() {
+    SimHost host;
+    host.hold_artwork();
+
+    const auto stays = std::make_shared<int>(0);
+    auto goes = std::make_shared<int>(0);
+    Artwork image;
+    host.request_artwork("a", COVER_SIZE, stays, [&image](Artwork artwork) { image = std::move(artwork); });
+    host.request_artwork("b", COVER_SIZE, goes, [](Artwork) { expect(false, "a closed view was handed a cover"); });
+    host.request_artwork("c", COVER_SIZE, stays, [](Artwork) {});
+    expect(host.count_artwork_waiting() == 2, "the covers asked for after the one under way did not wait for it");
+
+    goes.reset();
+    host.answer_artwork();
+    expect(image != nullptr, "the cover under way was not handed to its view");
+
+    const std::vector<ArtworkFetch> fetches = {{"a", COVER_SIZE}, {"c", COVER_SIZE}};
+    expect(host.get_artwork_fetches() == fetches, "a cover nobody waited for any more was downloaded");
 }
 
 // Another track, with another cover: the placeholder shows while the cover is on its way, a cover
-// that is no longer wanted is not waited for, and one the display has already is not fetched again.
+// that comes once its track has gone is kept, and one the display has already is not fetched again.
 static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect_cache_rules();
     expect_one_image_for_two_requests();
     expect_no_cover_beside_a_full_screen();
     expect_no_cover_for_a_closed_view();
+    expect_no_wait_on_a_lost_download();
+    expect_no_download_nobody_waits_for();
 
     open_now_playing(host, shell, PLAYING);
     expect(host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the playing track's cover is not shown");
@@ -2343,10 +2414,11 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect(shown(PAUSED) != nullptr, "a cover was shown before the backend answered it");
     expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the cover of the track before stayed on screen");
 
-    // A radio stream before it arrived: the answer that comes is nobody's.
+    // A radio stream before it arrived: the answer that comes is nobody's, and kept.
     expect(!shown(RADIO), "a radio stream shows a cover");
     host.answer_artwork();
     expect(!shown(RADIO), "a cover that was no longer wanted was shown");
+    expect(host.count_artwork_unwaited() == 1, "a cover that came for no view was not counted");
 
     // Back on the first track: its cover is in the cache.
     expect(!shown(PLAYING), "a cover the display has was not shown at once");
@@ -2358,8 +2430,8 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect(!host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "a cover stayed on screen beside an error");
     expect(!shown(PLAYING), "the cover did not come back with the track");
 
-    expect(shown(PAUSED) != nullptr, "a cover was shown before the backend answered it");
-    host.answer_artwork();
+    // The track whose cover came once it had gone: the display has it.
+    expect(!shown(PAUSED), "a cover that came once its track had gone was not kept");
 }
 
 static const char* check_cover_change(const SimHost& host, const Shell& shell) {
@@ -2367,7 +2439,6 @@ static const char* check_cover_change(const SimHost& host, const Shell& shell) {
     const std::vector<ArtworkFetch> fetches = {
         {ARTWORK_PLAYING, BAR_COVER_SIZE},
         {ARTWORK_PLAYING, COVER_SIZE},
-        {ARTWORK_PAUSED, COVER_SIZE},
         {ARTWORK_PAUSED, COVER_SIZE},
     };
     if (host.get_artwork_fetches() != fetches) {
@@ -2514,6 +2585,76 @@ static const char* check_cover_wake(const SimHost& host, const Shell& shell) {
     }
 
     return check_cover(host, shell);
+}
+
+// The now-playing screen left for Home while the playing track's cover is on its way: the bar's
+// cover waits behind it.
+static void leave_cover_on_its_way(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PAUSED);
+
+    host.hold_artwork();
+    host.answer_playback(200, PLAYING);
+    shell.update();
+
+    shell.back();
+    shell.update();
+    expect(shows<HomeView>(shell) && host.count_artwork_waiting() == 1,
+           "the bar's cover did not wait behind the now-playing screen's");
+}
+
+// Now playing left before its cover arrived, and opened again while the download is under way:
+// the cover shows once that one download lands, and the bar's, which nobody wants by then, is
+// never made.
+static void now_playing_cover_return(SimHost& host, Shell& shell) {
+    leave_cover_on_its_way(host, shell);
+
+    show_now_playing(shell);
+    host.answer_artwork();
+}
+
+static const char* check_cover_return(const SimHost& host, const Shell& shell) {
+    // The paused track's under Home and over it, then the playing track's, once.
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PAUSED, BAR_COVER_SIZE},
+        {ARTWORK_PAUSED, COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
+    };
+    if (host.get_artwork_fetches() != fetches) {
+        return "a cover under way was downloaded again, or one nobody waited for was downloaded";
+    }
+    if (host.count_artwork_unwaited()) {
+        return "the cover was taken for one that came for no view";
+    }
+
+    return check_now_playing(host, shell);
+}
+
+// Now playing left before its cover arrived, and opened again once it has: the cover is kept, and
+// shows at once, with no download.
+static void now_playing_cover_kept(SimHost& host, Shell& shell) {
+    leave_cover_on_its_way(host, shell);
+
+    host.answer_artwork();
+    expect(host.count_artwork_unwaited() == 1, "the cover that came for no view was not counted");
+    host.answer_artwork();
+    expect(!check_home(host, shell), "the bar's cover did not come after the one under way");
+
+    show_now_playing(shell);
+    expect(host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the cover kept was not shown at once");
+}
+
+static const char* check_cover_kept(const SimHost& host, const Shell& shell) {
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PAUSED, BAR_COVER_SIZE},
+        {ARTWORK_PAUSED, COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, BAR_COVER_SIZE},
+    };
+    if (host.get_artwork_fetches() != fetches) {
+        return "the cover kept was downloaded again";
+    }
+
+    return check_now_playing(host, shell);
 }
 
 // The picker reached from the now-playing screen, which is where the bar shows.
@@ -10330,6 +10471,8 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-cover-change", now_playing_cover_change, check_cover_change},
         {"now-playing-cover-refused", now_playing_cover_refused, check_cover_refused},
         {"now-playing-cover-wake", now_playing_cover_wake, check_cover_wake},
+        {"now-playing-cover-return", now_playing_cover_return, check_cover_return},
+        {"now-playing-cover-kept", now_playing_cover_kept, check_cover_kept},
         {"bar", bar, check_bar},
         {"bar-paused", bar_paused, check_bar},
         {"bar-radio", bar_radio, check_bar_radio},

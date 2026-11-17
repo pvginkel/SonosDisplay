@@ -401,6 +401,8 @@ void SimHost::process() {
     if (_model.favouring.timed_out(now)) {
         _model.revision++;
     }
+
+    _artwork.set_screen_lit(_screen_lit);
 }
 
 void SimHost::request_artists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Artist>)> done) {
@@ -472,40 +474,42 @@ void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::
     });
 }
 
-void SimHost::fetch_artwork(ArtworkRequest&& request) {
-    _artwork_fetches.push_back(ArtworkFetch{request.artwork_id, request.size});
+void SimHost::fetch_artwork(ArtworkDownload&& download) {
+    _artwork_fetches.push_back(ArtworkFetch{download.artwork_id, download.size});
 
     if (_artwork_held) {
-        _held_artwork.push_back(std::move(request));
+        _held_artwork = std::move(download);
     } else {
-        answer_artwork(request);
+        answer_artwork(download);
     }
 }
 
 void SimHost::answer_artwork() {
-    const auto held = std::move(_held_artwork);
-    _held_artwork.clear();
-
-    for (const auto& request : held) {
-        if (!request.scope.expired()) {
-            answer_artwork(request);
-        }
+    if (!_held_artwork) {
+        return;
     }
+
+    const auto download = std::move(*_held_artwork);
+    _held_artwork.reset();
+
+    answer_artwork(download);
 }
 
-void SimHost::answer_artwork(const ArtworkRequest& request) {
+void SimHost::answer_artwork(const ArtworkDownload& download) {
     if (!_artwork_reachable) {
-        _artwork.unanswered(request);
+        _artwork.unanswered();
         return;
     }
 
     const auto status = _artwork_answer ? _artwork_answer->status : 200;
     const auto bytes = std::make_shared<std::vector<uint8_t>>(
-        _artwork_answer ? _artwork_answer->body : make_artwork(request.artwork_id, request.size));
+        _artwork_answer ? _artwork_answer->body : make_artwork(download.artwork_id, download.size));
 
-    const auto problem = _artwork.answered(request, status, ArtworkBody(bytes, bytes->data()), bytes->size());
-    if (problem) {
-        printf("W (SimHost) GET artwork at %d px answered %d, %s\n", int(request.size), status, problem);
+    const auto outcome = _artwork.answered(status, ArtworkBody(bytes, bytes->data()), bytes->size());
+    if (outcome.problem) {
+        printf("W (SimHost) GET artwork at %d px answered %d, %s\n", int(download.size), status, outcome.problem);
+    } else if (!outcome.handed) {
+        _artwork_unwaited++;
     }
 }
 

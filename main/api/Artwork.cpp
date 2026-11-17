@@ -117,63 +117,117 @@ bool ArtworkCache::is_pinned(const std::string& artwork_id, int32_t size) const 
 
 ArtworkLoader::ArtworkLoader(Fetch fetch) : _fetch(std::move(fetch)) {}
 
+// A download is wanted while a view that waits for it lives and has not asked for another picture.
+static bool is_wanted(const std::vector<ArtworkRequest>& waiting) {
+    return std::any_of(waiting.begin(), waiting.end(),
+                       [](const ArtworkRequest& request) { return !request.scope.expired(); });
+}
+
 void ArtworkLoader::request(ArtworkRequest request) {
     if (auto artwork = _cache.find(request.artwork_id, request.size)) {
         request.done(std::move(artwork));
         return;
     }
 
-    if (_screen_lit) {
-        _fetch(std::move(request));
-        return;
+    // Before the request joins it: a download the host let go of brings no answer.
+    forget_lost();
+
+    // What is no longer wanted does not wait: a dark screen can last a night of tracks, and a quick
+    // scroll of Home's tiles asks for many pictures.
+    std::erase_if(_queued, [](const Download& download) { return !is_wanted(download.waiting); });
+
+    if (const auto download = find(request.artwork_id, request.size)) {
+        std::erase_if(download->waiting, [](const ArtworkRequest& waiting) { return waiting.scope.expired(); });
+        download->waiting.push_back(std::move(request));
+    } else {
+        _queued.push_back(Download{.artwork_id = request.artwork_id, .size = request.size, .waiting = {}});
+        _queued.back().waiting.push_back(std::move(request));
     }
 
-    // A dark screen can last a night of tracks: what is no longer wanted does not wait with it.
-    std::erase_if(_waiting, [](const ArtworkRequest& waiting) { return waiting.scope.expired(); });
-
-    _waiting.push_back(std::move(request));
+    start_next();
 }
 
 void ArtworkLoader::set_screen_lit(bool lit) {
-    if (lit == _screen_lit) {
-        return;
-    }
-
     _screen_lit = lit;
 
-    if (!lit) {
-        return;
+    start_next();
+}
+
+ArtworkOutcome ArtworkLoader::answered(int status, ArtworkBody body, size_t length) {
+    Artwork artwork;
+    auto problem = read_artwork(status, std::move(body), length, _current->size, artwork);
+
+    if (!problem && !_cache.add(_current->artwork_id, _current->size, artwork, length)) {
+        problem = "the image does not fit the cache beside what is on screen";
+        artwork.reset();
     }
 
-    auto waiting = std::move(_waiting);
-    _waiting.clear();
+    const auto handed = finish(artwork);
 
-    for (auto& request : waiting) {
+    start_next();
+
+    return ArtworkOutcome{.problem = problem, .handed = handed};
+}
+
+void ArtworkLoader::unanswered() {
+    finish(nullptr);
+
+    start_next();
+}
+
+ArtworkLoader::Download* ArtworkLoader::find(const std::string& artwork_id, int32_t size) {
+    const auto is_of = [&](const Download& download) {
+        return download.size == size && download.artwork_id == artwork_id;
+    };
+
+    if (_current && is_of(*_current)) {
+        return &*_current;
+    }
+
+    const auto queued = std::find_if(_queued.begin(), _queued.end(), is_of);
+
+    return queued == _queued.end() ? nullptr : &*queued;
+}
+
+void ArtworkLoader::start_next() {
+    forget_lost();
+
+    while (!_current && _screen_lit && !_queued.empty()) {
+        auto download = std::move(_queued.front());
+        _queued.pop_front();
+
+        if (!is_wanted(download.waiting)) {
+            continue;
+        }
+
+        auto held = std::make_shared<int>(0);
+        _current_held = held;
+        _current = std::move(download);
+
+        // The host may hand over the answer before this returns.
+        _fetch(ArtworkDownload{.artwork_id = _current->artwork_id, .size = _current->size, .held = std::move(held)});
+    }
+}
+
+void ArtworkLoader::forget_lost() {
+    if (_current && _current_held.expired()) {
+        finish(nullptr);
+    }
+}
+
+// The download under way ends, and `artwork` goes to the views that still wait for it. A view's
+// `done` may ask for another picture, so the download is gone before the first runs.
+size_t ArtworkLoader::finish(const Artwork& artwork) {
+    const auto download = std::move(*_current);
+    _current.reset();
+
+    size_t handed = 0;
+    for (const auto& request : download.waiting) {
         if (!request.scope.expired()) {
-            this->request(std::move(request));
-        }
-    }
-}
-
-const char* ArtworkLoader::answered(const ArtworkRequest& request, int status, ArtworkBody body, size_t length) {
-    // Two requests for one image can both be on their way: the first answer's image is the one
-    // kept, and the one both get.
-    auto artwork = _cache.find(request.artwork_id, request.size);
-
-    const char* problem = nullptr;
-
-    if (!artwork) {
-        problem = read_artwork(status, std::move(body), length, request.size, artwork);
-
-        if (!problem && !_cache.add(request.artwork_id, request.size, artwork, length)) {
-            problem = "the image does not fit the cache beside what is on screen";
-            artwork.reset();
+            request.done(artwork);
+            handed++;
         }
     }
 
-    request.done(std::move(artwork));
-
-    return problem;
+    return handed;
 }
-
-void ArtworkLoader::unanswered(const ArtworkRequest& request) { request.done(nullptr); }

@@ -10,9 +10,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <list>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -67,43 +69,83 @@ struct ArtworkRequest {
     std::function<void(Artwork)> done;
 };
 
+// A picture at a size that the loader has the host download from the backend. The host holds the
+// download until it hands the backend's answer to answered() or unanswered(); one it lets go of
+// before then brings no answer, which the loader reads from `held`.
+struct ArtworkDownload {
+    std::string artwork_id;
+    int32_t size{};
+    // Lives for as long as the host holds a copy of the download.
+    std::shared_ptr<void> held;
+};
+
+// What became of the backend's answer to a download.
+struct ArtworkOutcome {
+    // What was wrong with the answer, for the log, or nullptr.
+    const char* problem;
+    // How many views it was handed to: none once every view that asked is gone or wants another
+    // picture.
+    size_t handed;
+};
+
 // Answers the views' requests for artwork from the cache, and from the backend through the host's
-// `fetch`, which hands the backend's answer to answered(). Runs on the UI task.
+// `fetch`, one download at a time. A view that asks for a picture whose download is under way or
+// waits to start waits on that download: there is one per picture and size. A download that has
+// not started when no view wants it any longer is not made; one under way is read to its end and
+// its image kept, whether or not a view still waits for it. Runs on the UI task.
 class ArtworkLoader {
 public:
-    using Fetch = std::function<void(ArtworkRequest&&)>;
+    using Fetch = std::function<void(ArtworkDownload&&)>;
 
 private:
+    // A picture at a size, and the views' requests that wait for it.
+    struct Download {
+        std::string artwork_id;
+        int32_t size;
+        std::vector<ArtworkRequest> waiting;
+    };
+
     Fetch _fetch;
     ArtworkCache _cache;
     bool _screen_lit{true};
-    // What was asked for while the screen was dark.
-    std::vector<ArtworkRequest> _waiting;
+    // The downloads not started, oldest first.
+    std::deque<Download> _queued;
+    std::optional<Download> _current;
+    // Expires once the host lets go of _current's download.
+    std::weak_ptr<void> _current_held;
 
 public:
     explicit ArtworkLoader(Fetch fetch);
     ArtworkLoader(const ArtworkLoader&) = delete;
     ArtworkLoader& operator=(const ArtworkLoader&) = delete;
 
-    // An image the cache has is handed over before this returns. Any other is fetched, once the
-    // screen is lit.
+    // An image the cache has is handed over before this returns. Any other waits on its download,
+    // which starts once the screen is lit and the download before it is done.
     void request(ArtworkRequest request);
 
-    // Says whether the screen is lit. While it is dark nothing is fetched; what was asked for
-    // meanwhile, and is still wanted, is fetched when it wakes.
+    // Says whether the screen is lit, which the host does on every pass of the UI task's loop.
+    // While it is dark no download starts; what was asked for meanwhile, and is still wanted, is
+    // downloaded when it wakes. A download the host let go of without an answer is found here: the
+    // views that wait on it are handed nullptr, as for one the backend did not answer.
     void set_screen_lit(bool lit);
 
-    // The backend's answer to a request `fetch` was given, which the host hands over only while
-    // the request's scope lives, as HttpClient does. An image that passes its checks and fits the
-    // cache is kept, and handed to the request; any other answer hands it nullptr. Returns what
-    // was wrong, for the log, or nullptr.
-    const char* answered(const ArtworkRequest& request, int status, ArtworkBody body, size_t length);
+    // The backend's answer to the download under way, which the host hands over whether or not a
+    // view still waits for it. An image that passes its checks and fits the cache is kept, and
+    // handed to the views that still wait for it; any other answer hands them nullptr.
+    ArtworkOutcome answered(int status, ArtworkBody body, size_t length);
 
-    // The backend did not answer a request `fetch` was given: the request is handed nullptr.
-    void unanswered(const ArtworkRequest& request);
+    // The backend did not answer the download under way: the views that wait for it are handed
+    // nullptr.
+    void unanswered();
 
     const ArtworkCache& get_cache() const { return _cache; }
 
-    // How many requests wait for the screen.
-    size_t count_waiting() const { return _waiting.size(); }
+    // How many downloads wait to start: for the screen, or for the one under way.
+    size_t count_waiting() const { return _queued.size(); }
+
+private:
+    Download* find(const std::string& artwork_id, int32_t size);
+    void start_next();
+    void forget_lost();
+    size_t finish(const Artwork& artwork);
 };
