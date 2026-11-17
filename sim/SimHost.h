@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -132,6 +133,91 @@ public:
         }
     };
 
+    // An item of the library the backend gives on its own: what the backend answers a request for
+    // one, and the ids the views asked for.
+    template <typename Item>
+    class ItemFixture {
+    public:
+        using Reader = const char* (*)(int status, const char* body, size_t length, Item& item, std::string& error);
+
+    private:
+        struct Served {
+            int status;
+            std::string body;
+        };
+
+        struct Request {
+            std::string id;
+            std::weak_ptr<void> scope;
+            std::function<void(std::optional<Item>)> done;
+        };
+
+        const char* _name;
+        Reader _read;
+        std::map<std::string, Served> _served;
+        std::vector<std::string> _requests;
+        std::vector<Request> _held;
+
+    public:
+        ItemFixture(const char* name, Reader read) : _name(name), _read(read) {}
+
+        // What the backend answers a request for the item with this id from here on: `body`, with
+        // `status`, read as the device reads it. A request for an item not served stays on its way
+        // until answer().
+        void serve(const std::string& id, int status, std::string body) {
+            _served[id] = Served{status, std::move(body)};
+        }
+
+        // The backend's answer to the oldest request on its way, read as the device reads it. As
+        // on the device, the answer to a view that is gone is dropped.
+        void answer(int status, const char* body) {
+            if (_held.empty()) {
+                fprintf(stderr, "render: an %s was answered, and none was asked for\n", _name);
+                exit(1);
+            }
+
+            const auto request = std::move(_held.front());
+            _held.erase(_held.begin());
+
+            answer(request, status, body);
+        }
+
+        // The ids of the items the views asked for, in order.
+        const std::vector<std::string>& get_requests() const { return _requests; }
+
+        // A view asks for the item with this id.
+        void request(std::string id, std::weak_ptr<void> scope, std::function<void(std::optional<Item>)> done) {
+            _requests.push_back(id);
+
+            Request request{std::move(id), std::move(scope), std::move(done)};
+            if (const auto served = _served.find(request.id); served != _served.end()) {
+                answer(request, served->second.status, served->second.body.c_str());
+            } else {
+                _held.push_back(std::move(request));
+            }
+        }
+
+    private:
+        void answer(const Request& request, int status, const char* body) const {
+            if (request.scope.expired()) {
+                return;
+            }
+
+            Item item;
+            std::string error;
+            if (status == UNREACHABLE) {
+                request.done(std::nullopt);
+            } else if (const auto problem = _read(status, body, strlen(body), item, error)) {
+                printf("W (SimHost) GET %s %s answered %d, %s: %s\n", _name, request.id.c_str(), status, problem,
+                       error.c_str());
+
+                request.done(std::nullopt);
+            } else {
+                request.done(std::move(item));
+            }
+        }
+    };
+
 private:
     struct Answer {
         int status;
@@ -189,6 +275,8 @@ private:
     ListFixture<Artist> _artists{"artists", read_artists};
     ListFixture<Album> _albums{"albums", read_albums};
     ListFixture<AlbumTrack> _tracks{"tracks", read_tracks};
+    ItemFixture<Artist> _artist{"artist", read_one_artist};
+    ItemFixture<Album> _album{"album", read_one_album};
     ListFixture<Playlist> _playlists{"playlists", read_playlists};
     ListFixture<Favourite> _favourites{"favourites", read_favourites};
     ListFixture<QueueEntry, QueuePage> _queue{"queue", read_queue};
@@ -221,6 +309,10 @@ public:
                         std::function<void(Page<Album>)> done) override;
     void request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
                         std::function<void(Page<AlbumTrack>)> done) override;
+    void request_artist(const std::string& artist_id, std::weak_ptr<void> scope,
+                        std::function<void(std::optional<Artist>)> done) override;
+    void request_album(const std::string& album_id, std::weak_ptr<void> scope,
+                       std::function<void(std::optional<Album>)> done) override;
     void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                            std::function<void(Page<Playlist>)> done) override;
     void request_favourites(uint32_t number, std::weak_ptr<void> scope,
@@ -373,6 +465,12 @@ public:
     const ListFixture<AlbumTrack>& tracks() const { return _tracks; }
     ListFixture<Playlist>& playlists() { return _playlists; }
     const ListFixture<Playlist>& playlists() const { return _playlists; }
+
+    // The library's artists and albums, each asked for on its own.
+    ItemFixture<Artist>& artist() { return _artist; }
+    const ItemFixture<Artist>& artist() const { return _artist; }
+    ItemFixture<Album>& album() { return _album; }
+    const ItemFixture<Album>& album() const { return _album; }
 
     // The favourites.
     ListFixture<Favourite>& favourites() { return _favourites; }

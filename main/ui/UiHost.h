@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include "Model.h"
@@ -86,6 +87,17 @@ public:
     // and track order.
     virtual void request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
                                 std::function<void(Page<AlbumTrack>)> done) = 0;
+
+    // Asks the backend for the artist with this id, with the favourite that marks it. `done` runs
+    // with the artist, or with none when it did not come, and not at all once `scope`, which the
+    // asker owns, has expired, nor once a later request for the same artist takes the place of
+    // this one while it waits to be sent.
+    virtual void request_artist(const std::string& artist_id, std::weak_ptr<void> scope,
+                                std::function<void(std::optional<Artist>)> done) = 0;
+
+    // Asks, as request_artist() does, for the album with this id, with the favourite that marks it.
+    virtual void request_album(const std::string& album_id, std::weak_ptr<void> scope,
+                               std::function<void(std::optional<Album>)> done) = 0;
 
     // Asks, as request_artists() does, for a page of the library's playlists.
     virtual void request_playlists(uint32_t number, std::weak_ptr<void> scope,

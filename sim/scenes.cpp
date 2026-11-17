@@ -3241,6 +3241,16 @@ static std::vector<ArtistFixture> make_many_artists(size_t count = MANY_ARTISTS)
     return artists;
 }
 
+// `json` as the backend sends it, which this deletes.
+static std::string print_json(cJSON* json) {
+    const auto text = cJSON_PrintUnformatted(json);
+    std::string body(text);
+    cJSON_free(text);
+    cJSON_Delete(json);
+
+    return body;
+}
+
 // The answer to a list's GET for page `number`, PAGE_SIZE to a page, of a list of `total` items in
 // the order `sort_by` and `sort_dir` name, its data `data`, in the shape the deployed backend gives
 // it.
@@ -3257,12 +3267,7 @@ static std::string make_page_body(cJSON* data, uint32_t number, size_t total, co
     cJSON_AddNumberToObject(meta, "total", double(total));
     cJSON_AddNumberToObject(meta, "total_pages", double((total + PAGE_SIZE - 1) / PAGE_SIZE));
 
-    const auto text = cJSON_PrintUnformatted(root);
-    std::string body(text);
-    cJSON_free(text);
-    cJSON_Delete(root);
-
-    return body;
+    return print_json(root);
 }
 
 // The `favourite_id` of the item at `index` of a list's fixture: every fourth item from the third
@@ -3284,31 +3289,42 @@ static constexpr int ARTIST_FAVOURITES = 100;
 static constexpr int ALBUM_FAVOURITES = 200;
 static constexpr int PLAYLIST_FAVOURITES = 300;
 
+// The artist at `index` of `artists` as the backend gives it. The id is made up, every third artist
+// has no picture, and every fourth from the third is marked as a favourite.
+static cJSON* make_artist_item(const std::vector<ArtistFixture>& artists, size_t index) {
+    const auto artist = cJSON_CreateObject();
+
+    if (index % 3) {
+        cJSON_AddStringToObject(artist, "artwork_id", ("YXJ0aXN0LyIi" + std::to_string(index)).c_str());
+    } else {
+        cJSON_AddNullToObject(artist, "artwork_id");
+    }
+
+    add_favourite_id(artist, index, ARTIST_FAVOURITES);
+
+    const char letter[] = {artists[index].second, 0};
+    cJSON_AddStringToObject(artist, "id", ("artist-" + std::to_string(index + 1)).c_str());
+    cJSON_AddStringToObject(artist, "index_letter", letter);
+    cJSON_AddStringToObject(artist, "title", artists[index].first.c_str());
+
+    return artist;
+}
+
 // The answer to GET /api/library/artists for page `number` of `artists`, its data the `count`
-// artists from `first`. The ids are made up, every third artist has no picture, and every fourth
-// from the third is marked as a favourite.
+// artists from `first`.
 static std::string make_artists_body(const std::vector<ArtistFixture>& artists, size_t first, size_t count,
                                      uint32_t number) {
     const auto data = cJSON_CreateArray();
     for (auto i = first; i < first + count; i++) {
-        const auto artist = cJSON_CreateObject();
-
-        if (i % 3) {
-            cJSON_AddStringToObject(artist, "artwork_id", ("YXJ0aXN0LyIi" + std::to_string(i)).c_str());
-        } else {
-            cJSON_AddNullToObject(artist, "artwork_id");
-        }
-
-        add_favourite_id(artist, i, ARTIST_FAVOURITES);
-
-        const char letter[] = {artists[i].second, 0};
-        cJSON_AddStringToObject(artist, "id", ("artist-" + std::to_string(i + 1)).c_str());
-        cJSON_AddStringToObject(artist, "index_letter", letter);
-        cJSON_AddStringToObject(artist, "title", artists[i].first.c_str());
-        cJSON_AddItemToArray(data, artist);
+        cJSON_AddItemToArray(data, make_artist_item(artists, i));
     }
 
     return make_page_body(data, number, artists.size(), "sort_title", "asc");
+}
+
+// The answer to GET /api/library/artists/{artist_id} for the artist at `index` of `artists`.
+static std::string make_artist_body(const std::vector<ArtistFixture>& artists, size_t index) {
+    return print_json(make_artist_item(artists, index));
 }
 
 // Every page of `items`, as the backend answers each, its body made by `make_body`.
@@ -3399,6 +3415,60 @@ static const char* const UNREADABLE_ARTISTS[] = {
     R"({"data":[{"favourite_id":1e30,"id":"artist-1","index_letter":"A","title":"ABBA"}],)"
     R"("meta":{"page":1,"per_page":100,"total":1}})",
 };
+
+// Answers for one item of the library the API's document does not allow: bodies that hold no item,
+// and the item of each of `pages` that holds one item of one, a page refused for that item alone.
+static std::vector<std::string> make_unreadable_items(const std::vector<const char*>& pages) {
+    std::vector<std::string> items = {
+        "", "<html><body>502 Bad Gateway</body></html>", "{", "null", "[]", R"(["item-1"])", R"("item-1")"};
+    const auto none_of_pages = items.size();
+
+    for (const auto body : pages) {
+        const auto root = cJSON_Parse(body);
+        const auto data = cJSON_GetObjectItemCaseSensitive(root, "data");
+        const auto meta = cJSON_GetObjectItemCaseSensitive(root, "meta");
+        const auto holds = [meta](const char* name, double value) {
+            const auto count = cJSON_GetObjectItemCaseSensitive(meta, name);
+            return cJSON_IsNumber(count) && count->valuedouble == value;
+        };
+
+        if (cJSON_IsArray(data) && cJSON_GetArraySize(data) == 1 && holds("page", 1) && holds("per_page", PAGE_SIZE) &&
+            holds("total", 1)) {
+            items.push_back(print_json(cJSON_DetachItemFromArray(data, 0)));
+        }
+
+        cJSON_Delete(root);
+    }
+
+    expect(items.size() > none_of_pages, "no page holds one item of one");
+
+    return items;
+}
+
+// The answer for one item of the library, read by `read`: `allowed`, a 200 that holds besides
+// what the display does not show, is read as `expected`; every one of `bodies` is refused whole,
+// which leaves the item as it was, as a 200 and as an error's body, which then gives no message;
+// and an error the envelope holds gives the backend's words.
+template <typename Item>
+static void expect_one_read(const char* (*read)(int status, const char* body, size_t length, Item& item,
+                                                std::string& error),
+                            const char* allowed, const Item& expected, const std::vector<std::string>& bodies) {
+    Item item;
+    std::string error = "an earlier error";
+    expect(!read(200, allowed, strlen(allowed), item, error) && item == expected && error.empty(),
+           "an item was refused for what the display does not show, or not read as it is");
+
+    for (const auto& body : bodies) {
+        expect(read(200, body.c_str(), body.length(), item, error) && item == expected && error.empty(),
+               "an unreadable item was not refused whole");
+        expect(read(502, body.c_str(), body.length(), item, error) && item == expected && error.empty(),
+               "an unreadable error body gave a message");
+    }
+
+    expect(read(502, ERROR_PLEX, strlen(ERROR_PLEX), item, error) && item == expected &&
+               error == "Plex did not answer within the time it is given, and the library could not be read",
+           "an error envelope was taken, or its words not read");
+}
 
 // Where the artists screen's back button and the button that opens its letters are.
 static constexpr lv_point_t BACK = {64, 48};
@@ -3683,6 +3753,15 @@ static void artists(SimHost& host, Shell& shell) {
                page.items[27] == Artist{.id = "artist-28", .title = "Röyksopp", .index_letter = 'R'},
            "the artists fixture's artists were not read as they are");
 
+    // An artist on its own is the artist of the list, the favourite that marks it with it.
+    const auto scope = std::make_shared<int>();
+    std::optional<Artist> artist;
+    host.artist().serve("artist-27", 200, make_artist_body(LIBRARY, 26));
+    host.request_artist("artist-27", scope,
+                        [&artist](std::optional<Artist> answered) { artist = std::move(answered); });
+    expect(artist == page.items[26] && host.artist().get_requests() == std::vector<std::string>{"artist-27"},
+           "the artist fixture was not read as the artists fixture reads it");
+
     open_library(host, shell, LIBRARY);
 }
 
@@ -3866,6 +3945,13 @@ static void artists_unreadable(SimHost& host, Shell& shell) {
     page = {};
     expect(read_artists(200, long_page.c_str(), long_page.length(), page) && page.state == LoadState::Failed,
            "a page longer than PAGE_SIZE was not refused");
+
+    // An artist on its own, which the API's document gives as an artist of the list.
+    const auto artists = make_unreadable_items({std::begin(UNREADABLE_ARTISTS), std::end(UNREADABLE_ARTISTS)});
+    expect_one_read(
+        read_one_artist,
+        R"({"artwork_id":7,"favourite_id":7,"id":"artist-1","index_letter":"A","title":"ABBA","country":"SE"})",
+        Artist{.id = "artist-1", .title = "ABBA", .index_letter = 'A', .favourite_id = 7}, artists);
 
     host.artists().serve(200, {UNREADABLE_ARTISTS[std::size(UNREADABLE_ARTISTS) - 1]});
     open_artists(host, shell);
@@ -4296,38 +4382,48 @@ static const std::vector<AlbumFixture> ALBUMS = {
     {"Rarities", 0},
 };
 
+// The album at `index` of `albums`, of the artist "artist-29", as the backend gives it. Every third
+// album has no picture, and every fourth from the third is marked as a favourite.
+static cJSON* make_album_item(const std::vector<AlbumFixture>& albums, size_t index) {
+    const auto album = cJSON_CreateObject();
+    cJSON_AddStringToObject(album, "artist", LIBRARY[SIGUR_ROS].first.c_str());
+    cJSON_AddStringToObject(album, "artist_id", "artist-29");
+
+    if (index % 3) {
+        cJSON_AddStringToObject(album, "artwork_id", ("YWxidW0vIi" + std::to_string(index)).c_str());
+    } else {
+        cJSON_AddNullToObject(album, "artwork_id");
+    }
+
+    add_favourite_id(album, index, ALBUM_FAVOURITES);
+    cJSON_AddStringToObject(album, "id", ("album-" + std::to_string(index + 1)).c_str());
+    cJSON_AddStringToObject(album, "title", albums[index].title.c_str());
+    cJSON_AddNumberToObject(album, "track_count", 9);
+
+    if (albums[index].year) {
+        cJSON_AddNumberToObject(album, "year", albums[index].year);
+    } else {
+        cJSON_AddNullToObject(album, "year");
+    }
+
+    return album;
+}
+
 // The answer to GET /api/library/artists/{artist_id}/albums for page `number` of `albums`, of the
-// artist "artist-29", its data the `count` albums from `first`. Every third album has no picture,
-// and every fourth from the third is marked as a favourite.
+// artist "artist-29", its data the `count` albums from `first`.
 static std::string make_albums_body(const std::vector<AlbumFixture>& albums, size_t first, size_t count,
                                     uint32_t number) {
     const auto data = cJSON_CreateArray();
     for (auto i = first; i < first + count; i++) {
-        const auto album = cJSON_CreateObject();
-        cJSON_AddStringToObject(album, "artist", LIBRARY[SIGUR_ROS].first.c_str());
-        cJSON_AddStringToObject(album, "artist_id", "artist-29");
-
-        if (i % 3) {
-            cJSON_AddStringToObject(album, "artwork_id", ("YWxidW0vIi" + std::to_string(i)).c_str());
-        } else {
-            cJSON_AddNullToObject(album, "artwork_id");
-        }
-
-        add_favourite_id(album, i, ALBUM_FAVOURITES);
-        cJSON_AddStringToObject(album, "id", ("album-" + std::to_string(i + 1)).c_str());
-        cJSON_AddStringToObject(album, "title", albums[i].title.c_str());
-        cJSON_AddNumberToObject(album, "track_count", 9);
-
-        if (albums[i].year) {
-            cJSON_AddNumberToObject(album, "year", albums[i].year);
-        } else {
-            cJSON_AddNullToObject(album, "year");
-        }
-
-        cJSON_AddItemToArray(data, album);
+        cJSON_AddItemToArray(data, make_album_item(albums, i));
     }
 
     return make_page_body(data, number, albums.size(), "release", "desc");
+}
+
+// The answer to GET /api/library/albums/{album_id} for the album at `index` of `albums`.
+static std::string make_album_body(const std::vector<AlbumFixture>& albums, size_t index) {
+    return print_json(make_album_item(albums, index));
 }
 
 // The tracks of Kveikur, ALBUMS' second, in disc and track order.
@@ -4576,6 +4672,14 @@ static void albums(SimHost& host, Shell& shell) {
             page.items[10] == Album{.id = "album-11", .title = "Rarities", .year = std::nullopt, .favourite_id = 210},
         "the albums fixture's albums were not read as they are");
 
+    // An album on its own is the album of the list, the favourite that marks it with it.
+    const auto scope = std::make_shared<int>();
+    std::optional<Album> album;
+    host.album().serve("album-11", 200, make_album_body(ALBUMS, 10));
+    host.request_album("album-11", scope, [&album](std::optional<Album> answered) { album = std::move(answered); });
+    expect(album == page.items[10] && host.album().get_requests() == std::vector<std::string>{"album-11"},
+           "the album fixture was not read as the albums fixture reads it");
+
     host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
     open_albums(host, shell);
 }
@@ -4678,6 +4782,12 @@ static void albums_unreadable(SimHost& host, Shell& shell) {
     read_albums(200, allowed, strlen(allowed), page);
     expect(page.items[0] == Album{.id = "album-1", .title = "Von", .year = std::nullopt},
            "an album without a date was not read as one");
+
+    // An album on its own, which the API's document gives as an album of an artist's.
+    expect_one_read(read_one_album,
+                    R"({"artist":7,"artwork_id":7,"favourite_id":null,"id":"album-1","label":"Smekkleysa",)"
+                    R"("title":"Von","track_count":"nine","year":null})",
+                    page.items[0], make_unreadable_items(bodies));
 
     host.albums().serve(200, {bodies.back()});
     open_albums(host, shell);

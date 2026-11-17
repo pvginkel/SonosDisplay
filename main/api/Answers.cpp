@@ -706,6 +706,32 @@ const char* read_albums(int status, const char* body, size_t length, Page<Album>
     return read_page(status, body, length, page, read_album);
 }
 
+// Reads the answer to a request for one item of the library, a 200 with the item, as `read_item`
+// reads an item of its list.
+template <typename Item>
+static const char* read_one(int status, const char* body, size_t length, Item& item, std::string& error,
+                            const char* (*read_item)(const cJSON* item, Item& read)) {
+    const auto root = parse(body, length);
+
+    if (status != 200) {
+        error = read_error(root.get());
+
+        return "not a 200";
+    }
+
+    error.clear();
+
+    return read_item(root.get(), item);
+}
+
+const char* read_one_artist(int status, const char* body, size_t length, Artist& artist, std::string& error) {
+    return read_one(status, body, length, artist, error, read_artist);
+}
+
+const char* read_one_album(int status, const char* body, size_t length, Album& album, std::string& error) {
+    return read_one(status, body, length, album, error, read_album);
+}
+
 // A track's `artist`, `disc`, `number`, `duration_ms` and `artwork_id` are not shown, so they are not
 // read: the backend gives the tracks in disc and track order.
 static const char* read_track(const cJSON* item, AlbumTrack& track) {

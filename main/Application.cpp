@@ -806,6 +806,50 @@ void Application::request_tracks(const std::string& album_id, uint32_t number, s
                  std::move(done), read_tracks);
 }
 
+// Reads an item of the library, which the backend gives on its own, as `read` reads its body.
+template <typename Item>
+using ItemReader = const char* (*)(int status, const char* body, size_t length, Item& item, std::string& error);
+
+// Asks for the item of the library at `path` on `client`, and hands `done` the item as `read` reads
+// it, or none when it did not come. The request goes as one with one for the same item that still
+// waits.
+template <typename Item>
+static void request_item(HttpClient& client, std::string path, std::weak_ptr<void> scope,
+                         std::function<void(std::optional<Item>)> done, ItemReader<Item> read) {
+    client.send(
+        HttpRequest{.path = path, .merges = true}, std::move(scope),
+        [path, done = std::move(done), read](HttpResponse&& response) {
+            Item item;
+            std::string error;
+
+            if (response.err != ESP_OK) {
+                // HttpClient logged the transport error, and an answer over the client's limit.
+                done(std::nullopt);
+            } else if (const auto problem =
+                           read(response.status, (const char*)response.body.get(), response.length, item, error)) {
+                ESP_LOGW(TAG, "GET %s answered %d, %s: %s", path.c_str(), response.status, problem, error.c_str());
+
+                done(std::nullopt);
+            } else {
+                ESP_LOGI(TAG, "GET %s: %s", path.c_str(), item.favourite_id ? "marked" : "not marked");
+
+                done(std::move(item));
+            }
+        });
+}
+
+void Application::request_artist(const std::string& artist_id, std::weak_ptr<void> scope,
+                                 std::function<void(std::optional<Artist>)> done) {
+    request_item(*_api_client, "/api/library/artists/" + encode_segment(artist_id), std::move(scope), std::move(done),
+                 read_one_artist);
+}
+
+void Application::request_album(const std::string& album_id, std::weak_ptr<void> scope,
+                                std::function<void(std::optional<Album>)> done) {
+    request_item(*_api_client, "/api/library/albums/" + encode_segment(album_id), std::move(scope), std::move(done),
+                 read_one_album);
+}
+
 void Application::request_playlists(uint32_t number, std::weak_ptr<void> scope,
                                     std::function<void(Page<Playlist>)> done) {
     request_page(*_api_client, "/api/library/playlists", number, std::move(scope), std::move(done), read_playlists);

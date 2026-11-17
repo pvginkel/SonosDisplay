@@ -52,6 +52,16 @@ const char* read_artists(int status, const char* body, size_t length, Page<Artis
 // date, as playing the artist queues them.
 const char* read_albums(int status, const char* body, size_t length, Page<Album>& page);
 
+// Reads the answer to GET /api/library/artists/{artist_id}, which is a 200 with the artist as the
+// artists' list gives it, into `artist`: the artist and the favourite that marks it. `error` is
+// what the backend said went wrong, where it said so. An answer that is refused leaves `artist` as
+// it is.
+const char* read_one_artist(int status, const char* body, size_t length, Artist& artist, std::string& error);
+
+// Reads the answer to GET /api/library/albums/{album_id}, a 200 with the album as an artist's
+// albums give it, as read_one_artist() reads the artist.
+const char* read_one_album(int status, const char* body, size_t length, Album& album, std::string& error);
+
 // Reads the answer to GET /api/library/albums/{album_id}/tracks, asked for with `per_page`
 // PAGE_SIZE, as read_artists() reads the artists: the tracks in disc and track order.
 const char* read_tracks(int status, const char* body, size_t length, Page<AlbumTrack>& page);

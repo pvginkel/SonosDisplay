@@ -417,6 +417,16 @@ void SimHost::request_tracks(const std::string& album_id, uint32_t number, std::
     _tracks.request(album_id, number, std::move(scope), std::move(done));
 }
 
+void SimHost::request_artist(const std::string& artist_id, std::weak_ptr<void> scope,
+                             std::function<void(std::optional<Artist>)> done) {
+    _artist.request(artist_id, std::move(scope), std::move(done));
+}
+
+void SimHost::request_album(const std::string& album_id, std::weak_ptr<void> scope,
+                            std::function<void(std::optional<Album>)> done) {
+    _album.request(album_id, std::move(scope), std::move(done));
+}
+
 void SimHost::request_playlists(uint32_t number, std::weak_ptr<void> scope, std::function<void(Page<Playlist>)> done) {
     _playlists.request({}, number, std::move(scope), std::move(done));
 }

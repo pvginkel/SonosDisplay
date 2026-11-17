@@ -56,6 +56,10 @@ public:
                         std::function<void(Page<Album>)> done) override;
     void request_tracks(const std::string& album_id, uint32_t number, std::weak_ptr<void> scope,
                         std::function<void(Page<AlbumTrack>)> done) override;
+    void request_artist(const std::string& artist_id, std::weak_ptr<void> scope,
+                        std::function<void(std::optional<Artist>)> done) override;
+    void request_album(const std::string& album_id, std::weak_ptr<void> scope,
+                       std::function<void(std::optional<Album>)> done) override;
     void request_playlists(uint32_t number, std::weak_ptr<void> scope,
                            std::function<void(Page<Playlist>)> done) override;
     void request_favourites(uint32_t number, std::weak_ptr<void> scope,
