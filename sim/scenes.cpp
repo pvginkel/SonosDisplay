@@ -7841,6 +7841,32 @@ static const char* check_artists_favourites_reconnected(const SimHost& host, con
     return check_heading_presses({}, false, true);
 }
 
+// Sigur Rós's albums, opened from her row while a favourite marks her, and the event stream says
+// that the favourites changed: her albums screen asks for her again, which the backend refuses, and
+// the toggle in its heading keeps the mark it showed.
+static void artists_favourites_changed_refused(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    host.artists().serve(200, with_mark(make_artist_pages(LIBRARY), SIGUR_ROS, MARKED_ELSEWHERE));
+    open_artists(host, shell);
+    tap_row(host, shell, LIBRARY[SIGUR_ROS].first.c_str());
+
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ELSEWHERE_MS, [&host]() {
+        host.artist().serve("artist-29", 502, ERROR_PLEX);
+        host.send_favourites_changed();
+    });
+}
+
+static const char* check_artists_favourites_changed_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (host.artist().get_requests() != std::vector<std::string>{"artist-29"}) {
+        return "the artist was not asked for again, once";
+    }
+
+    return check_heading_presses({}, false, true);
+}
+
 // Sigur Rós's albums as the backend holds them once another display marked Átta and unmarked
 // Valtari.
 static std::vector<std::string> make_album_pages_marked_elsewhere() {
@@ -7907,6 +7933,29 @@ static const char* check_albums_favourites_reconnected(const SimHost& host, cons
     }
     if (host.album().get_requests() != std::vector<std::string>{"album-1"}) {
         return "the album was not asked for again, once, when the stream was back";
+    }
+
+    return check_heading_presses({}, false, true);
+}
+
+// Valtari's tracks, opened from its row while a favourite marks it, and the event stream says that
+// the favourites changed: the tracks screen asks for the album again, which the backend refuses, and
+// the toggle in its heading keeps the mark it showed.
+static void albums_favourites_changed_refused(SimHost& host, Shell& shell) {
+    open_album(host, shell, "Valtari");
+
+    host.answer_after(SimHost::TAP_INTERVAL_MS + ELSEWHERE_MS, [&host]() {
+        host.album().serve("album-3", 502, ERROR_PLEX);
+        host.send_favourites_changed();
+    });
+}
+
+static const char* check_albums_favourites_changed_refused(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 3)) {
+        return problem;
+    }
+    if (host.album().get_requests() != std::vector<std::string>{"album-3"}) {
+        return "the album was not asked for again, once";
     }
 
     return check_heading_presses({}, false, true);
@@ -10620,9 +10669,13 @@ const std::vector<Scene>& get_scenes() {
          after_touches_ms(3)},
         {"artists-favourites-reconnected", artists_favourites_reconnected, check_artists_favourites_reconnected,
          after_touches_ms(3)},
+        {"artists-favourites-changed-refused", artists_favourites_changed_refused,
+         check_artists_favourites_changed_refused, after_touches_ms(2)},
         {"albums-favourites-changed", albums_favourites_changed, check_albums_favourites_changed, after_touches_ms(3)},
         {"albums-favourites-reconnected", albums_favourites_reconnected, check_albums_favourites_reconnected,
          after_touches_ms(3)},
+        {"albums-favourites-changed-refused", albums_favourites_changed_refused,
+         check_albums_favourites_changed_refused, after_touches_ms(2)},
         {"albums-favourites-changed-under", albums_favourites_changed_under, check_albums_favourites_changed_under,
          after_touches_ms(4)},
         {"albums-favourite-copies-changed", albums_favourite_copies_changed, check_albums_favourite_copies_changed,
