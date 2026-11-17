@@ -16,7 +16,7 @@ the first display", with what the first display, flashed the same day, showed.
 |---|---|
 | Layout | PaperClock's shape: `Application : ApplicationBase`, one UI task that drains esp-mdm's queue and runs LVGL, `esp-libs` as path dependencies. `main/` splits into `board/` (hardware), `backend/` (HTTP and events), `api/` (the backend's answers, read into the UI's types, and the bodies of the requests) and `ui/` (LVGL and standard C++ only). |
 | Carried over | The panel, expander, touch, backlight and motion-sensor code of ThermostatDisplay's shipped build: two framebuffers in PSRAM at a 14 MHz pixel clock. Rewritten for LVGL 9.2 and for ESP-IDF's current I2C driver, not copied. |
-| Picture drift | No change to `esp-libs`. The panel's DMA reads two bounce buffers in internal RAM, which interrupts on core 1, the UI task's, refill from the framebuffers, also while flash is written; the driver restarts a frame that comes up short. The panel also resynchronises whenever the screen is switched on, as ThermostatDisplay's did, twice as startup ends and after a setting is saved, and code runs from PSRAM. `CONFIG_LCD_RGB_RESTART_IN_VSYNC` stays off. An update is only written during boot, and the display restarts after it. |
+| Picture drift | No change to `esp-libs`. The panel's DMA reads two bounce buffers in internal RAM, which interrupts on core 1, the UI task's, refill from the framebuffers, also while flash is written; the driver restarts a frame that comes up short. The panel also resynchronises whenever the screen is switched on, as ThermostatDisplay's did, and code runs from PSRAM. `CONFIG_LCD_RGB_RESTART_IN_VSYNC` stays off. An update is only written during boot, and the display restarts after it. |
 | Brown-out | The backlight is switched at most once a second, in either direction, by one state machine. Boot lights the screen only after a power-on reset. |
 | HTTP and events | Four small tasks in the app: one for presses, one for fetches, one for artwork, one holding the event stream. Results reach the UI task through esp-mdm's queue. The code lives in the app, `main/backend/`, written free of app types so it can move to `esp-libs` when a second firmware needs it. |
 | Backend address | IoT Support's device configuration, key `backendUrl`, required by the model's schema. Not a build setting. |
@@ -101,7 +101,7 @@ main/
     LoadingView.{h,cpp}  SpeakerPickerView.{h,cpp}  NowPlayingView.{h,cpp}
     ListView.{h,cpp}        the paged list Home, every library screen and the queue derive from
     HomeView  ArtistsView  AlbumsView  TracksView  PlaylistsView  QueueView   each .{h,cpp}
-    ItemPresses.{h,cpp}  PressButton.{h,cpp}   an item's Play, Shuffle, Add and favourite toggle
+    ItemPresses.{h,cpp}  PressButton.{h,cpp}   an item's Play, Shuffle, Add, toggle; a track's line
     NowPlayingBar.{h,cpp}   the bar under the content area
     Cover.{h,cpp}  Controls.{h,cpp}  shared by the now-playing screen and the bar
     fonts/                  generated .c files and icons.h
@@ -137,14 +137,17 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
    and `screenOffSeconds` out of the JSON, which esp-mdm frees when the hook returns. It then sets
    the loading text to "Checking for an update" and calls `lv_refr_now(nullptr)`, because the
    update check that follows blocks this task (section 2).
-4. `do_ready()` runs once MQTT is connected. It restarts the panel (section 3), starts the four
-   backend tasks, asks for the speakers, the chosen speaker's playback and its group's volume, and
-   calls `Shell::open()`, which replaces `LoadingView` with the app's first view: the speaker
-   picker or Home (section 5).
+4. `do_ready()` runs once MQTT is connected. It starts the four backend tasks, asks for the
+   speakers, the chosen speaker's playback and its group's volume, and calls `Shell::open()`,
+   which replaces `LoadingView` with the app's first view: the speaker picker or Home (section 5).
 5. `do_process()` calls `board.process()`, tells the artwork loader whether the screen is lit
    (section 7), settles the changes whose answer did not come in time (section 4), and calls the
-   Shell's `update()`, which updates the top view and the bar. Once startup has settled it
-   restarts the panel a second time (section 3).
+   Shell's `update()`, which updates the top view and the bar. Once startup has settled
+   (`Application::has_settled()`), it logs "Startup has settled" and marks the run's `settled`
+   stage (`RunMark`, below), once per boot: the first view is up, the event stream is connected,
+   and no `HttpClient` holds a request whose answer has not run on the UI task
+   (`HttpClient::is_idle()`), a cover the first view asked for among them. A client added to
+   `Application` joins `has_settled()`.
 
 esp-mdm restarts the device when WiFi cannot be joined, when WiFi or MQTT drops, and when IoT
 Support announces a new configuration or firmware. SonosDisplay accepts that: a restart takes
@@ -168,9 +171,8 @@ own RTC watchdog finishes. So the firmware keeps its own record of every run, `R
 - **The mark.** A struct in RTC memory (`RTC_NOINIT_ATTR`), with a magic and a CRC, since RTC
   memory holds what it happens to hold after a power-on and a reset can cut a write short. It
   holds the last stage the run reached, `booting`, `configured`, `ready` or `settled` (section 1's
-  steps, and the second panel restart of section 3), with its uptime; and of a restart, the task
-  that began it, its uptime, and whether the panel stopped in time. `Board::begin()` keeps the run
-  before's mark and starts this one's.
+  steps), with its uptime; and of a restart, the task that began it, its uptime, and whether the
+  panel stopped in time. `Board::begin()` keeps the run before's mark and starts this one's.
 - **What survives.** RTC memory survives a reset of the digital core alone: a software restart, a
   panic's restart, and the first stage of the restart's RTC watchdog (raw reason 9, "RTC watch dog
   resets digital core"). Whether it survives raw reason 16, which resets the RTC module too (the
@@ -485,7 +487,6 @@ wired: `OTAManager` declares the callback and nothing calls it.
 The other flash writes are short: the speaker choice and the motion setting saved to NVS, esp-mdm
 storing new provisioning data (followed by a restart), and a coredump being erased after its upload
 at boot. Items 1 and 2 cover them, and the restart on the next wake puts right what they do not.
-After either setting is saved, the app restarts the panel at once (`Board::resync_panel`).
 
 The bounce buffers cost 32,000 bytes of internal RAM (section 7) and an interrupt that copies
 about 25 MB a second out of PSRAM; how much of its core that takes is not measured. The core is 1,
@@ -525,25 +526,17 @@ saw the picture shifted, until the screen went dark and woke: "It's very familia
 drift the restart in every vblank had hidden, and startup is where it comes from. Startup reads
 and writes flash: WiFi's and the PHY's data in NVS, the update check, the core dump check. Flash
 and PSRAM share the bus, so each access held up the panel's DMA, which read the framebuffer
-straight from PSRAM then. So `do_ready`, once esp-mdm's startup is over, calls
-`Board::resync_panel` and restarts the panel.
+straight from PSRAM then.
 
-**Then two shifts on power-on starts.** Trying the first milestone, the operator saw the picture
-shift once during startup, and differently just before the main screen opened. `do_ready`'s
-restart comes just before the backend's tasks open their TLS connections, and the first view
-opens while they do; nothing restarted the panel after that. So the panel is restarted a second
-time once startup has settled (`Application::has_settled()`): the first view is up, the event
-stream is connected, and no `HttpClient` holds a request whose answer has not run on the UI task
-(`HttpClient::is_idle()`), a cover the first view asked for among them. `do_process()` checks
-this after the Shell's update, once per boot, and logs "Startup has settled; restarting the
-panel". The restart blocks the UI task for up to two frames; with the backend unreachable it
-waits until the stream connects. A client added to `Application` joins `has_settled()`.
-
-**Then the shift in use.** At milestone 2's try-out, with both restarts in, the operator saw "no
-improvement at all in the screen shifting". When it showed is not known beyond those words, so the
-fix covers a sideways shift wherever it shows, at startup, in use and on waking: the panel scans
-out through bounce buffers (item 2 above), and every restart stays. Whether they end the shifts is
-still to see on the display ("To check on the first display").
+**Then shifts at startup and in use.** Trying the first milestone, the operator saw the picture
+shift once during startup, and differently just before the main screen opened; at milestone 2's
+try-out, "no improvement at all in the screen shifting". When it showed is not known beyond those
+words, so the fix covers a sideways shift wherever it shows, at startup, in use and on waking: the
+panel scans out through bounce buffers (item 2 above). At their try-out, on 2026-11-17, the
+picture stayed put through three power-on starts, a sitting of use and three wakes: "This really
+did solve the shifting problem completely." The panel is restarted on waking alone. Whether the
+picture stays put with that restart alone, through power-on starts, a wake, a speaker chosen and
+the motion setting switched, is still to see on the display ("To check on the first display").
 
 ### Switching the backlight too fast browns the board out
 
@@ -678,9 +671,13 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   settled without a notice too.
 - **Play, Shuffle and Add to queue** send `POST /api/speakers/{id}/queue`, the body `kind`,
   `item_id`, `action` and, for an artist's play and add, `"order": "newest_first"`: what the
-  speaker plays for an artist from the Sonos app. The backend answers 202 with a `task_id` and
-  queues in the background; the task's end comes later on the event stream, as `task_event`, which
-  every connection receives and which may come before the 202. The model (`Queueing`) watches the
+  speaker plays for an artist from the Sonos app. A track is added, never played or shuffled on
+  its own: a press on its line sends its album's `play` with the track as `start_track_id`, so the
+  whole album replaces the queue and playback starts at the track, as in the Sonos app. That press
+  is a request of its own beside the album's Play, and on its way apart from it. The backend
+  answers 202 with a `task_id` and queues in the background; the task's end comes later on the
+  event stream, as `task_event`, which every connection receives and which may come before the
+  202. The model (`Queueing`) watches the
   tasks of the display's own requests, the newest 8, and holds the ends no answer has named yet
   while a request is on its way, also 8 at most. A failure is said in the backend's words; an add
   the backend took is said too, since nothing else on screen shows it; Play and Shuffle show as the
@@ -699,7 +696,11 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   either way. Any other answer, a failed request, or none within the time limit, is a change not
   taken. The model (`Favouring`) holds the changes on their way, one an item at most, since a view
   sends no second while one is on its way, and the newest 8 the backend took, which the views
-  apply to the items they hold; a view that missed more than 8 fetches its items again. Home lists
+  apply to the items they hold; a view that missed more than 8 fetches its items again. An
+  artist's albums and an album's tracks, whose heading holds the item's toggle (section 5), fetch
+  that item again on its own, `GET /api/library/artists/{id}` or `GET /api/library/albums/{id}`,
+  when they missed more than 8 and whenever the favourites may have changed unseen; one that does
+  not come leaves the toggle as it is. Home lists
   the favourites with `GET /api/favourites`, by title (`sort_by=title`), so a new mark lands in its
   place. A favourite that is not available, which Plex does not have or does not answer for, keeps
   its title; the firmware keeps its `item_id` and `artwork_id` only while it is available, and
@@ -714,8 +715,9 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
 - **The callback runs on the UI task**, through `get_queue().enqueue(...)`.
 - **`scope`** is a weak reference the caller owns, in practice the view that asked. If it has
   expired when the request is about to start or the response arrives, the request is dropped and
-  the body freed. A closed view therefore neither receives late data nor leaves artwork
-  downloads behind it.
+  the body freed. A closed view therefore receives no late data, and a request of its that has
+  not started is never sent. Artwork goes in the app's own scope instead: the loader starts a
+  download only while a view wants it, and keeps what one under way brings (section 7).
 - **Timeouts and retries:** 5 seconds. A GET is retried once after a transport error; nothing
   else is retried, since a repeated "next" is a different command.
 - **Answers are read in `main/api/Answers`**, where what the backend sends enters the app. The
@@ -870,8 +872,9 @@ both headers in `ui/`:
 - **`UiHost.h`**: an abstract class with what a view may ask for: a speaker chosen, motion set to
   wake the screen or not, a transport command, a step of the volume, a speaker added to the chosen
   speaker's group or removed from it, a fetch again, a page of the artists, an artist's albums, an
-  album's tracks, the playlists, the favourites or the queue, an item played, shuffled or added to
-  the queue, an item marked or unmarked as a favourite, the queue cleared, a piece of artwork.
+  album's tracks, the playlists, the favourites or the queue, one artist or one album with the
+  favourite that marks it, an item played, shuffled or added to the queue, an item marked or
+  unmarked as a favourite, the queue cleared, a piece of artwork.
   `Application` implements it on the device; `sim/` implements it with fixtures.
 
 `ui/log.h` gives the views `UI_LOGI`, `UI_LOGW` and `UI_LOGE`: `ESP_LOGx` when `ESP_PLATFORM` is
@@ -946,8 +949,9 @@ code the device runs, and a scene can check the body the device would send.
   none, Home says how a favourite is added, under a heart's outline. Loading, failure with Try
   again, and the pages are a list's, as below. A press on an available tile opens a sheet over
   Home, its backdrop dimmed: a way back and the favourite's title, and under them the presses of
-  its item as on its library row, after "Albums" for an artist or "Tracks" for an album, which
-  close the sheet and open the library's screen of them over Home; a playlist has the presses
+  its item, Play, Shuffle, Add to queue and the favourite toggle, after "Albums" for an artist or
+  "Tracks" for an album, which close the sheet and open the library's screen of them over Home,
+  its heading's toggle showing the favourite the sheet's showed; a playlist has the presses
   alone. A press beside the sheet closes it, as its way back does. The sheet's toggle shows the
   favourite that marks the item as Home holds it: the tile's own, then what the backend took of
   this display's presses on it. A mark made elsewhere shows on the tiles once they come again, not
@@ -961,21 +965,28 @@ code the device runs, and a scene can check the body the device would send.
   list, each as large a target as the grid allows, and a letter brings its first artist to the
   top. A button under it opens the playlists. A
   press on an artist's row opens its albums, newest first, each with its year where it has one; a
-  press on an album's row opens its tracks. A playlist opens nothing: the backend does not list its
-  tracks. Every artist, album and playlist row ends in Play, Shuffle, Add to queue and the
-  favourite toggle, a heart while a favourite marks the item and its outline while none does, every
-  track row in Play and Add to queue, 64 px each (`ItemPresses`); a press on one does not open its
-  row, and a drag that starts on one still scrolls the list. A press shows as on its way from the
-  press until the backend answers it, or the time limit settles it: a turning spinner in the
-  button's place (`PressButton`), as on the speakers screen's group control, and a second press on
-  it sends nothing. The artists, albums and playlists apply at once what the backend took of this
-  display's presses on their toggles, and ask again for the page at their top whenever
-  `Model::favourites_changes` moves (section 4). The queue lists each entry's title and, beside
-  it, its artist. It opens on the page holding the loaded track, that row at the top and marked
-  in the accent; while no track of the queue is loaded, a line under the heading says it plays
-  from another source, or the screen says the queue is empty. While it shows it asks again for the
-  page at its top when `Model::queue_changes` moves, and once the event stream is back after a
-  loss. Clear ends its heading and asks to be confirmed over the list.
+  press on an album's row opens its tracks. An artist's row holds its name alone, and an album's
+  its title and year, the title cut with dots where the room ends. An artist's and an album's
+  Play, Shuffle, Add to queue and favourite toggle end the heading of the screen that opens on it,
+  its albums or its tracks, the title cut with dots a gap before them
+  (`ListView::create_heading_presses`). A playlist opens nothing, since the backend does not list
+  its tracks, so its row ends in them. The toggle is a heart while a favourite marks the item and
+  its outline while none does, and each is 64 px (`ItemPresses`). A press on a track's row plays
+  its album from that track (section 4), and the row ends in Add to queue. A press on a button
+  does not open its row, and a drag that starts on a button or a track's row still scrolls the
+  list. A press shows as on its way from the press until the backend answers it, or the time limit
+  settles it: a turning spinner in the button's place (`PressButton`), as on the speakers screen's
+  group control, or, for a track's row, before its Add to queue; a second press on it sends
+  nothing. The heading's presses stay while the list is built again. The artists, albums and
+  playlists apply at once what the backend took of this display's presses on the toggles, and ask
+  again for the page at their top whenever `Model::favourites_changes` moves (section 4); an
+  artist's albums and an album's tracks ask for the item of their heading as well. The queue
+  lists each entry's title and, beside it, its artist. It opens on the page holding the loaded
+  track, that row at the top and marked in the accent; while no track of the queue is loaded, a
+  line under the heading says it plays from another source, or the screen says the queue is empty.
+  While it shows it asks again for the page at its top when `Model::queue_changes` moves, and once
+  the event stream is back after a loss. Clear ends its heading and asks to be confirmed over the
+  list.
 - **`Theme`** sets up the dark theme once, with `lv_theme_default_init(disp, primary, secondary,
   true, font)`, and holds the palette and the type scale as named constants. Starting values:
   background `#101214`, surface `#1C1F24`, text `#F2F2F2`, secondary text `#A0A6AD`, accent
@@ -1258,17 +1269,26 @@ a shared pointer, for exactly as long as a widget draws from it. When the cap is
 least recently used unpinned images are freed; when the pinned ones leave no room, the new image
 is not kept, the view is handed `nullptr`, and its widget keeps the placeholder, a flat tile with
 an icon. A picture the backend did not give, or that was not kept, is asked for again at the next
-change of the model, never on a timer. A view asks only for what is visible, and its requests die
-with it (the `scope` of section 4). Nothing is fetched while the screen is dark: what is asked for
-meanwhile, and still wanted, is fetched when it wakes.
+change of the model, never on a timer. A view asks only for what is visible, and its request waits
+only while the view lives and wants that picture (its `scope`, as in section 4). Nothing is fetched
+while the screen is dark: what is asked for meanwhile, and still wanted, is fetched when it wakes.
+
+`ArtworkLoader` downloads one picture at a time, in the app's own scope. A view that asks for a
+picture whose download is under way or waits to start waits on that download, so a picture is
+downloaded once at a size however many views ask. A download that has not started when no view
+wants it any longer is never made. One under way is read to its end and its image kept, whether or
+not a view still waits for it, so a cover left before it arrived shows from the cache when it is
+asked for again; the log then says "Artwork at … px is in with no view waiting for it, kept". A
+download whose answer never reached the UI task is found at the UI task's next pass, and the
+views that wait on it are handed `nullptr`, as for one the backend did not answer.
 
 Home's list is 288 px tall and a line of tiles about 228 with its gap, so at most three lines,
 twelve tiles, are in view at once, and Home holds at most twelve pictures at 160: about 600 KB
 beside the now-playing screen's cover and the bar's, which stay held while now playing is open over
-it, all under the cap. The twelve tiles in view and the two covers ask in fewer requests than the
-artwork client's queue of 16 holds. A quick scroll while the first pictures are on their way can
-ask for more; a request the full queue refuses is answered as failed, and its tile asks again at the
-next scroll or change of the model.
+it, all under the cap. The downloads waiting to start wait in the loader, which gives the artwork
+client one at a time. A quick scroll while the first pictures are on their way asks for more; a
+download that no view wants any longer by its turn, such as a tile's scrolled out of view, is never
+made.
 
 ### Lists
 
@@ -1323,7 +1343,7 @@ provisioned on 2026-11-15; the results are from its log in IoT Support (Elastics
 
 | Check | Result on the first display | Fallback |
 |---|---|---|
-| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). With that fixed, the picture drifted at power-on, until the next wake; startup now ends with a restart (section 3). Holds since `f2217d1`: the operator's "Works" after a power-on and a wake, 2026-11-15 | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here |
+| Direct render mode shows no stale or torn areas when a view changes and when a list scrolls | Artifacts on screen. Their cause was the restart in every vblank, not direct mode (section 3); the swap is also made safe now (section 2). With that fixed, the picture drifted at power-on, until the next wake (section 3). Holds since `f2217d1`: the operator's "Works" after a power-on and a wake, 2026-11-15 | `LV_DISPLAY_RENDER_MODE_FULL`, ThermostatDisplay's mode; it would not have helped here |
 | `CONFIG_LCD_RGB_RESTART_IN_VSYNC` gives a steady picture, and the picture is right again after an update was installed with the screen lit | Failed: on the S3, without bounce buffers, it pins the picture to fb0. Taken out | done: the restart on every wake remains |
 | The new I2C driver reaches the expander at `0x24` and `0x38` and the touch controller at `0x5D` or `0x14` | The expander holds: the backlight is switched through it. The touch controller answered at bring-up, when the board had only been reset by esptool, but not after the operator's power-ons: it was probed before it left reset. It is now probed until it answers, and the result is logged where IoT Support gets it (section 2). Holds since `f2217d1`: `Touch: GT911 at 0x5D` after a power-on, and the operator's "Works" | none needed |
 | Touch coordinates match what is drawn, corner to corner: the skeleton's placeholder view drew a dot where each touch landed | Holds: the operator's "Works" at bring-up | `swap_xy` or the mirror flags of the touch configuration |
@@ -1345,11 +1365,10 @@ Two more things from the first boot's log:
 
 Milestone 1 is the first firmware to use the backend, and what only a display shows of it is
 still to check there: the backend's connections on the handed root, the speaker choice's NVS read
-and write and the panel restart after it, a `POST` with an empty body and its 204 through
-`esp_http_client`, the events and every timing, the covers' fetch and how they draw, and the
-bar's touch targets under a finger. Also to watch: that `esp_http_client_read` returns
-`-ESP_ERR_HTTP_EAGAIN` on a quiet stream as its header documents, and that the 75-second idle
-limit holds against the deployed heartbeat.
+and write, a `POST` with an empty body and its 204 through `esp_http_client`, the events and every
+timing, the covers' fetch and how they draw, and the bar's touch targets under a finger. Also to
+watch: that `esp_http_client_read` returns `-ESP_ERR_HTTP_EAGAIN` on a quiet stream as its header
+documents, and that the 75-second idle limit holds against the deployed heartbeat.
 
 Milestone 4's changes of groups have reached no real speaker: the operator's first try of the
 speakers screen on the display is the first join and the first leave. What only that shows is
@@ -1367,16 +1386,22 @@ with the largest list open, against the 60 KB target.
 
 What only a display shows of milestone 3's favourites and Home is still to see there: a mark's
 `POST` and an unmark's `DELETE` through `esp_http_client`, and the lists and Home fetched again on
-`favourites_changed`; how long a press shows on its way; the motion setting's NVS write and the
-panel restart after it, and that, switched off, motion neither wakes the screen nor keeps it lit;
-Home's tiles and their pictures, how much of a title Regular 32 leaves readable, whether the motion
-setting's icon reads as the setting without a label, the sheet under a finger, and free internal
-RAM with Home's pictures held.
+`favourites_changed`; how long a press shows on its way; the motion setting's NVS write, and
+that, switched off, motion neither wakes the screen nor keeps it lit; Home's tiles and their
+pictures, how much of a title Regular 32 leaves readable, whether the motion setting's icon reads
+as the setting without a label, the sheet under a finger, and free internal RAM with Home's
+pictures held.
 
-What only a display shows of the bounce buffers (section 3) is still to see there: that the
-firmware starts with them, since a panel set-up the driver refuses fails
-`ESP_ERROR_CHECK(board.begin())` in `app_main`, before WiFi, where no update can reach the display; whether the picture stays put on a few power-on
-starts, through a sitting of use and on a few wakes; that a view that changes and a list that
-scrolls show no stale or torn area with the swap of section 2; that a long list still scrolls and
-a press on a row still answers as before, with the refill on the UI task's core; and free internal
-RAM with the largest list open, against the 60 KB target, with their 32,000 bytes taken.
+The bounce buffers (section 3) held at their try-out on 2026-11-17, over three power-on starts, a
+sitting of use and three wakes: "Works: The picture stayed put, and scrolling and presses felt as
+before". What only a display shows of them is still to see there: that a view that changes and a
+list that scrolls show no stale or torn area with the swap of section 2; free internal RAM with
+the largest list open, against the 60 KB target, with their 32,000 bytes taken; and whether the
+picture stays put with the panel restarted on waking alone, through power-on starts, a wake, a
+speaker chosen and the motion setting switched.
+
+What only a display shows of the library's headings and of the covers kept is still to see there:
+a press on a track's line, which should replace the queue with the whole album and start at that
+track on the speaker; the headings' presses and the tracks' lines under a finger; and, over the
+display's own link, now playing left before its cover arrived and opened again, which should show
+the cover without a second download while the log says the cover was kept.
