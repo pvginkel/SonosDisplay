@@ -39,10 +39,10 @@ void ArtistsView::build_row(lv_obj_t* row, size_t index) {
     const auto& artist = _artists.items[index];
 
     create_row_title(row, artist.title);
-    create_queue_buttons(row, ItemKind::Artist, artist.id, artist.favourite_id);
     make_openable(row);
 }
 
+// The artists' favourites are what their albums screens open with.
 void ArtistsView::apply_favourite(const FavouriteChange& change) {
     for (auto& artist : _artists.items) {
         artist.favourite_id = change.apply(ItemKind::Artist, artist.id, artist.favourite_id);

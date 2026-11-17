@@ -15,7 +15,8 @@
 // artist or an album, the way to its albums or its tracks, which closes the sheet. A press beside
 // the sheet closes it too. Its toggle shows the favourite that marks the item: the tile's, until the
 // backend takes a mark or an unmark of the item from this display; the tile of a favourite unmarked
-// stays until the favourites come again.
+// stays until the favourites come again. An artist's albums open with the favourite the toggle
+// shows.
 
 #include <cstddef>
 #include <cstdint>

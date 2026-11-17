@@ -4,9 +4,8 @@
 // jump to a letter. The button beside the list opens the letters its artists file under, as a
 // grid over the list, each letter as large a target as the grid allows; a press on one brings
 // its first artist to the top, and closes the grid. The letters are those of the rows built,
-// which are the whole library while it has 200 artists or fewer. A press on an artist opens its
-// albums, and its buttons play it, its albums newest first, shuffle it or add it to the queue, and
-// mark it as a favourite or unmark it. The
+// which are the whole library while it has 200 artists or fewer. An artist's row is its name, and a
+// press on it opens its albums, whose heading ends in the artist's presses (AlbumsView). The
 // button under the letters' opens the playlists, whatever came of the artists.
 
 #include <cstddef>

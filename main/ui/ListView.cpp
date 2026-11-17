@@ -111,7 +111,7 @@ void ListView::do_render(lv_obj_t* parent) {
 
 void ListView::do_update() {
     fit_heading();
-    if (has_favourites()) {
+    if (has_favourites() || _heading_presses) {
         apply_favourites();
     }
 
@@ -448,10 +448,20 @@ void ListView::create_track_presses(lv_obj_t* row, const std::string& album_id, 
     _presses.push_back(std::make_unique<ItemPresses>(_host, row, album_id, track_id));
 }
 
+void ListView::create_heading_presses(lv_obj_t* heading, ItemKind kind, const std::string& item_id,
+                                      std::optional<int64_t> favourite_id) {
+    _heading_presses = std::make_unique<ItemPresses>(_host, heading, kind, item_id, favourite_id);
+}
+
+void ListView::show_heading_favourite(std::optional<int64_t> favourite_id) {
+    _heading_presses->show_favourite(favourite_id);
+}
+
 // The changes the backend took since the view last applied them go to the subclass's items, and
 // each toggle built shows what they leave of its item's favourite. A view that missed more of them
-// than are held, or while the favourites may have changed unseen, asks for its items again, which
-// show what the backend holds: after the changes are applied, so that the answer takes their place.
+// than are held, or while the favourites may have changed unseen, asks for its items again, and for
+// the heading's item, which show what the backend holds: after the changes are applied, so that the
+// answer takes their place.
 void ListView::apply_favourites() {
     const auto& model = _host->get_model();
     const auto& favouring = model.favouring;
@@ -469,11 +479,20 @@ void ListView::apply_favourites() {
             for (const auto& presses : _presses) {
                 presses->apply(*change);
             }
+            if (_heading_presses) {
+                _heading_presses->apply(*change);
+            }
         }
     }
 
-    if (missed || unseen) {
+    if (!missed && !unseen) {
+        return;
+    }
+    if (has_favourites()) {
         refresh();
+    }
+    if (_heading_presses) {
+        request_heading_item();
     }
 }
 
@@ -494,8 +513,8 @@ static bool update_shown(const std::vector<Sent>& sending, std::vector<uint32_t>
     return false;
 }
 
-// Each row's presses show whether they are on their way, once the requests or the changes on their
-// way changed since the presses last showed them.
+// Each row's presses, and the heading's, show whether they are on their way, once the requests or
+// the changes on their way changed since the presses last showed them.
 void ListView::show_presses() {
     const auto& model = _host->get_model();
     const auto presses_shown = update_shown(model.queueing.sending, _shown_presses);
@@ -505,6 +524,9 @@ void ListView::show_presses() {
 
     for (const auto& presses : _presses) {
         presses->show_on_its_way();
+    }
+    if (_heading_presses) {
+        _heading_presses->show_on_its_way();
     }
 }
 

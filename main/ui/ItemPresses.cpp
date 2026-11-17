@@ -68,8 +68,9 @@ ItemPresses::ItemPresses(UiHost* host, lv_obj_t* line, std::string album_id, std
     lv_obj_add_event_cb(line, line_clicked, LV_EVENT_CLICKED, this);
 }
 
-void ItemPresses::apply(const FavouriteChange& change) {
-    const auto favourite_id = change.apply(_kind, _item_id, _favourite_id);
+void ItemPresses::apply(const FavouriteChange& change) { show_favourite(change.apply(_kind, _item_id, _favourite_id)); }
+
+void ItemPresses::show_favourite(std::optional<int64_t> favourite_id) {
     if (favourite_id == _favourite_id) {
         return;
     }

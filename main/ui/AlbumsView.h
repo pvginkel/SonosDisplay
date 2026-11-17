@@ -2,7 +2,11 @@
 
 // An artist's albums, newest first, as playing the artist queues them, each with the year it was
 // released where it has one. A press on an album opens its tracks, and its buttons play it, shuffle
-// it or add it to the queue, and mark it as a favourite or unmark it.
+// it or add it to the queue, and mark it as a favourite or unmark it. The heading, the artist's
+// name, ends in the artist's presses (ItemPresses): Play and Add to queue, which queue its albums
+// newest first, Shuffle, and the favourite toggle, which shows the favourite that marks the artist
+// as the screen was opened with it, then as the backend takes a mark or an unmark, and as the
+// backend holds it, asked for again whenever the favourites may have changed unseen.
 
 #include <cstddef>
 #include <cstdint>
@@ -11,10 +15,11 @@
 #include "ListView.h"
 
 class AlbumsView : public ListView {
-    std::string _artist_id;
+    Artist _artist;
     PagedList<Album> _albums;
 
 public:
+    // The albums of `artist`, whose favourite_id is the favourite that marks it now.
     AlbumsView(UiHost* host, Shell* shell, const Artist& artist);
 
 protected:
@@ -26,4 +31,6 @@ protected:
     void apply_favourite(const FavouriteChange& change) override;
     const char* get_loading_message() const override;
     const char* get_empty_message() const override;
+    void do_render_heading(lv_obj_t* heading) override;
+    void request_heading_item() override;
 };

@@ -9,12 +9,12 @@
 #include "TracksView.h"
 
 AlbumsView::AlbumsView(UiHost* host, Shell* shell, const Artist& artist)
-    : ListView(host, shell, artist.title), _artist_id(artist.id) {}
+    : ListView(host, shell, artist.title), _artist(artist) {}
 
 void AlbumsView::request_page(uint32_t page) {
     _albums.ask(page);
 
-    _host->request_albums(_artist_id, page, get_scope(), [this](Page<Album> answered) {
+    _host->request_albums(_artist.id, page, get_scope(), [this](Page<Album> answered) {
         _albums.answered(std::move(answered));
         list_changed();
     });
@@ -48,4 +48,17 @@ void AlbumsView::apply_favourite(const FavouriteChange& change) {
 
 void AlbumsView::open_row(size_t index) {
     _shell->push(std::make_unique<TracksView>(_host, _shell, _albums.items[index]));
+}
+
+void AlbumsView::do_render_heading(lv_obj_t* heading) {
+    create_heading_presses(heading, ItemKind::Artist, _artist.id, _artist.favourite_id);
+}
+
+// An artist that did not come leaves the toggle as it is.
+void AlbumsView::request_heading_item() {
+    _host->request_artist(_artist.id, get_scope(), [this](std::optional<Artist> artist) {
+        if (artist) {
+            show_heading_favourite(artist->favourite_id);
+        }
+    });
 }

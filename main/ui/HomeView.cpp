@@ -314,8 +314,11 @@ void HomeView::item_clicked(lv_event_t* event) {
     lv_obj_add_flag(self->_sheet, LV_OBJ_FLAG_HIDDEN);
 
     if (favourite.kind == ItemKind::Artist) {
-        self->_shell->push(std::make_unique<AlbumsView>(self->_host, self->_shell,
-                                                        Artist{.id = favourite.item_id, .title = favourite.title}));
+        self->_shell->push(
+            std::make_unique<AlbumsView>(self->_host, self->_shell,
+                                         Artist{.id = favourite.item_id,
+                                                .title = favourite.title,
+                                                .favourite_id = self->_sheet_presses->get_favourite_id()}));
     } else {
         self->_shell->push(std::make_unique<TracksView>(self->_host, self->_shell,
                                                         Album{.id = favourite.item_id, .title = favourite.title}));

@@ -4,10 +4,11 @@
 // the root, and under it a row, or a tile, for every item held. A subclass holds the pages
 // (PagedList), asks the host for one, builds an item's row, which it may give the item's presses
 // (ItemPresses), applies to its items the changes of a favourite the backend took, and
-// opens an item whose row it made openable; it may end the heading with its own, and say a line
-// under it. A list whose items carry a favourite, or are the favourites, asks for them again
-// whenever the favourites may have changed unseen. While the Shell's "Reconnecting" marker shows
-// at the top right, the heading ends before it.
+// opens an item whose row it made openable; it may end the heading with its own, the presses of
+// the item the screen opens on among them, and say a line under it. A list whose items carry a
+// favourite, or are the favourites, asks for them again whenever the favourites may have changed
+// unseen, and a screen whose heading ends in an item's presses asks for the item again. While the
+// Shell's "Reconnecting" marker shows at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
@@ -45,6 +46,9 @@ class ListView : public View {
     bool _changed{};
     // The presses of each row built with them.
     std::vector<std::unique_ptr<ItemPresses>> _presses;
+    // The presses at the heading's end of the item the screen opens on, if it has them: they stay
+    // while the list is built again.
+    std::unique_ptr<ItemPresses> _heading_presses;
     // The ids of the requests to queue an item, and of the changes of a favourite, that were on
     // their way when the presses last showed them.
     std::vector<uint32_t> _shown_presses;
@@ -132,6 +136,23 @@ protected:
     // Builds what the subclass shows at the heading's end, after its title, in `heading`, a flex
     // row. Called once, before the list is first built.
     virtual void do_render_heading(lv_obj_t* heading) {}
+
+    // Ends `heading`, which do_render_heading() was handed, with the presses of the item the screen
+    // opens on, of this kind and with this id (ItemPresses), the toggle showing the favourite with
+    // `favourite_id`, or none. They show their press on its way, and the toggle what the backend
+    // took, as a row's do, and stay while the list is built again. Whenever the favourites may have
+    // changed unseen, the view asks for the item again (request_heading_item()).
+    void create_heading_presses(lv_obj_t* heading, ItemKind kind, const std::string& item_id,
+                                std::optional<int64_t> favourite_id);
+
+    // Asks the host for the item whose presses end the heading (create_heading_presses()), whose
+    // answer goes to show_heading_favourite(). Called whenever the favourites may have changed
+    // unseen, or the view missed more of their changes than the model holds.
+    virtual void request_heading_item() {}
+
+    // The heading's toggle shows the favourite with this id, or none, as the one that marks its item:
+    // what the backend holds, asked for again.
+    void show_heading_favourite(std::optional<int64_t> favourite_id);
 
     // Builds what the subclass shows beside the list, in `body`, the row the list's `area` is in,
     // or over it, in `area`. Called once, before the list is first built.

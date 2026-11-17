@@ -45,6 +45,13 @@ public:
     // the favourite it leaves marking the item, which a press on the toggle unmarks.
     void apply(const FavouriteChange& change);
 
+    // The toggle shows the favourite with this id, or none, as the one that marks the item: what the
+    // backend holds, asked for again.
+    void show_favourite(std::optional<int64_t> favourite_id);
+
+    // The favourite the toggle shows marking the item, or none.
+    std::optional<int64_t> get_favourite_id() const { return _favourite_id; }
+
     // Each press shows whether it is on its way: a request for the item and the button's action, a
     // track's line its album's Play from it, or a change of the item. Wherever the item's presses are
     // built, before the press or after it, they show the same.
