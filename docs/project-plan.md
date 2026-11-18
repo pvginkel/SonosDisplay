@@ -24,6 +24,8 @@ runs the firmware, and the operator can do everything under "What is agreed" fro
 
 ## What is agreed
 
+The scope every task holds to. A change to what this section says comes to the operator.
+
 **On the display**
 
 - **Home:** the favourites as artwork tiles, an entry into the library, and a now-playing bar that
@@ -32,7 +34,22 @@ runs the firmware, and the operator can do everything under "What is agreed" fro
   the playlists. No search and no on-screen keyboard ("I prefer to not have a search option").
 - **On every artist, album and playlist:** Play, Shuffle, Add to queue, and a favourite toggle.
   On a track: Play and Add to queue.
+- **Where those controls sit.** An artist's and an album's controls sit at the top right of the
+  screen that opens on it, not on its line in the list. A playlist opens no list of its own, so
+  its controls stay on its line. A track has no Play button: pressing its line plays it. The
+  operator, 2026-11-17, at the picture shift's try-out: "I think the controls inline look very
+  busy. I would do this differently: I would show these controls at the top right of the screen,
+  on the thing opened. So instead of having the controls on e.g. the album line, I would move
+  those controls into the album screen, at the top right. This gives more space for the album
+  name. The space available now is pretty cramped. The play button on the track line can go
+  completely. If the track line is pressed, that can itself be the play action. I see that for
+  playlists you don't have a sub list. That's fine. Keep the controls where they are for that."
 - **Play replaces the queue; Add to queue appends.**
+- **Playing a track plays its album from that track.** It replaces the queue with the whole
+  album and starts at the track, as the Sonos app does. The operator, 2026-11-17: "in the Sonos
+  app, if I start a single track, it replaces the queue with the album, and starts it at that
+  track. So if I jus go into an album and press track 4, the whole album is loaded into the
+  queue, and the first three tracks are skipped. I think that's good behavior."
 - **Playing an artist plays their albums in release-year order, each in track order.** This is
   how the operator uses the speaker today, so it is the plain Play button, one tap from the
   artist: "Don't shuffle artists by default. Play all in album release year is basically how I
@@ -46,6 +63,12 @@ runs the firmware, and the operator can do everything under "What is agreed" fro
   and can be paused, skipped and turned up or down. The library only ever offers Plex.
 - **The screen** is off until the motion sensor or a touch wakes it, and goes off again after a
   while, as the thermostat firmware does today.
+- **Waking on motion can be switched off** in a setting on the display, so that only a touch
+  wakes it. The operator, 2026-11-16: "The I just want a setting to disable the option sensor. I
+  considered and rejected the 2 second option myself. The problem is the sensitivity, not
+  anything else. I may be able to do something about that, but that's hardware, not software."
+  No clock screen and no motion filtering in the firmware: the sensor's sensitivity is a hardware
+  matter for the operator.
 - **Dark theme.** Latin script with accents only.
 
 **In the backend**
@@ -276,8 +299,8 @@ workflow.
     hardware code. Its vendor documentation for the board is under `documentation/`.
   - `pvginkel/PaperClock` and `pvginkel/esp-libs`: the reference for firmware conventions.
   - `pvginkel/IoTSupport`: device management, provisioning and firmware distribution.
-  - `pvginkel/ModernAppTemplate`: the template the backend is generated from, with its guide at
-    `https://dev-guides.home/modern-app/`.
+  - `pvginkel/ModernAppTemplate`: the template the backend is generated from, with its guide in
+    the operator's dev guides.
 - **Environment:** `pvginkel-sonosdisplay-1c23a1` holds SonosDisplay. It has no toolchain yet;
   task 5 adds what the firmware needs.
 - **The spike** listed speakers, browsed Plex and queued music both ways. Task 6 started from it.
