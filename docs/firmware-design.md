@@ -1424,6 +1424,13 @@ the largest list open, against the 60 KB target, with their 32,000 bytes taken; 
 picture stays put with the panel restarted on waking alone, through power-on starts, a wake, a
 speaker chosen and the motion setting switched.
 
+Every update restart on the firmware with bounce buffers, from `9986f59`'s to `02b0c66`'s, stalled
+until the second stage of the restart's RTC watchdog reset the chip, raw reason 16 (SDSP-20).
+The halt before a restart (section 1) is the remedy, from `846062f`. What only a display shows of
+it is still to see there: the restart that installs the release after `846062f`, which should read
+raw reason 12 at the next boot, with "The run before's restart halted the scan-out" and how the
+data cache's preload ended.
+
 What only a display shows of the library's headings and of the covers kept is still to see there:
 a press on a track's line, which should replace the queue with the whole album and start at that
 track on the speaker; the headings' presses and the tracks' lines under a finger; and, over the
