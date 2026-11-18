@@ -2,8 +2,8 @@
 
 // The artwork the views ask for. The backend prepares it in the form LVGL draws, so the display
 // decodes nothing: an answer is checked where it enters and drawn from its bytes as they arrived.
-// What was fetched is kept by id and size, within a limit, and nothing is fetched while the screen
-// is dark.
+// What was fetched is kept by id and size, within a limit, in memory, and behind that on the
+// host's card, where it has one. Nothing is read or fetched while the screen is dark.
 //
 // It includes LVGL, the C++ standard library and ui/UiHost.h only, so sim/ builds it too and its
 // scenes get their artwork the way the device does.
@@ -27,7 +27,8 @@ using ArtworkBody = std::shared_ptr<const uint8_t>;
 // 9's binary image, a 12-byte header and then `size` by `size` RGB565 pixels, which `artwork`
 // draws from `body` as they are. Returns what was wrong with the answer, for the log, or nullptr
 // when it was what the API's document says. `body` is at an address a multiple of 4, which LVGL
-// asks of the pixels 12 bytes into it.
+// asks of the pixels 12 bytes into it. A picture the card gives back is read the same way, as the
+// answer with status 200 it was kept from.
 const char* read_artwork(int status, ArtworkBody body, size_t length, int32_t size, Artwork& artwork);
 
 // The images that were fetched, by artwork id and size. An image a view holds is pinned: it is
@@ -79,7 +80,35 @@ struct ArtworkDownload {
     std::shared_ptr<void> held;
 };
 
-// What became of the backend's answer to a download.
+// A picture at a size that the loader has the host read from its card. The host holds the read
+// until it hands the card's answer to card_answered(); one it lets go of before then brings no
+// answer, which the loader reads from `held`.
+struct ArtworkRead {
+    std::string artwork_id;
+    int32_t size{};
+    // Lives for as long as the host holds a copy of the read.
+    std::shared_ptr<void> held;
+};
+
+// The card the host keeps pictures on, which outlives a restart. The loader calls it on the UI
+// task.
+class ArtworkCard {
+public:
+    virtual ~ArtworkCard() = default;
+
+    // Whether the card reads pictures: one that is not there, or that failed, does not.
+    virtual bool is_on() const = 0;
+
+    // Reads a picture. The host hands what the card has of it to ArtworkLoader::card_answered(),
+    // before this returns or later.
+    virtual void read(ArtworkRead&& read) = 0;
+
+    // Deletes the card's file of a picture, where it has one. The card keeps a picture it holds as
+    // it is, so one that is not fit to draw goes before the picture is kept again.
+    virtual void erase(const std::string& artwork_id, int32_t size) = 0;
+};
+
+// What became of an answer: the card's to a read, or the backend's to a download.
 struct ArtworkOutcome {
     // What was wrong with the answer, for the log, or nullptr.
     const char* problem;
@@ -88,46 +117,64 @@ struct ArtworkOutcome {
     size_t handed;
 };
 
-// Answers the views' requests for artwork from the cache, and from the backend through the host's
-// `fetch`, one download at a time. A view that asks for a picture whose download is under way or
-// waits to start waits on that download: there is one per picture and size. A download that has
-// not started when no view wants it any longer is not made; one under way is read to its end and
-// its image kept, whether or not a view still waits for it. Runs on the UI task.
+// Answers the views' requests for artwork from the cache, then from the host's card, then from the
+// backend through the host's `fetch`: one read and one download at a time, and neither waits for
+// the other. A view that asks for a picture that is being read or downloaded, or waits for either
+// to start, waits with it: no picture at a size is read or downloaded twice at once. A read or a
+// download that has not started when no view wants it any longer is not made; one under way is
+// taken to its end and its image kept, whether or not a view still waits for it. Without a card,
+// or with one that is off, every picture is downloaded. Runs on the UI task.
 class ArtworkLoader {
 public:
     using Fetch = std::function<void(ArtworkDownload&&)>;
 
 private:
-    // A picture at a size, and the views' requests that wait for it.
-    struct Download {
+    // A picture at a size that is not here yet, and the views' requests that wait for it.
+    struct Pending {
         std::string artwork_id;
         int32_t size;
         std::vector<ArtworkRequest> waiting;
     };
 
     Fetch _fetch;
+    ArtworkCard* _card;
     ArtworkCache _cache;
     bool _screen_lit{true};
+    // The reads not started, oldest first.
+    std::deque<Pending> _unread;
+    std::optional<Pending> _reading;
+    // Expires once the host lets go of _reading's read.
+    std::weak_ptr<void> _reading_held;
     // The downloads not started, oldest first.
-    std::deque<Download> _queued;
-    std::optional<Download> _current;
+    std::deque<Pending> _queued;
+    std::optional<Pending> _current;
     // Expires once the host lets go of _current's download.
     std::weak_ptr<void> _current_held;
 
 public:
-    explicit ArtworkLoader(Fetch fetch);
+    // `card` is nullptr where the host has no card.
+    ArtworkLoader(Fetch fetch, ArtworkCard* card);
     ArtworkLoader(const ArtworkLoader&) = delete;
     ArtworkLoader& operator=(const ArtworkLoader&) = delete;
 
-    // An image the cache has is handed over before this returns. Any other waits on its download,
-    // which starts once the screen is lit and the download before it is done.
+    // An image the cache has is handed over before this returns. Any other waits on the card's
+    // read, which starts once the screen is lit and the read before it is done, and where the card
+    // has no picture to draw, on its download, which starts once the download before it is done.
     void request(ArtworkRequest request);
 
     // Says whether the screen is lit, which the host does on every pass of the UI task's loop.
-    // While it is dark no download starts; what was asked for meanwhile, and is still wanted, is
-    // downloaded when it wakes. A download the host let go of without an answer is found here: the
-    // views that wait on it are handed nullptr, as for one the backend did not answer.
+    // While it is dark no read and no download starts; what was asked for meanwhile, and is still
+    // wanted, is read or downloaded when it wakes. What the host let go of without an answer is
+    // found here. A read is then a picture the card does not have, which is downloaded. The views
+    // that wait on a download are handed nullptr, as for one the backend did not answer.
     void set_screen_lit(bool lit);
+
+    // The card's answer to the read under way: the picture's bytes as the card holds them, or
+    // nullptr where it has none. A picture that passes the checks of a download and fits the cache
+    // is kept, and handed to the views that still wait for it; one that does not fit hands them
+    // nullptr. One that fails the checks is erased from the card and, as one the card does not
+    // have, downloaded.
+    ArtworkOutcome card_answered(ArtworkBody body, size_t length);
 
     // The backend's answer to the download under way, which the host hands over whether or not a
     // view still waits for it. An image that passes its checks and fits the cache is kept, and
@@ -140,11 +187,11 @@ public:
 
     const ArtworkCache& get_cache() const { return _cache; }
 
-    // How many downloads wait to start: for the screen, or for the one under way.
-    size_t count_waiting() const { return _queued.size(); }
+    // How many reads and downloads wait to start: for the screen, or for the one under way.
+    size_t count_waiting() const { return _unread.size() + _queued.size(); }
 
 private:
-    Download* find(const std::string& artwork_id, int32_t size);
+    Pending* find(const std::string& artwork_id, int32_t size);
     void start_next();
     void forget_lost();
     size_t finish(const Artwork& artwork);

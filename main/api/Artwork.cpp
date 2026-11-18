@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+static constexpr int STATUS_OK = 200;
 static constexpr size_t HEADER_LENGTH = 12;
 static constexpr int32_t BYTES_PER_PIXEL = 2;
 
@@ -19,7 +20,7 @@ struct Image {
 static int32_t read_u16(const uint8_t* bytes) { return bytes[0] | (bytes[1] << 8); }
 
 const char* read_artwork(int status, ArtworkBody body, size_t length, int32_t size, Artwork& artwork) {
-    if (status != 200) {
+    if (status != STATUS_OK) {
         return "not a 200";
     }
     if (length < HEADER_LENGTH) {
@@ -115,12 +116,25 @@ bool ArtworkCache::is_pinned(const std::string& artwork_id, int32_t size) const 
     });
 }
 
-ArtworkLoader::ArtworkLoader(Fetch fetch) : _fetch(std::move(fetch)) {}
+ArtworkLoader::ArtworkLoader(Fetch fetch, ArtworkCard* card) : _fetch(std::move(fetch)), _card(card) {}
 
-// A download is wanted while a view that waits for it lives and has not asked for another picture.
+// A picture is wanted while a view that waits for it lives and has not asked for another picture.
 static bool is_wanted(const std::vector<ArtworkRequest>& waiting) {
     return std::any_of(waiting.begin(), waiting.end(),
                        [](const ArtworkRequest& request) { return !request.scope.expired(); });
+}
+
+// Hands `artwork` to the views that still wait for it, and returns how many they are.
+static size_t hand_over(const std::vector<ArtworkRequest>& waiting, const Artwork& artwork) {
+    size_t handed = 0;
+    for (const auto& request : waiting) {
+        if (!request.scope.expired()) {
+            request.done(artwork);
+            handed++;
+        }
+    }
+
+    return handed;
 }
 
 void ArtworkLoader::request(ArtworkRequest request) {
@@ -129,19 +143,22 @@ void ArtworkLoader::request(ArtworkRequest request) {
         return;
     }
 
-    // Before the request joins it: a download the host let go of brings no answer.
+    // Before the request joins it: a read or a download the host let go of brings no answer.
     forget_lost();
 
     // What is no longer wanted does not wait: a dark screen can last a night of tracks, and a quick
     // scroll of Home's tiles asks for many pictures.
-    std::erase_if(_queued, [](const Download& download) { return !is_wanted(download.waiting); });
+    const auto is_unwanted = [](const Pending& pending) { return !is_wanted(pending.waiting); };
+    std::erase_if(_unread, is_unwanted);
+    std::erase_if(_queued, is_unwanted);
 
-    if (const auto download = find(request.artwork_id, request.size)) {
-        std::erase_if(download->waiting, [](const ArtworkRequest& waiting) { return waiting.scope.expired(); });
-        download->waiting.push_back(std::move(request));
+    if (const auto pending = find(request.artwork_id, request.size)) {
+        std::erase_if(pending->waiting, [](const ArtworkRequest& waiting) { return waiting.scope.expired(); });
+        pending->waiting.push_back(std::move(request));
     } else {
-        _queued.push_back(Download{.artwork_id = request.artwork_id, .size = request.size, .waiting = {}});
-        _queued.back().waiting.push_back(std::move(request));
+        auto& lane = _card ? _unread : _queued;
+        lane.push_back(Pending{.artwork_id = request.artwork_id, .size = request.size, .waiting = {}});
+        lane.back().waiting.push_back(std::move(request));
     }
 
     start_next();
@@ -151,6 +168,41 @@ void ArtworkLoader::set_screen_lit(bool lit) {
     _screen_lit = lit;
 
     start_next();
+}
+
+ArtworkOutcome ArtworkLoader::card_answered(ArtworkBody body, size_t length) {
+    auto read = std::move(*_reading);
+    _reading.reset();
+
+    Artwork artwork;
+    const char* problem = nullptr;
+
+    if (body) {
+        problem = read_artwork(STATUS_OK, std::move(body), length, read.size, artwork);
+        if (problem) {
+            _card->erase(read.artwork_id, read.size);
+        }
+    }
+
+    if (!artwork) {
+        _queued.push_back(std::move(read));
+
+        start_next();
+
+        return ArtworkOutcome{.problem = problem, .handed = 0};
+    }
+
+    if (!_cache.add(read.artwork_id, read.size, artwork, length)) {
+        problem = "the image does not fit the cache beside what is on screen";
+        artwork.reset();
+    }
+
+    // A view's `done` may ask for another picture, and the read is gone by then.
+    const auto handed = hand_over(read.waiting, artwork);
+
+    start_next();
+
+    return ArtworkOutcome{.problem = problem, .handed = handed};
 }
 
 ArtworkOutcome ArtworkLoader::answered(int status, ArtworkBody body, size_t length) {
@@ -175,22 +227,50 @@ void ArtworkLoader::unanswered() {
     start_next();
 }
 
-ArtworkLoader::Download* ArtworkLoader::find(const std::string& artwork_id, int32_t size) {
-    const auto is_of = [&](const Download& download) {
-        return download.size == size && download.artwork_id == artwork_id;
-    };
+ArtworkLoader::Pending* ArtworkLoader::find(const std::string& artwork_id, int32_t size) {
+    const auto is_of = [&](const Pending& pending) { return pending.size == size && pending.artwork_id == artwork_id; };
 
+    if (_reading && is_of(*_reading)) {
+        return &*_reading;
+    }
     if (_current && is_of(*_current)) {
         return &*_current;
     }
 
-    const auto queued = std::find_if(_queued.begin(), _queued.end(), is_of);
+    for (const auto lane : {&_unread, &_queued}) {
+        const auto pending = std::find_if(lane->begin(), lane->end(), is_of);
+        if (pending != lane->end()) {
+            return &*pending;
+        }
+    }
 
-    return queued == _queued.end() ? nullptr : &*queued;
+    return nullptr;
 }
 
 void ArtworkLoader::start_next() {
     forget_lost();
+
+    while (!_reading && _screen_lit && !_unread.empty()) {
+        auto read = std::move(_unread.front());
+        _unread.pop_front();
+
+        if (!is_wanted(read.waiting)) {
+            continue;
+        }
+
+        // A card that is off has nothing to read.
+        if (!_card->is_on()) {
+            _queued.push_back(std::move(read));
+            continue;
+        }
+
+        auto held = std::make_shared<int>(0);
+        _reading_held = held;
+        _reading = std::move(read);
+
+        // The host may hand over the answer before this returns.
+        _card->read(ArtworkRead{.artwork_id = _reading->artwork_id, .size = _reading->size, .held = std::move(held)});
+    }
 
     while (!_current && _screen_lit && !_queued.empty()) {
         auto download = std::move(_queued.front());
@@ -210,6 +290,11 @@ void ArtworkLoader::start_next() {
 }
 
 void ArtworkLoader::forget_lost() {
+    if (_reading && _reading_held.expired()) {
+        _queued.push_back(std::move(*_reading));
+        _reading.reset();
+    }
+
     if (_current && _current_held.expired()) {
         finish(nullptr);
     }
@@ -221,13 +306,5 @@ size_t ArtworkLoader::finish(const Artwork& artwork) {
     const auto download = std::move(*_current);
     _current.reset();
 
-    size_t handed = 0;
-    for (const auto& request : download.waiting) {
-        if (!request.scope.expired()) {
-            request.done(artwork);
-            handed++;
-        }
-    }
-
-    return handed;
+    return hand_over(download.waiting, artwork);
 }

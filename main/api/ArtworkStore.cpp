@@ -304,6 +304,16 @@ bool ArtworkStore::write(const std::string& artwork_id, int32_t size, const uint
     return true;
 }
 
+void ArtworkStore::erase(const std::string& artwork_id, int32_t size) {
+    if (_state == State::Off) {
+        return;
+    }
+
+    if (remove(get_path(artwork_id, size).c_str()) != 0 && errno != ENOENT) {
+        stop(State::Off, "deleting a picture", errno);
+    }
+}
+
 std::string ArtworkStore::get_path(const std::string& artwork_id, int32_t size) const {
     return make_path(make_key(artwork_id, size));
 }

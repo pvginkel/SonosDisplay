@@ -12,9 +12,20 @@
 #include "api/Requests.h"
 #include "cJSON.h"
 
-SimHost::SimHost() {
+SimHost::SimHost() : SimHost(std::make_unique<CardFolder>()) {}
+
+SimHost::SimHost(std::unique_ptr<CardFolder> card_folder) : SimHost(card_folder->get_path()) {
+    _own_card_folder = std::move(card_folder);
+}
+
+SimHost::SimHost(const std::string& card_folder)
+    : _card(card_folder, CARD_FORMAT, _card_buffer, sizeof(_card_buffer), [](size_t length) {
+          return std::shared_ptr<uint8_t>(new uint8_t[length], std::default_delete<uint8_t[]>());
+      }) {
     _model.backend_url = "http://sonos-controller.example:5000";
     _model.stream_state = StreamState::Connected;
+
+    _card.begin();
 }
 
 void SimHost::choose_speaker(const std::string& id) {
@@ -504,6 +515,49 @@ void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::
         .scope = std::move(scope),
         .done = std::move(done),
     });
+}
+
+bool SimHost::is_on() const { return _card.get_state() != ArtworkStore::State::Off; }
+
+void SimHost::read(ArtworkRead&& read) {
+    _card_reads.push_back(ArtworkFetch{read.artwork_id, read.size});
+
+    if (_card_held) {
+        _held_read = std::move(read);
+    } else {
+        answer_card(read);
+    }
+}
+
+void SimHost::erase(const std::string& artwork_id, int32_t size) { _card.erase(artwork_id, size); }
+
+void SimHost::answer_card() {
+    if (!_held_read) {
+        return;
+    }
+
+    const auto read = std::move(*_held_read);
+    _held_read.reset();
+
+    answer_card(read);
+}
+
+void SimHost::answer_card(const ArtworkRead& read) {
+    const auto was_on = is_on();
+
+    auto picture = _card.read(read.artwork_id, read.size);
+    if (picture.problem) {
+        printf("W (SimHost) The card has no artwork at %d px to hand over: %s\n", int(read.size), picture.problem);
+    }
+    if (was_on && !is_on()) {
+        printf("W (SimHost) The card is off: %s failed with errno %d\n", _card.get_fault().doing,
+               _card.get_fault().error);
+    }
+
+    const auto outcome = _artwork.card_answered(std::move(picture.body), picture.length);
+    if (outcome.problem) {
+        printf("W (SimHost) The card's artwork at %d px: %s\n", int(read.size), outcome.problem);
+    }
 }
 
 void SimHost::fetch_artwork(ArtworkDownload&& download) {

@@ -54,7 +54,8 @@ public:
         // The picture's bytes as they were written, or nullptr: the folder does not hold it.
         ArtworkBody body;
         size_t length{};
-        // What was wrong with the picture's file, for the log, or nullptr.
+        // Why a file that is there brought no picture, for the log, or nullptr: it was not the
+        // picture's and is deleted, or there is no memory for the picture and it stays.
         const char* problem{};
     };
 
@@ -82,7 +83,8 @@ public:
 
     // The picture, checked against its header. A file that is not there is a miss. So is one that
     // is not what the store writes for this key, by its marker, version, key, length or CRC; it is
-    // deleted, and `problem` says what was wrong. Only a folder that does not answer turns the
+    // deleted, and `problem` says what was wrong. Without memory for the picture there is none
+    // either: `problem` says so, and the file stays. Only a folder that does not answer turns the
     // store off.
     Picture read(const std::string& artwork_id, int32_t size);
 
@@ -90,6 +92,10 @@ public:
     // room, at whichever step of the write, stops the writes; any other failure turns the store
     // off. Neither leaves the temporary file behind.
     bool write(const std::string& artwork_id, int32_t size, const uint8_t* body, size_t length);
+
+    // Deletes the picture's file, where there is one, so that a write keeps the picture again. A
+    // folder that does not answer turns the store off.
+    void erase(const std::string& artwork_id, int32_t size);
 
     State get_state() const { return _state; }
 

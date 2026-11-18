@@ -30,7 +30,7 @@ class Application : public ApplicationBase, public UiHost {
     std::unique_ptr<HttpClient> _press_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
-    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }};
+    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }, nullptr};
     // The scope of the app's own requests, which lives as long as the app.
     std::shared_ptr<void> _scope{std::make_shared<int>(0)};
     int64_t _last_memory_log_ms{};

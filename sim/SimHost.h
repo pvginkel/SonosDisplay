@@ -13,12 +13,14 @@
 #include <utility>
 #include <vector>
 
+#include "CardFolder.h"
 #include "UiHost.h"
 #include "api/Answers.h"
 #include "api/Artwork.h"
+#include "api/ArtworkStore.h"
 #include "lvgl.h"
 
-// A piece of artwork the views had fetched from the backend.
+// A piece of artwork the views had fetched from the backend, or read from the card.
 struct ArtworkFetch {
     std::string artwork_id;
     int32_t size;
@@ -36,7 +38,7 @@ struct GroupChangeRequest {
     bool operator==(const GroupChangeRequest&) const = default;
 };
 
-class SimHost : public UiHost {
+class SimHost : public UiHost, private ArtworkCard {
 public:
     // A touch of the screen: where the finger goes down, and where it is when it lifts.
     struct Touch {
@@ -271,7 +273,14 @@ private:
     std::vector<std::string> _favourite_request_bodies;
     std::vector<UnansweredFavouriteChange> _unanswered_favourite_changes;
     std::optional<Answer> _favourite_answer;
-    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }};
+    // The folder of a host that was given none.
+    std::unique_ptr<CardFolder> _own_card_folder;
+    uint8_t _card_buffer[512];
+    ArtworkStore _card;
+    std::vector<ArtworkFetch> _card_reads;
+    bool _card_held{};
+    std::optional<ArtworkRead> _held_read;
+    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }, this};
     std::vector<ArtworkFetch> _artwork_fetches;
     std::optional<ArtworkAnswer> _artwork_answer;
     bool _artwork_held{};
@@ -296,7 +305,15 @@ public:
     // From one of a scene's touches to the next: what the first one changed is on screen by then.
     static constexpr uint32_t TAP_INTERVAL_MS = 200;
 
+    // The format the card keeps its pictures under: the one the device asks the backend for.
+    static constexpr char CARD_FORMAT[] = "lvgl";
+
+    // With a card of its own, a new and empty folder that is gone with the host.
     SimHost();
+
+    // With the card in `card_folder` and what it holds, as the display finds its card when it
+    // starts. A folder that is not there is a card that failed: it is off.
+    explicit SimHost(const std::string& card_folder);
 
     Model& model() { return _model; }
     const Model& get_model() const override { return _model; }
@@ -531,6 +548,22 @@ public:
     // the next request for artwork.
     void drop_artwork() { _held_artwork.reset(); }
 
+    // From here on a read of the card stays on its way until answer_card().
+    void hold_card() { _card_held = true; }
+
+    // Answers the read of the card on its way, if there is one, with what the card holds by now,
+    // whether or not a view still waits for it. The one the display asks for next stays on its
+    // way.
+    void answer_card();
+
+    // Drops the answer to the read of the card on its way, as the device drops one the UI task's
+    // queue has no room for. The display finds it at its loop's next pass, process(), or at the
+    // next request for artwork.
+    void drop_card_read() { _held_read.reset(); }
+
+    // The artwork the card was asked for, in order: what the cache had is not in it.
+    const std::vector<ArtworkFetch>& get_card_reads() const { return _card_reads; }
+
     // How many answers to requests for artwork came with no view waiting for them any more, which
     // the device logs.
     size_t count_artwork_unwaited() const { return _artwork_unwaited; }
@@ -541,11 +574,11 @@ public:
         _artwork.set_screen_lit(lit);
     }
 
-    // How many downloads of artwork have not started: waiting for the screen, or for the one under
-    // way.
+    // How many reads and downloads of artwork have not started: waiting for the screen, or for the
+    // one under way.
     size_t count_artwork_waiting() const { return _artwork.count_waiting(); }
 
-    // The artwork fetched from the backend, in order: what the cache had is not in it.
+    // The artwork fetched from the backend, in order: what the cache or the card had is not in it.
     const std::vector<ArtworkFetch>& get_artwork_fetches() const { return _artwork_fetches; }
 
     // Whether a view holds this image, which it does for as long as it draws it.
@@ -568,6 +601,13 @@ public:
     const std::vector<std::optional<Touch>>& get_taps() const { return _taps; }
 
 private:
+    explicit SimHost(std::unique_ptr<CardFolder> card_folder);
+
+    // The loader's card: the store over the host's folder.
+    bool is_on() const override;
+    void read(ArtworkRead&& read) override;
+    void erase(const std::string& artwork_id, int32_t size) override;
+
     void command_answered(uint32_t id, Command command, int status, const char* body);
     void send_volume_change();
     void volume_change_answered(uint32_t change, int status, const char* body);
@@ -577,4 +617,5 @@ private:
     void favourite_answered(const UnansweredFavouriteChange& change, int status, const char* body);
     void fetch_artwork(ArtworkDownload&& download);
     void answer_artwork(const ArtworkDownload& download);
+    void answer_card(const ArtworkRead& read);
 };

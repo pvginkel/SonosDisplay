@@ -2579,9 +2579,6 @@ static void expect_no_download_nobody_waits_for() {
     expect(host.get_artwork_fetches() == fetches, "a cover nobody waited for any more was downloaded");
 }
 
-// What the card's store keeps its pictures under in these scenes: the format the device asks for.
-static const char STORE_FORMAT[] = "lvgl";
-
 static std::shared_ptr<uint8_t> allocate_picture(size_t length) {
     return std::shared_ptr<uint8_t>(new uint8_t[length], std::default_delete<uint8_t[]>());
 }
@@ -2593,7 +2590,7 @@ class CardStore {
 public:
     ArtworkStore store;
 
-    explicit CardStore(const std::string& folder, const char* format = STORE_FORMAT,
+    explicit CardStore(const std::string& folder, const char* format = SimHost::CARD_FORMAT,
                        ArtworkStore::Allocate allocate = allocate_picture)
         : store(folder, format, _buffer, sizeof(_buffer), std::move(allocate)) {}
 };
@@ -2812,7 +2809,8 @@ static void expect_store_deletes_what_is_not_the_picture() {
                    "another picture's file was not a miss, or it stayed");
 
     // Without memory for the picture there is none to hand over, and its file is not at fault.
-    CardStore short_of_memory(folder.get_path(), STORE_FORMAT, [](size_t) { return std::shared_ptr<uint8_t>(); });
+    CardStore short_of_memory(folder.get_path(), SimHost::CARD_FORMAT,
+                              [](size_t) { return std::shared_ptr<uint8_t>(); });
     const auto picture = short_of_memory.store.read(ARTWORK_PLAYING, BAR_COVER_SIZE);
     expect(!picture.body && picture.problem && is_there(path) && is_on(short_of_memory.store),
            "a picture there was no memory for was handed over, or deleted, or stopped the store");
@@ -2832,6 +2830,16 @@ static void expect_store_writes_a_picture_once() {
            "a picture the card holds was an error");
     expect(holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, first) && count_files(folder.get_path()) == 1,
            "a picture the card holds was written again");
+
+    // Once it is erased the picture is kept as it comes next, and erasing what is not there is no
+    // error.
+    card.store.erase(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    card.store.erase(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE) && is_on(card.store),
+           "an erased picture was read, or erasing it stopped the store");
+    expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, second) &&
+               holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, second),
+           "a picture was not kept again once it was erased");
 }
 
 // The temporary file a power cut left is removed when the store starts, and the pictures stay.
@@ -2966,6 +2974,351 @@ static void expect_store_off_after_an_error() {
     }
 }
 
+// Puts a picture on the card in `folder`, as a display that ran before left it there, and returns
+// its file.
+static std::string put_on_card(const std::string& folder, const std::string& artwork_id, int32_t size,
+                               const std::vector<uint8_t>& body) {
+    CardStore card(folder);
+    card.store.begin();
+    expect(keeps(card.store, artwork_id, size, body), "a picture was not written");
+
+    return card.store.get_path(artwork_id, size);
+}
+
+// A view that asks its host for artwork, and what it was told.
+struct ArtworkAsker {
+    SimHost& host;
+    std::shared_ptr<void> scope{std::make_shared<int>(0)};
+    // How often it was answered, and how often with no picture.
+    size_t told{};
+    size_t refused{};
+    // What it was last answered with.
+    Artwork image{};
+
+    void ask(const std::string& artwork_id, int32_t size = COVER_SIZE) {
+        host.request_artwork(artwork_id, size, scope, [this](Artwork artwork) {
+            told++;
+            refused += !artwork;
+            image = std::move(artwork);
+        });
+    }
+};
+
+// Whether the image draws the pixels the backend answers for this id and size.
+static bool is_picture(const Artwork& image, const std::string& artwork_id, int32_t size) {
+    static constexpr size_t HEADER_LENGTH = 12;
+
+    const auto body = SimHost::make_artwork(artwork_id, size);
+
+    return image && image->data_size == body.size() - HEADER_LENGTH &&
+           !memcmp(image->data, body.data() + HEADER_LENGTH, image->data_size);
+}
+
+// Memory first, then the card, then the network. A display that starts over a card draws the
+// picture the card holds with no request to the backend, asks the card once, and downloads only
+// what the card lacks: the same id at another size or in another case is another picture.
+static void expect_card_before_the_network() {
+    static const char OTHER_CASE[] = "yXJ0d29yay9zdmVmbg";
+
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    ArtworkAsker view{host};
+
+    view.ask(ARTWORK_PLAYING);
+    expect(view.told == 1 && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE),
+           "a picture the card holds was not handed over as it was kept");
+    expect(host.get_artwork_fetches().empty(), "the backend was asked for a picture the card holds");
+    expect(host.get_card_reads() == std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}},
+           "the card was not asked once for a picture the cache lacks");
+
+    view.ask(ARTWORK_PLAYING);
+    expect(view.told == 2 && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE) && host.get_card_reads().size() == 1 &&
+               host.get_artwork_fetches().empty(),
+           "a picture the cache has was asked of the card or of the backend");
+
+    view.ask(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    expect(is_picture(view.image, ARTWORK_PLAYING, BAR_COVER_SIZE), "a picture the card lacks was not downloaded");
+    view.ask(OTHER_CASE);
+    expect(is_picture(view.image, OTHER_CASE, COVER_SIZE), "a picture the card lacks was not downloaded");
+
+    const std::vector<ArtworkFetch> lacking = {{ARTWORK_PLAYING, BAR_COVER_SIZE}, {OTHER_CASE, COVER_SIZE}};
+    expect(host.get_artwork_fetches() == lacking,
+           "what the card lacks was not downloaded once, after the card said so");
+    expect(host.get_card_reads().size() == 3 && view.told == 4 && !view.refused,
+           "the card was not asked first for each picture the cache lacks");
+}
+
+// Nothing is read from the card while the screen is dark, and what is still wanted is read when it
+// wakes.
+static void expect_no_read_in_the_dark() {
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    ArtworkAsker view{host};
+
+    host.set_screen_lit(false);
+    view.ask(ARTWORK_PLAYING);
+    expect(!view.told && host.get_card_reads().empty() && host.count_artwork_waiting() == 1,
+           "the card was read while the screen was dark");
+
+    host.set_screen_lit(true);
+    expect(is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE) && host.get_artwork_fetches().empty(),
+           "a picture the card holds did not come from it when the screen woke");
+}
+
+// Two requests for one picture wait on one read, and on one download where the card lacks it: no
+// picture is read or downloaded twice at once.
+static void expect_one_read_for_two_requests() {
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    host.hold_card();
+    host.hold_artwork();
+    ArtworkAsker view{host};
+
+    view.ask(ARTWORK_PLAYING);
+    view.ask(ARTWORK_PLAYING);
+    expect(!view.told && host.get_card_reads().size() == 1, "a picture being read was asked of the card a second time");
+
+    // One the card lacks: a view that asks while it waits to be read, or while it is downloaded,
+    // joins it.
+    view.ask(ARTWORK_PAUSED);
+    view.ask(ARTWORK_PAUSED);
+    expect(host.count_artwork_waiting() == 1, "a picture that waits to be read waits a second time");
+
+    host.answer_card();
+    expect(view.told == 2 && !view.refused && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE),
+           "two requests for one picture did not both get it from one read");
+    expect(host.get_artwork_fetches().empty(), "the backend was asked for a picture the card holds");
+
+    host.answer_card();
+    view.ask(ARTWORK_PAUSED);
+    const std::vector<ArtworkFetch> fetches = {{ARTWORK_PAUSED, COVER_SIZE}};
+    expect(view.told == 2 && host.get_card_reads().size() == 2 && host.get_artwork_fetches() == fetches,
+           "a picture on its way was read or downloaded a second time");
+
+    host.answer_artwork();
+    expect(view.told == 5 && !view.refused && is_picture(view.image, ARTWORK_PAUSED, COVER_SIZE),
+           "three requests for one picture did not all get it from one download");
+}
+
+// A picture the card holds is not held up behind the download of another.
+static void expect_no_wait_behind_a_download() {
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    host.hold_artwork();
+    ArtworkAsker view{host};
+
+    view.ask(ARTWORK_PAUSED);
+    expect(!view.told && host.get_artwork_fetches().size() == 1, "a picture the card lacks is not on its way");
+
+    view.ask(ARTWORK_PLAYING);
+    expect(view.told == 1 && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE),
+           "a picture the card holds waited behind the download of another");
+    expect(host.get_artwork_fetches().size() == 1, "the backend was asked for a picture the card holds");
+
+    host.answer_artwork();
+    expect(view.told == 2 && is_picture(view.image, ARTWORK_PAUSED, COVER_SIZE), "the download under way was lost");
+}
+
+// A read of the card whose answer is dropped on its way leaves no view waiting on it: the picture
+// is downloaded, as one the card lacks, and the card is asked for the next one.
+static void expect_no_wait_on_a_lost_read() {
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    host.hold_card();
+    ArtworkAsker view{host};
+
+    // Dropped on its way: the loop's next pass finds it.
+    view.ask(ARTWORK_PLAYING);
+    view.ask(ARTWORK_PLAYING);
+    host.drop_card_read();
+    expect(!view.told, "a view was answered before the loop's next pass");
+    host.process();
+    expect(view.told == 2 && !view.refused && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE),
+           "a view was left waiting on a read whose answer was dropped");
+    expect(host.get_artwork_fetches() == std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}},
+           "a picture whose read was lost was not downloaded once");
+
+    // Dropped on its way, and asked for again before the loop's next pass.
+    host.hold_artwork();
+    view.ask(ARTWORK_PAUSED);
+    host.drop_card_read();
+    view.ask(ARTWORK_PAUSED);
+    expect(host.get_card_reads().size() == 2 && host.get_artwork_fetches().size() == 2,
+           "a request joined a read whose answer was dropped, or had the picture read again");
+    host.answer_artwork();
+    expect(view.told == 4 && !view.refused && is_picture(view.image, ARTWORK_PAUSED, COVER_SIZE),
+           "the picture did not come to both views from one download");
+
+    view.ask(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    expect(host.get_card_reads().size() == 3, "the card was not asked again after a read was lost");
+    host.answer_card();
+    host.answer_artwork();
+    expect(view.told == 5 && is_picture(view.image, ARTWORK_PLAYING, BAR_COVER_SIZE),
+           "a picture did not come after a read was lost");
+}
+
+// A read that has not started when no view wants it any longer is not made. One under way is taken
+// to its end: a picture the card holds is kept, and one it lacks is not downloaded for nobody.
+static void expect_no_read_nobody_waits_for() {
+    CardFolder folder;
+    put_on_card(folder.get_path(), "a", COVER_SIZE, SimHost::make_artwork("a", COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    host.hold_card();
+    host.hold_artwork();
+
+    const auto stays = std::make_shared<int>(0);
+    auto goes = std::make_shared<int>(0);
+    size_t handed = 0;
+    const auto closed = [](Artwork) { expect(false, "a closed view was handed a cover"); };
+    const auto open = [&handed](Artwork artwork) { handed += artwork != nullptr; };
+
+    host.request_artwork("a", COVER_SIZE, goes, closed);
+    host.request_artwork("b", COVER_SIZE, goes, closed);
+    host.request_artwork("c", COVER_SIZE, stays, open);
+    expect(host.count_artwork_waiting() == 2, "the pictures asked for after the one being read did not wait for it");
+
+    goes.reset();
+    host.answer_card();
+    const std::vector<ArtworkFetch> reads = {{"a", COVER_SIZE}, {"c", COVER_SIZE}};
+    expect(host.get_card_reads() == reads, "a picture nobody waited for any more was read");
+
+    host.answer_card();
+    host.answer_artwork();
+    const std::vector<ArtworkFetch> fetches = {{"c", COVER_SIZE}};
+    expect(handed == 1 && host.get_artwork_fetches() == fetches,
+           "a picture the card lacks did not come from the backend");
+
+    host.request_artwork("a", COVER_SIZE, stays, open);
+    expect(handed == 2 && host.get_card_reads().size() == 2 && host.get_artwork_fetches().size() == 1,
+           "a picture read for no view was not kept");
+
+    goes = std::make_shared<int>(0);
+    host.request_artwork("d", COVER_SIZE, goes, closed);
+    goes.reset();
+    host.answer_card();
+    expect(host.get_card_reads().size() == 3 && host.get_artwork_fetches().size() == 1,
+           "a picture the card lacks was downloaded for nobody");
+}
+
+// What the card gives back is checked as a download is before a view draws it. A picture that
+// fails is erased from the card, so that it is kept again, and downloaded; so is one whose file is
+// not what the store wrote.
+static void expect_a_card_picture_is_checked() {
+    const auto good = SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE);
+
+    // A flag would have LVGL decompress the pixels.
+    auto flagged = good;
+    flagged[2] = 0x08;
+
+    const std::vector<std::vector<uint8_t>> damaged = {
+        SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE),
+        flagged,
+        std::vector<uint8_t>(good.begin(), good.end() - 1),
+        {'1', '2', '3', '4', '5', '6', '7', '8', '9'},
+        {},
+    };
+
+    const auto expect_downloaded = [](const std::string& folder, const std::string& path, const char* what) {
+        SimHost host(folder);
+        ArtworkAsker view{host};
+
+        view.ask(ARTWORK_PLAYING);
+        expect(view.told == 1 && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE), what);
+        const std::vector<ArtworkFetch> fetches = {{ARTWORK_PLAYING, COVER_SIZE}};
+        expect(host.get_card_reads().size() == 1 && host.get_artwork_fetches() == fetches,
+               "a picture the card could not give was not downloaded once, after the card was asked");
+        expect(!is_there(path), "a file that gave no picture to draw stayed on the card");
+    };
+
+    for (const auto& body : damaged) {
+        CardFolder folder;
+        const auto path = put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, body);
+
+        expect_downloaded(folder.get_path(), path, "a picture of the card's that fails a download's checks was drawn");
+    }
+
+    CardFolder folder;
+    const auto path = put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, good);
+    auto file = read_file(path);
+    file.back() ^= 1;
+    write_file(path, file);
+
+    expect_downloaded(folder.get_path(), path, "a picture whose CRC does not match was drawn");
+}
+
+// Without a card, with a card that failed before the display started, and once a card fails while
+// it runs, every picture is downloaded, and a card that is off is asked for nothing.
+static void expect_downloads_without_a_card() {
+    {
+        std::vector<ArtworkFetch> fetches;
+        ArtworkLoader loader(
+            [&fetches](ArtworkDownload&& download) {
+                fetches.push_back(ArtworkFetch{download.artwork_id, download.size});
+            },
+            nullptr);
+
+        const auto scope = std::make_shared<int>(0);
+        loader.request(ArtworkRequest{
+            .artwork_id = ARTWORK_PLAYING,
+            .size = COVER_SIZE,
+            .scope = scope,
+            .done = [](Artwork) {},
+        });
+        expect(fetches == std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}},
+               "a loader without a card did not download at once");
+    }
+
+    {
+        CardFolder folder;
+        SimHost host(folder.get_path() + "/none");
+        ArtworkAsker view{host};
+
+        view.ask(ARTWORK_PLAYING);
+        expect(view.told == 1 && is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE) &&
+                   host.get_artwork_fetches().size() == 1,
+               "a picture was not downloaded with the card off");
+        expect(host.get_card_reads().empty(), "a card that is off was asked for a picture");
+    }
+
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    // A folder where a picture's file belongs: the host has no file to read there.
+    std::filesystem::create_directories(CardStore(folder.get_path()).store.get_path(ARTWORK_PAUSED, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    host.hold_card();
+    ArtworkAsker view{host};
+
+    // The second waits for the read of the first, which fails.
+    view.ask(ARTWORK_PAUSED);
+    view.ask(ARTWORK_PLAYING);
+    host.answer_card();
+    expect(view.told == 2 && !view.refused, "a card that failed left a view without its picture");
+
+    view.ask(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    const std::vector<ArtworkFetch> fetches = {
+        {ARTWORK_PAUSED, COVER_SIZE},
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, BAR_COVER_SIZE},
+    };
+    expect(view.told == 3 && !view.refused && host.get_artwork_fetches() == fetches,
+           "a picture was not downloaded once the card had failed");
+    expect(host.get_card_reads() == std::vector<ArtworkFetch>{{ARTWORK_PAUSED, COVER_SIZE}},
+           "a card that failed was asked for another picture");
+}
+
 // Another track, with another cover: the placeholder shows while the cover is on its way, a cover
 // that comes once its track has gone is kept, and one the display has already is not fetched again.
 static void now_playing_cover_change(SimHost& host, Shell& shell) {
@@ -2982,6 +3335,14 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect_store_clears_a_write_cut_short();
     expect_store_stops_writing_to_a_full_card();
     expect_store_off_after_an_error();
+    expect_card_before_the_network();
+    expect_no_read_in_the_dark();
+    expect_one_read_for_two_requests();
+    expect_no_wait_behind_a_download();
+    expect_no_wait_on_a_lost_read();
+    expect_no_read_nobody_waits_for();
+    expect_a_card_picture_is_checked();
+    expect_downloads_without_a_card();
 
     open_now_playing(host, shell, PLAYING);
     expect(host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the playing track's cover is not shown");
