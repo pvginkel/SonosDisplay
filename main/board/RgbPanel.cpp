@@ -1,15 +1,34 @@
 #include "RgbPanel.h"
 
 #include "BoardConfig.h"
+#include "esp32s3/rom/cache.h"
 #include "esp_attr.h"
 #include "esp_lcd_panel_ops.h"
+#include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/task.h"
+#include "hal/lcd_ll.h"
+#include "sdkconfig.h"
+#include "soc/extmem_reg.h"
 #include "support.h"
 
 LOG_TAG(RgbPanel);
 
 static constexpr uint32_t INSTALL_TASK_STACK_SIZE = 4096;
+static constexpr uint32_t PRELOAD_POLL_US = 10;
+
+static bool wait_for_preload() {
+    const auto deadline = esp_timer_get_time() + LCD_PRELOAD_TIMEOUT_US;
+    while (!Cache_DCache_Preload_Done()) {
+        if (esp_timer_get_time() >= deadline) {
+            return false;
+        }
+
+        esp_rom_delay_us(PRELOAD_POLL_US);
+    }
+
+    return true;
+}
 
 esp_err_t RgbPanel::begin() {
     ESP_LOGI(TAG, "Installing the RGB panel driver on core %d", int(INTERRUPT_CORE));
@@ -131,6 +150,35 @@ bool RgbPanel::stop() {
     }
 
     return true;
+}
+
+RgbPanel::Halt RgbPanel::halt(CacheState& cache) {
+    // As the driver's own teardown does. The DMA then waits on the LCD's full FIFO, so no bounce
+    // buffer ends and no refill begins.
+    lcd_ll_stop(LCD_LL_GET_HW(0));
+    esp_rom_delay_us(LCD_HALT_SETTLE_US);
+
+    auto halt = Halt::PreloadDone;
+    if (!wait_for_preload()) {
+        // No refill runs, so the preload hung. The ROM starts one by setting its enable bit, which
+        // the hardware clears only once the preload is done, and never clears it itself: while a
+        // hung one holds it, a start may begin nothing. So the bit is cleared first, and one line
+        // of a framebuffer is preloaded afresh.
+        void* fb0 = nullptr;
+        ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(_panel, 1, &fb0));
+
+        REG_CLR_BIT(EXTMEM_DCACHE_PRELOAD_CTRL_REG, EXTMEM_DCACHE_PRELOAD_ENA);
+        Cache_Start_DCache_Preload(uint32_t(fb0), CONFIG_ESP32S3_DATA_CACHE_LINE_SIZE, 0);
+
+        halt = wait_for_preload() ? Halt::PreloadRestarted : Halt::PreloadHung;
+    }
+
+    cache.preload = REG_READ(EXTMEM_DCACHE_PRELOAD_CTRL_REG);
+    cache.autoload = REG_READ(EXTMEM_DCACHE_AUTOLOAD_CTRL_REG);
+    cache.sync = REG_READ(EXTMEM_DCACHE_SYNC_CTRL_REG);
+    cache.state = REG_READ(EXTMEM_CACHE_STATE_REG);
+
+    return halt;
 }
 
 void RgbPanel::present(uint8_t* framebuffer) {

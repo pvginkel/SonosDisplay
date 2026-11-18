@@ -41,6 +41,30 @@ public:
     // it ended in that time. On the task that presents, it returns at once.
     bool stop();
 
+    // How the scan-out ended (halt()).
+    enum class Halt : uint8_t {
+        // The data cache's preload was done once the refills had ended.
+        PreloadDone,
+        // It was not, and a preload begun afresh finished.
+        PreloadRestarted,
+        // It was not, and the one begun afresh did not finish either.
+        PreloadHung,
+    };
+
+    // The data cache's registers that esp_restart_noos() waits on, as halt() left them.
+    struct CacheState {
+        uint32_t preload;
+        uint32_t autoload;
+        uint32_t sync;
+        uint32_t state;
+    };
+
+    // Ends the scan-out for good, after stop(), so that the data cache's preload is done when
+    // esp_restart_noos() disables the cache: it waits for that with core 0 already stalled, and
+    // no stage of its watchdog but the last restarts a stalled core. The refill starts a preload
+    // of the framebuffer's next lines each time it runs, and nothing ends one.
+    Halt halt(CacheState& cache);
+
     lv_display_t* get_display() const { return _display; }
 
 private:

@@ -29,6 +29,9 @@ struct Mark {
     uint32_t restart_ms;
     RunMark::Stage stage;
     Restart restart;
+    bool halted;
+    RgbPanel::Halt halt;
+    RgbPanel::CacheState cache;
     char restart_task[configMAX_TASK_NAME_LEN];
     uint32_t crc;
 };
@@ -71,6 +74,19 @@ const char* restart_outcome(Restart restart) {
             return "the panel stopped";
         case Restart::StopTimedOut:
             return "the panel stopped with a present still under way";
+    }
+
+    return "unknown";
+}
+
+const char* halt_outcome(RgbPanel::Halt halt) {
+    switch (halt) {
+        case RgbPanel::Halt::PreloadDone:
+            return "was done";
+        case RgbPanel::Halt::PreloadRestarted:
+            return "hung, and one begun afresh finished";
+        case RgbPanel::Halt::PreloadHung:
+            return "hung, and one begun afresh did not finish";
     }
 
     return "unknown";
@@ -154,6 +170,13 @@ void RunMark::panel_stopped(bool in_time) {
     seal();
 }
 
+void RunMark::panel_halted(RgbPanel::Halt halt, const RgbPanel::CacheState& cache) {
+    rtc_mark.halted = true;
+    rtc_mark.halt = halt;
+    rtc_mark.cache = cache;
+    seal();
+}
+
 void RunMark::log_previous() {
     const auto raw_reason = esp_rom_get_reset_reason(0);
     ESP_LOGI(TAG, "Raw reset reason %d: %s; CPU 1's %d", raw_reason, raw_reason_name(raw_reason),
@@ -172,5 +195,14 @@ void RunMark::log_previous() {
         ESP_LOGI(
             TAG, "The run before reached %s at %" PRIu32 " ms and began a restart on task %s at %" PRIu32 " ms; %s",
             stage_name(mark.stage), mark.stage_ms, mark.restart_task, mark.restart_ms, restart_outcome(mark.restart));
+    }
+
+    if (mark.halted) {
+        ESP_LOGI(TAG,
+                 "The run before's restart halted the scan-out, and the data cache's preload %s; EXTMEM preload "
+                 "0x%08" PRIx32 ", autoload 0x%08" PRIx32 ", sync 0x%08" PRIx32 ", state 0x%08" PRIx32,
+                 halt_outcome(mark.halt), mark.cache.preload, mark.cache.autoload, mark.cache.sync, mark.cache.state);
+    } else if (mark.restart == Restart::Stopped || mark.restart == Restart::StopTimedOut) {
+        ESP_LOGI(TAG, "The run before reset before its restart halted the scan-out");
     }
 }

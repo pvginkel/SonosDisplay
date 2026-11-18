@@ -86,6 +86,10 @@ void Board::log_state() {
 void Board::shut_down() {
     RunMark::restart_begun();
     RunMark::panel_stopped(shutdown_panel->stop());
+
+    RgbPanel::CacheState cache{};
+    const auto halt = shutdown_panel->halt(cache);
+    RunMark::panel_halted(halt, cache);
 }
 
 void Board::process() {

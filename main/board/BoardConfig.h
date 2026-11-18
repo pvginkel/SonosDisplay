@@ -56,6 +56,12 @@ constexpr uint32_t LCD_FRAME_TIMEOUT_MS = 100;
 // one wait for the refill to take the framebuffer.
 constexpr uint32_t LCD_STOP_TIMEOUT_MS = LCD_FRAME_TIMEOUT_MS + 50;
 
+// The halt before a restart. Once the LCD stops, a refill under way may still run, the last, and
+// start a preload; a bounce buffer lasts 600 us. A preload of a bounce buffer's 16,000 bytes takes
+// well under a millisecond, and one of a single cache line far less.
+constexpr uint32_t LCD_HALT_SETTLE_US = 2 * 1000;
+constexpr uint32_t LCD_PRELOAD_TIMEOUT_US = 5 * 1000;
+
 // I2C bus, shared by the expander and the touch controller.
 
 constexpr i2c_port_num_t I2C_PORT = 0;

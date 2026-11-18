@@ -171,23 +171,45 @@ own RTC watchdog finishes. So the firmware keeps its own record of every run, `R
 - **The mark.** A struct in RTC memory (`RTC_NOINIT_ATTR`), with a magic and a CRC, since RTC
   memory holds what it happens to hold after a power-on and a reset can cut a write short. It
   holds the last stage the run reached, `booting`, `configured`, `ready` or `settled` (section 1's
-  steps), with its uptime; and of a restart, the task that began it, its uptime, and whether the
-  panel stopped in time. `Board::begin()` keeps the run before's mark and starts this one's.
+  steps), with its uptime; and of a restart, the task that began it, its uptime, whether the
+  panel stopped in time, and how its scan-out halted, with four of the data cache's registers.
+  `Board::begin()` keeps the run before's mark and starts this one's.
 - **What survives.** RTC memory survives a reset of the digital core alone: a software restart, a
   panic's restart, and the first stage of the restart's RTC watchdog (raw reason 9, "RTC watch dog
-  resets digital core"). Whether it survives raw reason 16, which resets the RTC module too (the
-  second stage of that watchdog, and the panic's), is not known; a mark that did not survive reads
-  "left no mark". A power-on loses it.
+  resets digital core"). It also survives raw reason 16, which resets the RTC module too (the
+  second stage of that watchdog, and the panic's): the boots after the stalled update restarts of
+  SDSP-20 read their run before's mark. A mark that did not survive reads "left no mark", and so
+  does one a firmware with another layout of the mark left, whose CRC does not match. A power-on
+  loses it.
 - **The log.** `Board::log_state()`, which `do_ready()` calls, logs "Raw reset reason …", the
   chip's own for both CPUs, which tells those two watchdog resets apart, and "The run before …",
-  the mark.
+  the mark, with a second line on the halt.
 - **The stop before a restart.** `Board::begin()` registers a shutdown handler, which
   `esp_restart()` runs on the task that called it before it arms its watchdog. It marks the
   restart begun, then stops the panel's presents for good (`RgbPanel::stop()`): none begins after
   it, and one another task is in is waited for, at most `LCD_STOP_TIMEOUT_MS` (a frame's timeout
   and 50 ms); on the task that presents it returns at once. Then it marks how the stop
-  ended. `esp_restart()` arms its watchdog only once every handler has run, so a reset by it
-  comes after the mark.
+  ended, halts the scan-out (below) and marks how the halt ended. `esp_restart()` arms its
+  watchdog only once every handler has run, so a reset by it comes after the marks.
+- **The halt before a restart** (`RgbPanel::halt()`). Each time the refill copies a bounce buffer
+  (section 3) it starts the data cache's preload of the framebuffer's next lines, through the ROM's
+  `Cache_Start_DCache_Preload()`, and ESP-IDF's driver never ends one. `esp_restart_noos()`
+  disables the data cache through the ROM's `Cache_Disable_DCache()`, which spins, with no time
+  limit, until the preload is done, and by then it has already stalled the other core. When the
+  restart is begun on core 1, the UI task's, that core is core 0, and the stall is kept in the RTC
+  domain: the first stage of the restart's watchdog, a reset of the digital core, boots nothing,
+  and only its second, raw reason 16, after two seconds, restarts the chip. That is how every
+  update restart on the firmware with bounce buffers ended (SDSP-20), and no other restart did.
+  What likely sets the update's install run apart is that it alone maps flash into the cache, for
+  otadata and to verify the image written, and ESP-IDF freezes the cache for each mapping without
+  waiting for a preload under way; the mark says whether the preload had hung. So the handler
+  stops the LCD, as the driver's own teardown does, which ends the refills, waits
+  `LCD_HALT_SETTLE_US` for the last, then up to `LCD_PRELOAD_TIMEOUT_US` for the preload to be
+  done. If it is not, no refill is running and the preload hung: the handler clears its enable
+  bit, which a hung one holds and the ROM's start never clears, preloads one cache line afresh and
+  waits again. The mark keeps which of the three it was and the data cache's preload, autoload,
+  sync and state registers as the halt left them. A panic's restart runs no handler, so it halts
+  nothing.
 - **No shutdown handler is left.** ESP-IDF keeps five, and all five are in use: esp_timer's,
   `Board`'s, WiFi's, and esp-mdm's two (its log flush and `ApplicationBase`'s), registered in that
   order and run in reverse, so `Board`'s runs fourth. Nothing more can register one.
@@ -472,7 +494,9 @@ wired: `OTAManager` declares the callback and nothing calls it.
    reads PSRAM, fetch 64-byte lines, which Espressif's ESP-FAQ asks for in this mode (its LCD
    page: "Therefore, it is necessary to enable CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y. Otherwise, it
    may cause the screen to drift."). A frame that still comes up short, with fewer refills than a
-   frame takes, is restarted by the driver itself at the next vblank.
+   frame takes, is restarted by the driver itself at the next vblank. Each refill also starts a
+   preload of the data cache, so a restart halts the scan-out first (section 1, "The halt before
+   a restart").
 3. **Does not set `CONFIG_LCD_RGB_RESTART_IN_VSYNC`.** The skeleton set it, without bounce
    buffers, to make a drift last one frame instead of until the next wake, and the first display
    showed artifacts with it ("What the first display showed", below). With bounce buffers the
