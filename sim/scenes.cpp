@@ -1,10 +1,14 @@
 #include "scenes.h"
 
+#include <unistd.h>
+
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -16,6 +20,7 @@
 
 #include "AlbumsView.h"
 #include "ArtistsView.h"
+#include "CardFolder.h"
 #include "Controls.h"
 #include "HomeView.h"
 #include "LoadingView.h"
@@ -29,6 +34,7 @@
 #include "TracksView.h"
 #include "api/Answers.h"
 #include "api/Artwork.h"
+#include "api/ArtworkStore.h"
 #include "api/Requests.h"
 #include "cJSON.h"
 #include "fonts/icons.h"
@@ -2573,6 +2579,393 @@ static void expect_no_download_nobody_waits_for() {
     expect(host.get_artwork_fetches() == fetches, "a cover nobody waited for any more was downloaded");
 }
 
+// What the card's store keeps its pictures under in these scenes: the format the device asks for.
+static const char STORE_FORMAT[] = "lvgl";
+
+static std::shared_ptr<uint8_t> allocate_picture(size_t length) {
+    return std::shared_ptr<uint8_t>(new uint8_t[length], std::default_delete<uint8_t[]>());
+}
+
+// The card's store over a folder of the host's, with a buffer many times smaller than a picture.
+class CardStore {
+    uint8_t _buffer[512];
+
+public:
+    ArtworkStore store;
+
+    explicit CardStore(const std::string& folder, const char* format = STORE_FORMAT,
+                       ArtworkStore::Allocate allocate = allocate_picture)
+        : store(folder, format, _buffer, sizeof(_buffer), std::move(allocate)) {}
+};
+
+static std::vector<uint8_t> read_file(const std::string& path) {
+    const auto file = fopen(path.c_str(), "rb");
+    expect(file != nullptr, "a file of the card's cannot be opened");
+
+    std::vector<uint8_t> bytes;
+    uint8_t chunk[4096];
+    while (const auto count = fread(chunk, 1, sizeof(chunk), file)) {
+        bytes.insert(bytes.end(), chunk, chunk + count);
+    }
+    fclose(file);
+
+    return bytes;
+}
+
+static void write_file(const std::string& path, const std::vector<uint8_t>& bytes) {
+    const auto file = fopen(path.c_str(), "wb");
+    expect(file && fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size(),
+           "a file of the card's cannot be written");
+    fclose(file);
+}
+
+// How many files the folder holds, at any depth: whatever is not a folder.
+static size_t count_files(const std::string& folder) {
+    size_t count = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(folder)) {
+        if (!entry.is_directory()) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+// Whether a file is there, a link that leads nowhere among them.
+static bool is_there(const std::string& path) { return std::filesystem::exists(std::filesystem::symlink_status(path)); }
+
+static bool keeps(ArtworkStore& store, const std::string& artwork_id, int32_t size, const std::vector<uint8_t>& body) {
+    return store.write(artwork_id, size, body.data(), body.size());
+}
+
+// Whether the store reads the picture, and reads it as `body`.
+static bool holds(ArtworkStore& store, const std::string& artwork_id, int32_t size, const std::vector<uint8_t>& body) {
+    const auto picture = store.read(artwork_id, size);
+
+    return picture.body && !picture.problem && picture.length == body.size() &&
+           !memcmp(picture.body.get(), body.data(), body.size());
+}
+
+// Whether the store has no picture to read: with `refused`, because it deleted a file that was not
+// the picture's.
+static bool misses(ArtworkStore& store, const std::string& artwork_id, int32_t size, bool refused = false) {
+    const auto picture = store.read(artwork_id, size);
+
+    return !picture.body && (picture.problem != nullptr) == refused;
+}
+
+static bool is_on(const ArtworkStore& store) { return store.get_state() == ArtworkStore::State::On; }
+
+// A picture is kept in the file its key names, as a header and then the bytes it came as, and
+// nothing else is written. A store that starts over the same folder, as after a restart, has the
+// picture, and a scene's folder is gone with the scene.
+static void expect_store_keeps_a_picture() {
+    const std::vector<uint8_t> body = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
+    std::string path;
+
+    {
+        CardFolder folder;
+        path = folder.get_path();
+        expect(std::filesystem::is_empty(path), "a scene's card is not empty when the scene starts");
+
+        {
+            CardStore card(path);
+            card.store.begin();
+
+            expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE), "an empty card had a picture");
+            expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture was not written");
+            expect(holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture written was not read back");
+            expect(is_on(card.store), "a write and two reads stopped the store");
+        }
+
+        // The name and the bytes are every build's: FNV-1a of the key names the file, and the CRC
+        // is zlib's.
+        std::vector<uint8_t> file = {'S', 'D', 'A', 'W', 1, 0, 26, 0, 9, 0, 0, 0, 0x26, 0x39, 0xF4, 0xCB};
+        const std::string key = "lvgl/80/YXJ0d29yay9zdmVmbg";
+        file.insert(file.end(), key.begin(), key.end());
+        file.insert(file.end(), body.begin(), body.end());
+
+        expect(count_files(path) == 1, "the card holds more than the picture: an index, a log or a temporary file");
+        expect(is_there(path + "/art/1f/28880ce5.bin"), "a picture is not in the file its key names");
+        expect(read_file(path + "/art/1f/28880ce5.bin") == file, "a picture's file is not its header, key and bytes");
+
+        CardStore restarted(path);
+        restarted.store.begin();
+        expect(holds(restarted.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture was lost over a restart");
+        expect(count_files(path) == 1, "a restart wrote to the card");
+    }
+
+    expect(!is_there(path), "a scene left its card behind");
+}
+
+// The key is the artwork id, the size and the format: the same id at another size is another
+// picture, and so are an id that differs in case only and the same id in another format. A cover
+// goes through the buffer in hundreds of pieces and comes back as the device draws it.
+static void expect_store_keys() {
+    CardFolder folder;
+    CardStore card(folder.get_path());
+    card.store.begin();
+
+    const std::string lower = "yxj0d29yay9zdmvmbg";
+    const auto small = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    const auto large = SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE);
+    const auto other = SimHost::make_artwork(ARTWORK_PAUSED, BAR_COVER_SIZE);
+
+    expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, small), "a picture was not written");
+    expect(misses(card.store, ARTWORK_PLAYING, COVER_SIZE), "a picture was read at a size it was not kept at");
+    expect(misses(card.store, lower, BAR_COVER_SIZE), "a picture was read under an id that differs in case");
+
+    expect(keeps(card.store, ARTWORK_PLAYING, COVER_SIZE, large), "a cover was not written");
+    expect(keeps(card.store, lower, BAR_COVER_SIZE, other), "a picture whose id differs in case was not written");
+    expect(holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, small) &&
+               holds(card.store, ARTWORK_PLAYING, COVER_SIZE, large) && holds(card.store, lower, BAR_COVER_SIZE, other),
+           "three pictures under three keys were not read back each as its own");
+    expect(card.store.get_path(ARTWORK_PLAYING, BAR_COVER_SIZE) == folder.get_path() + "/art/1f/28880ce5.bin" &&
+               card.store.get_path(ARTWORK_PLAYING, COVER_SIZE) == folder.get_path() + "/art/3f/91dc5b1b.bin" &&
+               card.store.get_path(lower, BAR_COVER_SIZE) == folder.get_path() + "/art/55/ec2882e5.bin",
+           "a picture's file is not the one its key names");
+
+    CardStore png(folder.get_path(), "png");
+    png.store.begin();
+    expect(misses(png.store, ARTWORK_PLAYING, BAR_COVER_SIZE), "a picture was read in a format it was not kept in");
+    expect(png.store.get_path(ARTWORK_PLAYING, BAR_COVER_SIZE) == folder.get_path() + "/art/17/db0702ad.bin",
+           "a picture's file is not the one its key names");
+    expect(count_files(folder.get_path()) == 3, "the card holds more or less than its three pictures");
+
+    const auto picture = card.store.read(ARTWORK_PLAYING, COVER_SIZE);
+    Artwork artwork;
+    expect(!read_artwork(200, picture.body, picture.length, COVER_SIZE, artwork) && artwork,
+           "a cover read from the card is not one the device draws");
+}
+
+// A file that is not what the store writes for the key is a miss and no error: the file is
+// deleted, and the picture is kept again when it is written again.
+static void expect_store_deletes_what_is_not_the_picture() {
+    CardFolder folder;
+    CardStore card(folder.get_path());
+    card.store.begin();
+
+    const auto body = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    const auto path = card.store.get_path(ARTWORK_PLAYING, BAR_COVER_SIZE);
+
+    expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture was not written");
+    const auto good = read_file(path);
+
+    const auto expect_refused = [&](const std::vector<uint8_t>& bytes, const char* what) {
+        write_file(path, bytes);
+
+        expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, true) && !is_there(path), what);
+        expect(is_on(card.store), "a file that was not the picture's stopped the store");
+        expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE), "a deleted file was read again");
+        expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) &&
+                   holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) && read_file(path) == good,
+               "a picture was not kept again once its file was deleted");
+    };
+
+    auto bad = good;
+    bad.back() ^= 1;
+    expect_refused(bad, "a picture whose CRC does not match was not a miss, or its file stayed");
+
+    bad = good;
+    bad[12] ^= 1;
+    expect_refused(bad, "a header whose CRC does not match was not a miss, or its file stayed");
+
+    bad = good;
+    bad[0] = 'X';
+    expect_refused(bad, "a file without the marker was not a miss, or it stayed");
+
+    bad = good;
+    bad[4] = 2;
+    expect_refused(bad, "a version the store does not know was not a miss, or its file stayed");
+
+    // The first letter of the id, in the other case.
+    bad = good;
+    bad[16 + 8] ^= 0x20;
+    expect_refused(bad, "a file under another key was not a miss, or it stayed");
+
+    bad = good;
+    bad[6] ^= 1;
+    expect_refused(bad, "a key of another length was not a miss, or its file stayed");
+
+    bad = good;
+    bad[8] ^= 1;
+    expect_refused(bad, "a length that is not the file's was not a miss, or its file stayed");
+
+    bad = good;
+    bad.pop_back();
+    expect_refused(bad, "a file cut short was not a miss, or it stayed");
+
+    bad = good;
+    bad.push_back(0);
+    expect_refused(bad, "a file with more than its picture was not a miss, or it stayed");
+
+    bad = good;
+    bad.resize(10);
+    expect_refused(bad, "a file shorter than a header was not a miss, or it stayed");
+
+    expect_refused({}, "an empty file was not a miss, or it stayed");
+
+    // A whole file of another picture's, as a damaged FAT gives one name another file's content.
+    expect(keeps(card.store, ARTWORK_PAUSED, BAR_COVER_SIZE, SimHost::make_artwork(ARTWORK_PAUSED, BAR_COVER_SIZE)),
+           "a picture was not written");
+    expect_refused(read_file(card.store.get_path(ARTWORK_PAUSED, BAR_COVER_SIZE)),
+                   "another picture's file was not a miss, or it stayed");
+
+    // Without memory for the picture there is none to hand over, and its file is not at fault.
+    CardStore short_of_memory(folder.get_path(), STORE_FORMAT, [](size_t) { return std::shared_ptr<uint8_t>(); });
+    const auto picture = short_of_memory.store.read(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    expect(!picture.body && picture.problem && is_there(path) && is_on(short_of_memory.store),
+           "a picture there was no memory for was handed over, or deleted, or stopped the store");
+}
+
+// A picture the card holds is not written again, and is no error: the file stays as it was.
+static void expect_store_writes_a_picture_once() {
+    CardFolder folder;
+    CardStore card(folder.get_path());
+    card.store.begin();
+
+    const auto first = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    const auto second = SimHost::make_artwork(ARTWORK_PAUSED, BAR_COVER_SIZE);
+
+    expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, first), "a picture was not written");
+    expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, second) && is_on(card.store),
+           "a picture the card holds was an error");
+    expect(holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, first) && count_files(folder.get_path()) == 1,
+           "a picture the card holds was written again");
+}
+
+// The temporary file a power cut left is removed when the store starts, and the pictures stay.
+static void expect_store_clears_a_write_cut_short() {
+    CardFolder folder;
+    const auto body = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    std::string temporary;
+
+    {
+        CardStore card(folder.get_path());
+        card.store.begin();
+        expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture was not written");
+
+        temporary = card.store.get_temporary_path();
+        expect(temporary == folder.get_path() + "/art/write.tmp", "the temporary file is not the one the card knows");
+    }
+
+    write_file(temporary, {'S', 'D', 'A', 'W', 1, 0, 26});
+
+    CardStore restarted(folder.get_path());
+    restarted.store.begin();
+    expect(!is_there(temporary) && is_on(restarted.store), "a temporary file was not removed at the start");
+    expect(holds(restarted.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) && count_files(folder.get_path()) == 1,
+           "the start removed more than the temporary file");
+}
+
+// A card with no room fails the write at whichever step meets it, a write of the file or the
+// making of it: the temporary file is deleted, nothing more is written, and reads carry on. The
+// store that starts next writes again.
+static void expect_store_stops_writing_to_a_full_card() {
+    const auto first = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    const auto second = SimHost::make_artwork(ARTWORK_PAUSED, BAR_COVER_SIZE);
+
+    const auto expect_full = [&second](ArtworkStore& store, int error) {
+        expect(!keeps(store, ARTWORK_PAUSED, BAR_COVER_SIZE, second), "a picture was kept on a full card");
+        expect(store.get_state() == ArtworkStore::State::Full && store.get_fault().error == error,
+               "a full card was not taken for one");
+        expect(!is_there(store.get_temporary_path()), "the temporary file was left on a full card");
+    };
+
+    {
+        CardFolder folder;
+        CardStore card(folder.get_path());
+        card.store.begin();
+        expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, first), "a picture was not written");
+
+        // Linux has a file that every write finds full, as FAT's does: ENOSPC.
+        std::filesystem::create_symlink("/dev/full", card.store.get_temporary_path());
+        expect_full(card.store, ENOSPC);
+
+        // The card has room again, and the store does not look.
+        expect(!keeps(card.store, ARTWORK_PAUSED, BAR_COVER_SIZE, second) && count_files(folder.get_path()) == 1,
+               "a picture was written after the card was full");
+        expect(holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, first) &&
+                   misses(card.store, ARTWORK_PAUSED, BAR_COVER_SIZE),
+               "a full card was not read");
+        expect(card.store.get_state() == ArtworkStore::State::Full, "a read of a full card changed the store");
+
+        CardStore restarted(folder.get_path());
+        restarted.store.begin();
+        expect(keeps(restarted.store, ARTWORK_PAUSED, BAR_COVER_SIZE, second) &&
+                   holds(restarted.store, ARTWORK_PAUSED, BAR_COVER_SIZE, second),
+               "a restart did not write to the card again");
+    }
+
+    // A folder that takes no new file answers as FAT does where it cannot make one: EACCES. Root is
+    // refused nothing, so no folder shows it this.
+    if (geteuid() == 0) {
+        fprintf(stderr, "render: run as root, so a card too full to make a file on is not shown\n");
+        return;
+    }
+
+    CardFolder folder;
+    CardStore card(folder.get_path());
+    card.store.begin();
+
+    const auto pictures = folder.get_path() + "/art";
+    std::filesystem::permissions(pictures, std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+    expect_full(card.store, EACCES);
+    std::filesystem::permissions(pictures, std::filesystem::perms::owner_all);
+
+    expect(count_files(folder.get_path()) == 0, "a card too full to make a file on holds one");
+}
+
+// A card that fails turns the store off, where a miss does not: nothing is read or written after
+// it, on a read, on a write, or with no folder at all.
+static void expect_store_off_after_an_error() {
+    const auto body = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
+    const auto is_off = [](const ArtworkStore& store) { return store.get_state() == ArtworkStore::State::Off; };
+
+    {
+        CardFolder folder;
+        CardStore card(folder.get_path());
+        card.store.begin();
+        expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture was not written");
+
+        // A folder where the picture's file belongs: the host has no file to read there.
+        std::filesystem::create_directories(card.store.get_path(ARTWORK_PAUSED, BAR_COVER_SIZE));
+        expect(misses(card.store, ARTWORK_PAUSED, BAR_COVER_SIZE) && is_off(card.store),
+               "a read that failed did not turn the store off");
+        expect(card.store.get_fault().doing && card.store.get_fault().error, "a store that is off does not say why");
+
+        expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE), "a picture was read with the store off");
+        expect(!keeps(card.store, ARTWORK_PAUSED, COVER_SIZE, body) && count_files(folder.get_path()) == 1,
+               "a picture was written with the store off");
+    }
+
+    {
+        CardFolder folder;
+        CardStore card(folder.get_path());
+        card.store.begin();
+
+        // A file where the picture's folder belongs: the picture cannot be renamed into it.
+        const auto path = std::filesystem::path(card.store.get_path(ARTWORK_PLAYING, BAR_COVER_SIZE));
+        write_file(path.parent_path().string(), {});
+
+        expect(!keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) && is_off(card.store),
+               "a write that failed, and not for a full card, did not turn the store off");
+        expect(card.store.get_fault().error == ENOTDIR && !is_there(card.store.get_temporary_path()),
+               "a write that failed left its temporary file, or does not say why it failed");
+    }
+
+    {
+        CardFolder folder;
+        CardStore card(folder.get_path() + "/none");
+        card.store.begin();
+
+        expect(is_off(card.store), "a store without a folder is not off");
+        expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE) &&
+                   !keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) && count_files(folder.get_path()) == 0,
+               "a store without a folder read or wrote");
+    }
+}
+
 // Another track, with another cover: the placeholder shows while the cover is on its way, a cover
 // that comes once its track has gone is kept, and one the display has already is not fetched again.
 static void now_playing_cover_change(SimHost& host, Shell& shell) {
@@ -2582,6 +2975,13 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect_no_cover_for_a_closed_view();
     expect_no_wait_on_a_lost_download();
     expect_no_download_nobody_waits_for();
+    expect_store_keeps_a_picture();
+    expect_store_keys();
+    expect_store_deletes_what_is_not_the_picture();
+    expect_store_writes_a_picture_once();
+    expect_store_clears_a_write_cut_short();
+    expect_store_stops_writing_to_a_full_card();
+    expect_store_off_after_an_error();
 
     open_now_playing(host, shell, PLAYING);
     expect(host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the playing track's cover is not shown");
