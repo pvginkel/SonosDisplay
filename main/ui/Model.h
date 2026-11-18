@@ -614,6 +614,9 @@ struct PageWindow {
         return is_held() && first_index() + count() < total ? first_page + uint32_t(page_sizes.size()) : 0;
     }
 
+    // Whether this page is one of those held.
+    bool holds(uint32_t page) const { return is_held() && page >= first_page && page - first_page < page_sizes.size(); }
+
     // Whether this page was asked for and did not come.
     bool has_failed(uint32_t page) const {
         return page == asked && (state == LoadState::Unreachable || state == LoadState::Failed);
@@ -637,9 +640,10 @@ struct PagedList : PageWindow {
     // The items of the pages held, in order.
     std::vector<Item> items;
 
-    // The page asked for came, or did not. A page next to those held is added beside them; another
-    // takes the place of every page held: the first page, or one asked for again. One that did not
-    // come leaves the pages held as they are.
+    // The page asked for came, or did not. A page held, asked for again, takes its own place, and
+    // one shorter than a page ends the list there: the pages held after it go. A page next to
+    // those held is added beside them; another takes the place of every page held: the first page,
+    // or one away from those held. One that did not come leaves the pages held as they are.
     void answered(Page<Item>&& page) {
         state = page.state;
         error = std::move(page.error);
@@ -650,7 +654,23 @@ struct PagedList : PageWindow {
         total = page.total;
         const auto size = page.items.size();
 
-        if (is_held() && page.number == first_page + page_sizes.size()) {
+        if (holds(page.number)) {
+            const auto held = page.number - first_page;
+            size_t start = 0;
+            for (size_t i = 0; i < held; i++) {
+                start += page_sizes[i];
+            }
+            const auto ends = size < PAGE_SIZE;
+            const auto end = ends ? items.size() : start + page_sizes[held];
+
+            items.erase(items.begin() + ptrdiff_t(start), items.begin() + ptrdiff_t(end));
+            items.insert(items.begin() + ptrdiff_t(start), std::make_move_iterator(page.items.begin()),
+                         std::make_move_iterator(page.items.end()));
+            page_sizes[held] = size;
+            if (ends) {
+                page_sizes.resize(held + 1);
+            }
+        } else if (is_held() && page.number == first_page + page_sizes.size()) {
             items.insert(items.end(), std::make_move_iterator(page.items.begin()),
                          std::make_move_iterator(page.items.end()));
             page_sizes.push_back(size);

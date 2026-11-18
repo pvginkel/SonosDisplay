@@ -804,7 +804,7 @@ fields, no replay. `EventStream` owns the `backend_events` task and a second `es
 7. **Reconnect** after 1, 2, 4, 8, then 15 seconds, reset by `ready`.
 8. **After every `ready`** the app is told the stream is (re)connected, and fetches the speakers,
    the chosen speaker's playback and its group's volume again, since events sent while it was
-   away are gone; the queue screen, while it shows, asks again for the page at its top; and
+   away are gone; the queue screen, while it shows, asks again for the pages it holds; and
    `Model::favourites_changes` moves, as on `favourites_changed` (below). There is nothing to
    renew: every connection receives every event.
 
@@ -813,12 +813,12 @@ volume, which a speaker joining or leaving the group changes. `playback_changed`
 `volume_changed` name a speaker and come once for every member of a group, so the chosen
 speaker's own id is the whole filter: one that names it fetches the playback or the volume. So does
 `queue_changed`, which fetches nothing itself: it and `playback_changed` move
-`Model::queue_changes`, and the queue screen, while it shows, asks again for the page at its top.
+`Model::queue_changes`, and the queue screen, while it shows, asks again for the pages it holds.
 One whose payload cannot be read is taken for the chosen speaker's. When the chosen speaker comes
 back into the speakers list, its playback and volume are fetched too. `favourites_changed` says
 that a favourite was marked or unmarked, on any display; its payload is not read. It moves
 `Model::favourites_changes` and fetches nothing itself: Home and the artists, albums and playlists
-ask again for the page at their top, at once while they show, and as they show again under a view
+ask again for the pages they hold, at once while they show, and as they show again under a view
 that closed; the tracks and the queue do not. `task_event` reports the progress and end of the
 backend's tasks; the display reads the ends of those its own requests started (Requests, above).
 
@@ -997,7 +997,9 @@ code the device runs, and a scene can check the body the device would send.
   at Medium 40, and rows of 72 px with their titles at Regular 32. It holds a `PagedList` and builds
   a row for each item held; within a screen of an end with a page past it, it asks for that page,
   and the list says, past its rows, that the page is on its way, or why it did not come with Try
-  again. Rows carry no covers. Home's library entry opens the artists, as the backend sorts them;
+  again. Asked for again (`ListView::refresh`), the pages held come one at a time, the one at the
+  top of the list first, each taking its own place, so the rows of the other stay drawn while it
+  is on its way; a page that comes shorter than a page ends the list there. Rows carry no covers. Home's library entry opens the artists, as the backend sorts them;
   an "A–Z" button beside them opens a grid of the letters the rows file under, 9 by 3 over the
   list, each as large a target as the grid allows, and a letter brings its first artist to the
   top. A button under it opens the playlists. A
@@ -1016,12 +1018,12 @@ code the device runs, and a scene can check the body the device would send.
   group control, or, for a track's row, before its Add to queue; a second press on it sends
   nothing. The heading's presses stay while the list is built again. The artists, albums and
   playlists apply at once what the backend took of this display's presses on the toggles, and ask
-  again for the page at their top whenever `Model::favourites_changes` moves (section 4); an
+  again for the pages they hold whenever `Model::favourites_changes` moves (section 4); an
   artist's albums and an album's tracks ask for the item of their heading as well. The queue
   lists each entry's title and, beside it, its artist. It opens on the page holding the loaded
   track, that row at the top and marked in the accent; while no track of the queue is loaded, a
   line under the heading says it plays from another source, or the screen says the queue is empty.
-  While it shows it asks again for the page at its top when `Model::queue_changes` moves, and once
+  While it shows it asks again for the pages it holds when `Model::queue_changes` moves, and once
   the event stream is back after a loss. Clear ends its heading and asks to be confirmed over the
   list.
 - **`Theme`** sets up the dark theme once, with `lv_theme_default_init(disp, primary, secondary,

@@ -8834,7 +8834,8 @@ static const char* check_queue_screen_changed(const SimHost& host, const Shell& 
 }
 
 // Two pages held, the second and the third, the row at the top in the third: an event asks for the
-// third again, which takes the place of both, and that row stays where it is.
+// third again, and once it came for the second, each in its own place, and that row stays where it
+// is.
 static void queue_screen_changed_pages(SimHost& host, Shell& shell) {
     open_queue(host, shell, make_long_queue(THREE_PAGES_OF_ENTRIES), THIRD_PAGE_CURRENT);
     shell.update();
@@ -8854,7 +8855,7 @@ static const char* check_queue_screen_changed_pages(const SimHost& host, const S
     if (const auto problem = check_queue_screen(shell)) {
         return problem;
     }
-    if (const auto problem = check_queue_asked(host, {3, 2, 3}, {true, false, false})) {
+    if (const auto problem = check_queue_asked(host, {3, 2, 3, 2}, {true, false, false, false})) {
         return problem;
     }
 
@@ -8863,7 +8864,79 @@ static const char* check_queue_screen_changed_pages(const SimHost& host, const S
         return "the row at the top moved as its page came again";
     }
 
-    return check_queue_rows(make_long_queue(THREE_PAGES_OF_ENTRIES), 200, 50);
+    return check_queue_rows(make_long_queue(THREE_PAGES_OF_ENTRIES), 100, 150);
+}
+
+// The row of the entry with this title is marked as the loaded track's.
+static bool is_marked(const char* title) {
+    const auto row = find_row(title);
+
+    return row && lv_obj_get_style_border_width(row, LV_PART_MAIN);
+}
+
+// The queue of 150, opened in its second page and scrolled up to where its two pages meet, the
+// first page's last rows at the top: the next track starts, and the event asks for the first page
+// again, and once it came for the second, one at a time, the answers as slow as the network's.
+// While each is on its way the rows of both stay, no spinner in their place, and the row at the top
+// stays where it is; the next track is marked once the first page came.
+static void queue_screen_changed_boundary(SimHost& host, Shell& shell) {
+    const auto entries = make_long_queue(TWO_PAGES_OF_ENTRIES);
+    open_queue(host, shell, entries, MID_PAGE_CURRENT);
+    shell.update();
+    scroll_list(shell, false);
+
+    const auto row = find_row("Track 098");
+    expect(row, "the first page's rows are not listed");
+    lv_obj_scroll_to_y(find_list(), lv_obj_get_y(row), LV_ANIM_OFF);
+    shell.update();
+    lv_obj_update_layout(lv_screen_active());
+    expect(get_place(row).top == LIST_TOP, "the row to keep in place is not at the top");
+
+    const auto both_stay = [&entries]() {
+        lv_obj_update_layout(lv_screen_active());
+        const auto top = find_row("Track 098");
+        return !check_queue_rows(entries, 0, TWO_PAGES_OF_ENTRIES) && !count_spinners(find_list()) && top &&
+               get_place(top).top == LIST_TOP;
+    };
+
+    host.queue().serve(200, {});
+    host.send_speaker_event("playback_changed", SPEAKER_EVENT);
+    shell.update();
+    expect(host.queue().get_requests() == std::vector<uint32_t>{2, 1, 1},
+           "the event did not ask for the page at the top again, alone");
+    expect(both_stay(), "a page's rows did not stay while the page at the top was on its way");
+
+    const auto pages = make_queue_pages(entries, MID_PAGE_CURRENT + 1);
+    host.queue().answer(200, pages[0].c_str());
+    shell.update();
+    expect(host.queue().get_requests() == std::vector<uint32_t>{2, 1, 1, 2},
+           "the other page held was not asked for again once the page at the top came");
+    expect(both_stay(), "a page's rows did not stay while the other page held was on its way");
+    expect(is_marked("Track 141") && !is_marked("Track 140"), "the next track is not marked once the first page came");
+
+    host.queue().answer(200, pages[1].c_str());
+}
+
+static const char* check_queue_screen_changed_boundary(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_queue_screen(shell)) {
+        return problem;
+    }
+    if (const auto problem = check_queue_asked(host, {2, 1, 1, 2}, {true, false, false, false})) {
+        return problem;
+    }
+    if (const auto problem = check_queue_rows(make_long_queue(TWO_PAGES_OF_ENTRIES), 0, TWO_PAGES_OF_ENTRIES)) {
+        return problem;
+    }
+    if (count_spinners(find_list())) {
+        return "a spinner shows in the list of both pages held";
+    }
+
+    const auto row = find_row("Track 098");
+    if (!row || get_place(row).top != LIST_TOP) {
+        return "the row at the top moved as the pages came again";
+    }
+
+    return is_marked("Track 141") && !is_marked("Track 140") ? nullptr : "the next track is not marked";
 }
 
 // How many entries the queue has after a Play replaced the queue of 250 with a shorter one, and
@@ -10885,6 +10958,7 @@ const std::vector<Scene>& get_scenes() {
         {"queue-screen-page-error", queue_screen_page_error, check_queue_screen_page_error},
         {"queue-screen-changed", queue_screen_changed, check_queue_screen_changed},
         {"queue-screen-changed-pages", queue_screen_changed_pages, check_queue_screen_changed_pages},
+        {"queue-screen-changed-boundary", queue_screen_changed_boundary, check_queue_screen_changed_boundary},
         {"queue-screen-shrunk", queue_screen_shrunk, check_queue_screen_shrunk},
         {"queue-screen-shrunk-early", queue_screen_shrunk_early, check_queue_screen_shrunk_early},
         {"queue-screen-clear-confirm", queue_screen_clear_confirm, check_queue_screen_clear_confirm,

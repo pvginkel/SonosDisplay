@@ -13,7 +13,8 @@
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
 // end, the list asks for the page past it, and once it comes the page at the far end from it is
 // dropped, or, when a row on screen is in that one, the page that came; the rows on screen stay
-// where they are. While no page has come it says why instead: the
+// where they are. Asked for again (refresh()), the pages held come again one by one, the one at
+// the top of the list first, each in its own place. While no page has come it says why instead: the
 // first is on its way, did not come, with a way to ask again, or the list is empty. Past the rows,
 // at an end with a page past it, a spinner shows while that page has not come, and why, with a
 // way to ask again, when it did not.
@@ -44,6 +45,8 @@ class ListView : public View {
     uint32_t _first_index{};
     // Whether the pages changed since the list was built.
     bool _changed{};
+    // The pages held that refresh() asks for again once the one it asked for first came, in turn.
+    std::vector<uint32_t> _asked_again;
     // The presses of each row built with them.
     std::vector<std::unique_ptr<ItemPresses>> _presses;
     // The presses at the heading's end of the item the screen opens on, if it has them: they stay
@@ -168,8 +171,10 @@ protected:
     // The pages changed: the next do_update() builds the list again.
     void list_changed() { _changed = true; }
 
-    // Asks again for the page of the row at the top of the list, or, while no row is built, for
-    // the first page held, or the list's first. The rows stay as they are until it comes.
+    // Asks again for the pages held: first for the page of the row at the top of the list, or,
+    // while no row is built, for the first page held, or the list's first; once it came, for each
+    // other page still held, one by one. Each takes its own place, and the rows stay as they are
+    // until their page comes.
     void refresh();
 
     // Says this in a line under the heading, or nothing with nullptr.

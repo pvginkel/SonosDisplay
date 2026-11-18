@@ -557,6 +557,13 @@ void ListView::refresh() {
         page = (_first_index + uint32_t(top)) / PAGE_SIZE + 1;
     }
 
+    _asked_again.clear();
+    for (size_t i = 0; i < pages.page_sizes.size(); i++) {
+        if (pages.first_page + uint32_t(i) != page) {
+            _asked_again.push_back(pages.first_page + uint32_t(i));
+        }
+    }
+
     ask(page);
 }
 
@@ -567,13 +574,24 @@ void ListView::show_note(const char* note) {
     }
 }
 
-// Within a screen of an end that has a page past it, that page is asked for, unless one is on its
-// way already, or one came that the list is not built with yet. A page that did not come is asked
-// for again by its Try again only.
+// A page held that refresh() asks for again is asked for first, unless it is no longer held. Then,
+// within a screen of an end that has a page past it, that page is asked for. Neither is while a page
+// is on its way already, or one came that the list is not built with yet. A page that did not come
+// is asked for again by its Try again only.
 void ListView::ask_near_ends() {
     const auto& pages = get_pages();
     if (pages.state == LoadState::Loading || _changed) {
         return;
+    }
+
+    while (!_asked_again.empty()) {
+        const auto page = _asked_again.front();
+        _asked_again.erase(_asked_again.begin());
+
+        if (pages.holds(page)) {
+            ask(page);
+            return;
+        }
     }
 
     const auto reach = lv_obj_get_height(_list);
