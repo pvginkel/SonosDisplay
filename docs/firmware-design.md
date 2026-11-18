@@ -687,7 +687,10 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   ECDSA P-256 chain, and takes one round trip fewer. From a pod, nginx resumed TLS 1.2 sessions by
   ticket and by session id, also after 70 seconds idle; its `ssl_session_timeout` is 10 minutes.
   So it pays for a connection that lapsed while the screen was lit or briefly dark, not for the
-  first after a long dark spell, and it costs a Kconfig line and a few hundred bytes a client. The
+  first after a long dark spell, and it costs a Kconfig line and a few hundred bytes a client. On
+  the first display, on 2026-11-18, a connection the client had closed after 50 seconds opened
+  again in 44 and 49 ms, resumed; one opened 11 minutes later, when nginx no longer held the
+  session, took 1,338 ms, a full handshake, against about 2.5 seconds on the firmware before. The
   session is kept with the handle and goes with it after a transport error. The peer's
   certificate is not kept after the handshake (`CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` off):
   nothing reads it then, and every open connection and kept session would hold a copy in internal
@@ -1331,6 +1334,9 @@ a post-build step in `CMakeLists.txt` that checks the size of `sonos_display.bin
 ### Internal RAM
 
 Task stacks take about 80 KB: the five tasks of section 1, esp-mdm's, WiFi's and the system's.
+An open TLS connection to the backend holds about 4 KB of internal RAM, its buffers being in PSRAM:
+on 2026-11-18 the first display had 102,707 bytes free with no client's connection open and 98,539
+with one (section 4).
 The panel's two bounce buffers take 32,000 bytes (section 3). The model of the open list takes up
 to 40 KB. The target is at least 60 KB of internal RAM free with the largest list open. The
 firmware logs `heap_caps_get_free_size` and `heap_caps_get_minimum_free_size` for both kinds of
@@ -1497,14 +1503,19 @@ it is still to see there: the restart that installs the release after `846062f`,
 raw reason 12 at the next boot, with "The run before's restart halted the scan-out" and how the
 data cache's preload ended.
 
-What only a display shows of the connections kept open (section 4, SDSP-7) is still to see
-there: a press's time from its "Sending" line to its answer on a kept connection; the checks that
-keep the press's and the API's connections open while the screen is lit, and the closes after 50
-seconds idle in the dark; how long a new connection takes to open, resumed and not, with WiFi
-power save off; whether the picture's shift in use changes with power save off; and free internal
-RAM with those connections and the largest list open, against the 60 KB target. The firmware
-before it already held every client's last connection until its next request, so the connections
-add little to what that firmware's minimum of 62,451 bytes on 2026-11-18 holds.
+The connections kept open (section 4, SDSP-7) were seen on the first display on 2026-11-18, with
+`f549185`, the screen dark, through the API client's fetches of the volume after steps made on the
+Garage speaker's group from a pod. A request on a connection kept 16 or 44 seconds took 21 ms. The
+client closed its connection after 50 seconds idle, and the next opened in 44 to 49 ms, resumed;
+one 11 minutes on, past nginx's session, opened in 1,338 ms. The backend logged each fetch 0.18
+seconds after the step on a kept connection, and 1.54 seconds after it on the full handshake.
+Free internal RAM was 102,707 bytes with no client's connection open and 98,539 with one, at least
+90,015 since boot, against 74,879 dark and 62,451 at least on `4ad3694`, whose clients held their
+last connections. What only a hand shows is still to see there: the press's connection opened
+as the screen wakes, by motion and by touch, and the API's after it, the checks that keep them
+open while it is lit; a press's time from its "Sending" line to its answer; whether the picture's
+shift in use changes with power save off; and free internal RAM with the largest list open,
+against the 60 KB target.
 
 What only a display shows of the library's headings and of the covers kept is still to see there:
 a press on a track's line, which should replace the queue with the whole album and start at that
