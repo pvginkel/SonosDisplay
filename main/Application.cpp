@@ -388,16 +388,18 @@ void Application::refresh_playback() {
     }
 
     // An answer about a speaker that is no longer the chosen one is dropped. A burst of events
-    // asks for the playback once more, not once per event.
-    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, "/playback"), .merges = true}, _scope,
-                      [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
-                          if (speaker_id == _model.speaker_id) {
-                              playback_answered(std::move(response));
-                          }
-                      });
+    // asks for the playback once more, not once per event. A fetch that merges carries its own
+    // stamp, the newer one: it waited, so it is sent after that stamp was taken.
+    _api_client->send(
+        HttpRequest{.path = speaker_path(_model.speaker_id, "/playback"), .merges = true}, _scope,
+        [this, speaker_id = _model.speaker_id, fetch = _model.playback.fetch_stamp()](HttpResponse&& response) {
+            if (speaker_id == _model.speaker_id) {
+                playback_answered(fetch, std::move(response));
+            }
+        });
 }
 
-void Application::playback_answered(HttpResponse&& response) {
+void Application::playback_answered(FetchStamp fetch, HttpResponse&& response) {
     auto& playback = _model.playback;
 
     if (response.err == ESP_ERR_INVALID_SIZE) {
@@ -409,7 +411,7 @@ void Application::playback_answered(HttpResponse&& response) {
         playback.state = LoadState::Unreachable;
         playback.error.clear();
     } else if (const auto problem =
-                   read_playback(response.status, (const char*)response.body.get(), response.length, playback)) {
+                   read_playback(response.status, (const char*)response.body.get(), response.length, fetch, playback)) {
         ESP_LOGW(TAG, "GET playback answered %d, %s: %s", response.status, problem, playback.error.c_str());
     }
 
@@ -428,18 +430,25 @@ void Application::refresh_volume() {
     }
 
     // An answer about a speaker that is no longer the chosen one is dropped. volume_changed comes
-    // once for every speaker of a group, and asks for the volume once more.
-    _api_client->send(HttpRequest{.path = speaker_path(_model.speaker_id, ""), .merges = true}, _scope,
-                      [this, speaker_id = _model.speaker_id](HttpResponse&& response) {
-                          if (speaker_id == _model.speaker_id) {
-                              volume_answered(std::move(response));
-                          }
-                      });
+    // once for every speaker of a group, and asks for the volume once more. A fetch that merges
+    // carries its own stamp, the newer one: it waited, so it is sent after that stamp was taken.
+    _api_client->send(
+        HttpRequest{.path = speaker_path(_model.speaker_id, ""), .merges = true}, _scope,
+        [this, speaker_id = _model.speaker_id, fetch = _model.volume.fetch_stamp()](HttpResponse&& response) {
+            if (speaker_id == _model.speaker_id) {
+                volume_answered(fetch, std::move(response));
+            }
+        });
 }
 
-void Application::volume_answered(HttpResponse&& response) {
+void Application::volume_answered(FetchStamp fetch, HttpResponse&& response) {
     auto& volume = _model.volume;
     std::string error;
+
+    if (volume.is_before_change(fetch)) {
+        ESP_LOGI(TAG, "Ignoring a volume fetched before a change of it was answered");
+        return;
+    }
 
     if (response.err == ESP_ERR_INVALID_SIZE) {
         // An answer over the client's limit, which HttpClient logged.
@@ -550,7 +559,7 @@ void Application::command_answered(uint32_t id, Command command, HttpResponse&& 
         playback.command_not_taken();
         refresh_playback();
     } else {
-        playback.command_taken(command);
+        playback.command_taken();
     }
 
     model_changed();

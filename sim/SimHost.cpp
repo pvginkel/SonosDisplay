@@ -62,6 +62,10 @@ void SimHost::refresh_playback() {
         _model.revision++;
     }
 
+    // A fetch waiting to be answered takes the place of the one before, as one merges on the
+    // device.
+    _playback_fetch = _model.playback.fetch_stamp();
+
     if (_next_playback) {
         const auto answer = std::move(*_next_playback);
         _next_playback.reset();
@@ -75,6 +79,10 @@ void SimHost::refresh_volume() {
         _model.volume.state = LoadState::Loading;
         _model.revision++;
     }
+
+    // A fetch waiting to be answered takes the place of the one before, as one merges on the
+    // device.
+    _volume_fetch = _model.volume.fetch_stamp();
 
     if (_next_volume) {
         const auto answer = std::move(*_next_volume);
@@ -145,7 +153,7 @@ void SimHost::command_answered(uint32_t id, Command command, int status, const c
         _model.playback.command_not_taken();
         refresh_playback();
     } else {
-        _model.playback.command_taken(command);
+        _model.playback.command_taken();
     }
 
     _model.revision++;
@@ -598,7 +606,10 @@ void SimHost::answer_speakers(int status, const char* body) {
 }
 
 void SimHost::answer_playback(int status, const char* body) {
-    const auto problem = read_playback(status, body, strlen(body), _model.playback);
+    const auto fetch = _playback_fetch.value_or(_model.playback.fetch_stamp());
+    _playback_fetch.reset();
+
+    const auto problem = read_playback(status, body, strlen(body), fetch, _model.playback);
     if (problem) {
         printf("W (SimHost) GET playback answered %d, %s: %s\n", status, problem, _model.playback.error.c_str());
     }
@@ -607,6 +618,13 @@ void SimHost::answer_playback(int status, const char* body) {
 }
 
 void SimHost::answer_volume(int status, const char* body) {
+    const auto fetch = _volume_fetch.value_or(_model.volume.fetch_stamp());
+    _volume_fetch.reset();
+
+    if (_model.volume.is_before_change(fetch)) {
+        return;
+    }
+
     std::string error;
     const auto problem = read_speaker_volume(status, body, strlen(body), _model.volume, error);
     if (problem) {

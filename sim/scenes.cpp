@@ -1273,7 +1273,8 @@ static void now_playing_glyphs(SimHost& host, Shell& shell) {
                                "\xE2\x80"
                                R"("}})";
     Playback read;
-    expect(!read_playback(200, broken.c_str(), broken.length(), read), "a playback with bytes not UTF-8 was refused");
+    expect(!read_playback(200, broken.c_str(), broken.length(), read.fetch_stamp(), read),
+           "a playback with bytes not UTF-8 was refused");
     expect(read.track && read.track->album == "AB" && read.track->artist == "CD" && read.track->title == "EF",
            "bytes that are not UTF-8 were not left out");
 
@@ -1281,7 +1282,7 @@ static void now_playing_glyphs(SimHost& host, Shell& shell) {
     const auto long_title = std::string(198, 'a') + "é";
     const auto long_body = std::string(R"({"actions":[],"state":"stopped","track":{"album":null,"artist":"F",)") +
                            R"("artwork_id":null,"title":")" + long_title + "é" + R"("}})";
-    expect(!read_playback(200, long_body.c_str(), long_body.length(), read),
+    expect(!read_playback(200, long_body.c_str(), long_body.length(), read.fetch_stamp(), read),
            "a playback with a long title was refused");
     expect(read.track && read.track->title == long_title, "a long title was not cut at a character to 200 bytes");
 }
@@ -1323,15 +1324,16 @@ static void now_playing_nothing(SimHost& host, Shell& shell) {
 
 // A touch on pause shows at once, and the backend's 204 leaves it showing.
 static void now_playing_press(SimHost& host, Shell& shell) {
-    // A playback answered while the command is on its way is from before it.
+    // A playback answered while the command is on its way is from before it, and the pause stays.
     Playback playback;
-    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback), "the playing fixture was not read");
+    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback.fetch_stamp(), playback),
+           "the playing fixture was not read");
     playback.command_sent(Command::Pause, 0);
     expect(!playback.is_playing() && playback.sending && playback.sending->command == Command::Pause,
            "a pause that was sent does not show");
-    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback) && playback.is_playing(),
-           "an answer did not replace what a command showed");
-    playback.command_taken(Command::Pause);
+    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback.fetch_stamp(), playback) && !playback.is_playing(),
+           "an answer replaced what a command on its way showed");
+    playback.command_taken();
     expect(!playback.is_playing() && !playback.sending, "a pause that was taken does not show");
 
     std::string error;
@@ -1377,7 +1379,8 @@ static void expect_command_answer_time_limit_rules() {
     static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
 
     Playback playback;
-    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback), "the playing fixture was not read");
+    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback.fetch_stamp(), playback),
+           "the playing fixture was not read");
 
     const auto first = playback.command_sent(Command::Next, 1000);
     expect(!playback.timed_out(1000 + LIMIT - 1) && playback.is_sending(first),
@@ -1523,6 +1526,56 @@ static const char* check_refused_later(const SimHost& host, const Shell& shell) 
     }
 
     return check_now_playing(host, shell);
+}
+
+// The playback an event asked for before a touch on pause is answered after the pause's 204: it
+// can be from before the speaker paused, so the pause stays showing, while its track and the
+// commands the speaker allows are taken.
+static void now_playing_press_stale(SimHost& host, Shell& shell) {
+    // An answer fetched before a command was sent, or while it was on its way, leaves the play or
+    // pause it showed; one fetched once it was answered, taken or not, is taken whole.
+    {
+        Playback playback;
+        const auto before = playback.fetch_stamp();
+        expect(!playback.is_before_command(before), "a fetch with no command sent is taken for one from before it");
+
+        playback.command_sent(Command::Pause, 0);
+        const auto during = playback.fetch_stamp();
+        playback.command_taken();
+        expect(!read_playback(200, PLAYING_LAST, strlen(PLAYING_LAST), before, playback) && !playback.is_playing() &&
+                   playback.state == LoadState::Loaded && playback.track && !playback.can_next,
+               "an answer fetched before a command undid the pause, or its track and actions were not taken");
+        expect(!read_playback(200, PLAYING, strlen(PLAYING), during, playback) && !playback.is_playing() &&
+                   playback.can_next,
+               "an answer fetched while a command was on its way undid the pause");
+        expect(!read_playback(200, PLAYING, strlen(PLAYING), playback.fetch_stamp(), playback) && playback.is_playing(),
+               "an answer fetched after a command was taken was not taken whole");
+
+        playback.command_sent(Command::Pause, 0);
+        playback.command_not_taken();
+        expect(!read_playback(200, PLAYING, strlen(PLAYING), playback.fetch_stamp(), playback) && playback.is_playing(),
+               "the playback fetched again after a command not taken was not taken whole");
+    }
+
+    open_now_playing(host, shell, PLAYING);
+    host.answer_commands(204, "");
+
+    host.refresh_playback();
+    host.tap(PLAY_PAUSE.x, PLAY_PAUSE.y);
+    host.answer_after(after_touches_ms(1), [&host]() { host.answer_playback(200, PLAYING_LAST); });
+}
+
+static const char* check_press_stale(const SimHost& host, const Shell&) {
+    const auto& playback = host.get_model().playback;
+
+    if (host.get_commands() != std::vector<Command>{Command::Pause}) {
+        return "the touch did not send one pause";
+    }
+    if (playback.can_next) {
+        return "the answer fetched before the pause was not read";
+    }
+
+    return !playback.is_playing() && !playback.sending ? nullptr : "the answer fetched before the pause undid it";
 }
 
 // The first pick: the hold on the picker ends, and the display gives way to Home, where the bar
@@ -1804,6 +1857,39 @@ static const char* check_volume_up(const SimHost& host, const Shell&) {
 
     return volume.level == 26 && volume.shown() == 26 && !volume.is_changing() ? nullptr
                                                                                : "the level is not the one answered";
+}
+
+// The volume an event asked for before a touch on up is answered after the change's answer: it can
+// be from before the speaker changed, so it is dropped, and the level stays the one the change was
+// answered with.
+static void now_playing_volume_stale(SimHost& host, Shell& shell) {
+    // An answer fetched before a change was sent, or while it was on its way, is dropped; one
+    // fetched once it was answered is taken.
+    {
+        Volume volume;
+        std::string error;
+        expect(!read_volume_change(200, VOLUME_26, strlen(VOLUME_26), volume, error),
+               "the answer to a change was not read");
+
+        const auto before = volume.fetch_stamp();
+        expect(!volume.is_before_change(before), "a fetch with no change sent is taken for one from before it");
+
+        volume.pressed(Volume::STEP);
+        expect(volume.next_change(0).has_value(), "a press sent no change");
+        const auto during = volume.fetch_stamp();
+        volume.change_taken();
+        expect(volume.is_before_change(before) && volume.is_before_change(during),
+               "a fetch before a change, or while it was on its way, is taken for one after it");
+        expect(!volume.is_before_change(volume.fetch_stamp()),
+               "a fetch after a change was answered is taken for one from before it");
+    }
+
+    open_now_playing(host, shell, PLAYING);
+    host.answer_volume_changes(200, VOLUME_26);
+
+    host.refresh_volume();
+    host.tap(VOLUME_UP.x, VOLUME_UP.y);
+    host.answer_after(after_touches_ms(1), [&host]() { host.answer_volume(200, SPEAKER); });
 }
 
 // A burst of presses: one change is on its way, and the presses since wait to go as one. The
@@ -10587,6 +10673,7 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-radio", now_playing_radio, check_radio},
         {"now-playing-nothing", now_playing_nothing},
         {"now-playing-press", now_playing_press, check_press},
+        {"now-playing-press-stale", now_playing_press_stale, check_press_stale, after_touches_ms(2)},
         {"now-playing-next", now_playing_next, check_next},
         {"now-playing-next-no-answer", now_playing_next_no_answer, check_next_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
         {"now-playing-next-late-answer", now_playing_next_late_answer, check_next_late_answer,
@@ -10605,6 +10692,7 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-same-speaker", now_playing_same_speaker, check_same_speaker},
         {"now-playing-other-speaker", now_playing_other_speaker, check_other_speaker},
         {"now-playing-volume-up", now_playing_volume_up, check_volume_up},
+        {"now-playing-volume-stale", now_playing_volume_stale, check_volume_up, after_touches_ms(2)},
         {"now-playing-volume-burst", now_playing_volume_burst, check_volume_burst},
         {"now-playing-volume-muted", now_playing_volume_muted},
         {"now-playing-volume-limit", now_playing_volume_limit, check_volume_limit},

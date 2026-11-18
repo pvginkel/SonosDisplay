@@ -82,8 +82,8 @@ private:
     void load_speaker_choice();
     void load_motion_setting();
     void speakers_answered(HttpResponse&& response);
-    void playback_answered(HttpResponse&& response);
-    void volume_answered(HttpResponse&& response);
+    void playback_answered(FetchStamp fetch, HttpResponse&& response);
+    void volume_answered(FetchStamp fetch, HttpResponse&& response);
     void send_volume_change();
     void volume_change_answered(uint32_t change, HttpResponse&& response);
     void command_answered(uint32_t id, Command command, HttpResponse&& response);

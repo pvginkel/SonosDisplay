@@ -24,10 +24,11 @@
 // error envelope.
 const char* read_speakers(int status, const char* body, size_t length, SpeakerList& list);
 
-// Reads the answer to GET /api/speakers/{speaker_id}/playback into `playback`: Loaded with what
-// plays and the commands the speaker allows, or Failed with what the backend said went wrong. A
-// failure leaves the last playback answered in place.
-const char* read_playback(int status, const char* body, size_t length, Playback& playback);
+// Reads the answer to GET /api/speakers/{speaker_id}/playback, the fetch asked for with the stamp
+// `fetch`, into `playback`: Loaded with what plays and the commands the speaker allows, as
+// Playback::fetched() takes them, or Failed with what the backend said went wrong. A failure
+// leaves the last playback answered in place.
+const char* read_playback(int status, const char* body, size_t length, FetchStamp fetch, Playback& playback);
 
 // Reads the answer to a transport command or to a change of a group, which is a 204 when the
 // backend took it. `error` is what the backend said went wrong, where it said so.

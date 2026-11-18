@@ -250,11 +250,15 @@ private:
     std::optional<Answer> _command_answer;
     std::vector<std::pair<uint32_t, Command>> _unanswered_commands;
     std::optional<Answer> _next_playback;
+    // The stamp of the fetch of the playback that waits to be answered, if one does.
+    std::optional<FetchStamp> _playback_fetch;
     std::vector<int> _volume_changes;
     std::vector<std::string> _volume_change_bodies;
     std::vector<uint32_t> _unanswered_volume_changes;
     std::optional<Answer> _volume_change_answer;
     std::optional<Answer> _next_volume;
+    // The stamp of the fetch of the volume that waits to be answered, if one does.
+    std::optional<FetchStamp> _volume_fetch;
     std::optional<Answer> _next_speakers;
     std::vector<GroupChangeRequest> _group_changes;
     std::vector<UnansweredGroupChange> _unanswered_group_changes;
@@ -359,7 +363,7 @@ public:
     const std::vector<GroupChangeRequest>& get_group_changes() const { return _group_changes; }
 
     // The backend's answer to GET /api/speakers/{speaker_id}/playback, read as the device reads
-    // it.
+    // it: the answer to the fetch last asked for, or to one asked for now where none waits.
     void answer_playback(int status, const char* body);
 
     // What the backend answers the next time the playback is asked for. Without it the request
@@ -383,7 +387,8 @@ public:
     // The commands the views have sent, in order.
     const std::vector<Command>& get_commands() const { return _commands; }
 
-    // The backend's answer to GET /api/speakers/{speaker_id}, read as the device reads it.
+    // The backend's answer to GET /api/speakers/{speaker_id}, read as the device reads it: the
+    // answer to the fetch last asked for, or to one asked for now where none waits.
     void answer_volume(int status, const char* body);
 
     // What the backend answers the next time the volume is asked for. Without it the request

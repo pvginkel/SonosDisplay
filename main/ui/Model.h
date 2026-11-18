@@ -229,6 +229,15 @@ struct Track {
     bool operator==(const Track&) const = default;
 };
 
+// What a fetch of the playback or of the volume is asked for with, and its answer read with: the
+// press last sent when it was asked for, and whether that one was on its way then. The backend
+// reads a fetch on backend_api and a press on backend_press, so it can read a fetch before the
+// speaker acts on a press and answer it after the press's answer.
+struct FetchStamp {
+    uint32_t last_id{};
+    bool sending{};
+};
+
 // A transport command on its way to the backend.
 struct SentCommand {
     // What tells this command's answer from another command's.
@@ -300,11 +309,31 @@ struct Playback {
         return sending->id;
     }
 
-    // The backend took the command. A playback answered while the command was on its way is from
-    // before it, so the play or pause shows again.
-    void command_taken(Command command) {
-        sending.reset();
-        show(command);
+    // The backend took the command. The play or pause it showed stays: a playback answered since
+    // it was sent is from before it.
+    void command_taken() { sending.reset(); }
+
+    // A fetch of the playback is asked for, with this stamp.
+    FetchStamp fetch_stamp() const { return {.last_id = _last_id, .sending = sending.has_value()}; }
+
+    // Whether the answer to the fetch with this stamp can be from before the speaker acted on a
+    // command: one was on its way when the fetch was asked for, or one was sent since.
+    bool is_before_command(FetchStamp fetch) const { return fetch.sending || fetch.last_id != _last_id; }
+
+    // The backend answered the fetch with this stamp with `answered`: what plays and the commands
+    // the speaker allows. An answer from before a command leaves the play or pause the command
+    // showed: the speaker reports what the command changed, and the playback fetched then is taken
+    // whole.
+    void fetched(Playback&& answered, FetchStamp fetch) {
+        state = LoadState::Loaded;
+        if (!is_before_command(fetch)) {
+            play_state = answered.play_state;
+        }
+        can_play = answered.can_play;
+        can_pause = answered.can_pause;
+        can_next = answered.can_next;
+        can_previous = answered.can_previous;
+        track = std::move(answered.track);
     }
 
     // The backend answered the command with an error, or did not answer. The host fetches the
@@ -466,6 +495,15 @@ struct Volume {
 
     // The backend took the change on its way, and its answer is the level.
     void change_taken() { sending.reset(); }
+
+    // A fetch of the volume is asked for, with this stamp.
+    FetchStamp fetch_stamp() const { return {.last_id = _last_id, .sending = sending.has_value()}; }
+
+    // Whether the answer to the fetch with this stamp can be from before the speaker acted on a
+    // change: one was on its way when the fetch was asked for, or one was sent since. Such an
+    // answer is dropped, failed or not: the answer to the change carries the level, and a change
+    // not taken or settled by its time limit fetches the volume again.
+    bool is_before_change(FetchStamp fetch) const { return fetch.sending || fetch.last_id != _last_id; }
 
     // The backend answered the change on its way with an error, or did not answer. The steps and
     // the unmute that wait are dropped with it, and the host fetches the volume again, which puts

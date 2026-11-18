@@ -663,6 +663,18 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   caller's scope and `done` taking the earlier's place. One under way merges with nothing. So a
   burst of events asks for the speakers, the playback, the volume or a page of the queue once
   more, not once per event.
+- **A fetch from before a press leaves what the press showed.** A fetch and a press go on two
+  clients, so the backend can read a fetch of the playback or of the volume before the speaker
+  acts on a press, and answer it after the press's answer. Each fetch carries a stamp
+  (`FetchStamp`, `main/ui/Model.h`): the id of the press last sent when it was asked for, and
+  whether that press was on its way then. One asked for before a transport command was sent, or
+  while it was on its way, is from before it: its track and the commands the speaker allows are
+  taken, the play or pause the command showed stays. One like it for a change of the volume is
+  dropped, failed or not: the change's answer carries the level. A fetch that merges carries the
+  later caller's stamp, which is right, since it is sent after that one was taken. The fetch
+  asked for once the press is answered, by the speaker's event or by a press not taken, is taken
+  whole. Clear needs none of this: it shows nothing before its answer, and the fetch its
+  `queue_changed` asks for is answered after the one from before it, on the same client.
 - **A press has a time limit.** `HttpClient` bounds every wait on the link by the 5-second
   timeout below, and esp-tls gives a handshake up at its first step that ends 5 seconds or more
   after it began, so a request on the press path ends within about 30 seconds, but for a host

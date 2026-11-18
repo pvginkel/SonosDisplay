@@ -300,7 +300,7 @@ static const char* read_playback_fields(const cJSON* root, Playback& playback) {
     return nullptr;
 }
 
-const char* read_playback(int status, const char* body, size_t length, Playback& playback) {
+const char* read_playback(int status, const char* body, size_t length, FetchStamp fetch, Playback& playback) {
     const auto root = parse(body, length);
 
     if (status != 200) {
@@ -318,13 +318,7 @@ const char* read_playback(int status, const char* body, size_t length, Playback&
     if (problem) {
         playback.state = LoadState::Failed;
     } else {
-        playback.state = LoadState::Loaded;
-        playback.play_state = answered.play_state;
-        playback.can_play = answered.can_play;
-        playback.can_pause = answered.can_pause;
-        playback.can_next = answered.can_next;
-        playback.can_previous = answered.can_previous;
-        playback.track = std::move(answered.track);
+        playback.fetched(std::move(answered), fetch);
     }
 
     return problem;
