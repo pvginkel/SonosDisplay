@@ -12,10 +12,9 @@ longer in use. There are several of them, and a second one may go up elsewhere l
 
 Two things are built:
 
-- **SonosDisplay** (`pvginkel/SonosDisplay`, exists, empty but for a spike): the firmware for the
-  display.
-- **SonosController** (`pvginkel/SonosController`, exists, empty): a Python backend that talks to
-  Sonos and Plex and serves the display. It is generic enough that a web UI could be added later;
+- **SonosDisplay** (`pvginkel/SonosDisplay`): the firmware for the display.
+- **SonosController** (`pvginkel/SonosController`): a Python backend that talks to Sonos and Plex
+  and serves the display. It is generic enough that a web UI could be added later;
   no web UI is built in this project.
 
 **The result that establishes it:** the backend runs in the prd cluster, a display in the garage
@@ -120,7 +119,8 @@ Surveyed or tried on 2026-11-15. Tasks start from this and do not redo it.
 - Its testing rules forbid mocks of the infrastructure it owns. Real speakers and a real Plex are
   not available in CI.
 
-**Sonos and Plex, tried on the real speakers** (the spike, `spikes/plex-sonos/plex_sonos.py`)
+**Sonos and Plex, tried on the real speakers** (the spike, a script this repository held until
+commissioning; its history keeps it)
 
 - A pod in the cluster reaches the speakers and Plex directly.
 - There are two rooms: Garage, and Zitkuil, which is three devices acting as one room.
@@ -132,7 +132,7 @@ Surveyed or tried on 2026-11-15. Tasks start from this and do not redo it.
 - **As direct addresses on the Plex server:** it plays, with title, artist, album and artwork,
   but the track length is unknown to the speaker, the Plex token is stored in every queue entry,
   and it takes one call per track.
-- The speaker, Plex address and token used are in the spike's `.env`, which is not committed.
+- The speaker, Plex address and token used were in the spike's `.env`, which was never committed.
 
 ## The plan
 
@@ -241,7 +241,7 @@ workflow.
   2026-11-15 so the backend can always find the system, and the speakers take them only after a
   restart: "I still need to restart the devices so they aren't yet reachable." The two addresses
   are in the project's brief in Pilot, not in this public repository. Until the restart the
-  speakers answer on their old addresses, which the spike's `.env` holds.
+  speakers answer on their old addresses, which the spike's `.env` held.
 - **Task 5:** flashing and provisioning the first display.
 - **Task 7:** the opening that lets the speakers reach the backend's event port, once task 6 has
   named it.
@@ -270,8 +270,8 @@ workflow.
 ## Context
 
 - **Repositories:**
-  - `pvginkel/SonosDisplay`: the firmware; holds this plan and the spike.
-  - `pvginkel/SonosController`: the backend; exists, empty.
+  - `pvginkel/SonosDisplay`: the firmware; holds this plan.
+  - `pvginkel/SonosController`: the backend.
   - `pvginkel/ThermostatDisplay`: the old firmware for this hardware; the source of the
     hardware code. Its vendor documentation for the board is under `documentation/`.
   - `pvginkel/PaperClock` and `pvginkel/esp-libs`: the reference for firmware conventions.
@@ -280,5 +280,5 @@ workflow.
     `https://dev-guides.home/modern-app/`.
 - **Environment:** `pvginkel-sonosdisplay-1c23a1` holds SonosDisplay. It has no toolchain yet;
   task 5 adds what the firmware needs.
-- **The spike:** `spikes/plex-sonos/plex_sonos.py` in SonosDisplay lists speakers, browses Plex
-  and queues music both ways. Task 6 starts from it.
+- **The spike** listed speakers, browsed Plex and queued music both ways. Task 6 started from it.
+  Commissioning removed it from SonosDisplay; the repository's history keeps it.
