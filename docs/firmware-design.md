@@ -1186,8 +1186,8 @@ on a different hand-over, task 5 follows it.
 
 ### Bringing up a fresh display
 
-Task 5 registers these as the operator's steps. Step 1 can be done at once. Step 3 waits for the
-architecture changes below, and steps 4 and 5 wait for the Flash device slice.
+The first display came up this way. Another display needs steps 3 to 6 only:
+[adding-a-display.md](adding-a-display.md) has them as IoT Support does them today.
 
 1. **Create the model** in IoT Support: code `sonos_display`, name `Sonos Display`, the schema
    above. This comes before the Jenkins job's first build can pass its Deploy stage.
@@ -1203,8 +1203,8 @@ architecture changes below, and steps 4 and 5 wait for the Flash device slice.
 6. **Check:** the device's Logs tab in IoT Support shows the boot log, and the screen shows the
    speaker picker.
 
-Until Flash device exists, the same first flash is `idf.py -p <port> flash` from a workstation
-with ESP-IDF 5.5.3.
+Without IoT Support, the same first flash is `idf.py -p <port> flash` from a workstation with
+ESP-IDF 5.5.3.
 
 ### The architecture model
 
