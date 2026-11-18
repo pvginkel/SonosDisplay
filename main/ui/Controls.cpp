@@ -75,11 +75,12 @@ void TransportControls::apply(const Playback& playback) {
 
     if (_previous) {
         apply_control(_previous, ICON_SKIP_PREVIOUS, loaded && playback.can_previous, false,
-                      playback.sending == Command::Previous);
+                      playback.sending && playback.sending->command == Command::Previous);
     }
     apply_control(_play_pause, _pause_shown ? ICON_PAUSE : ICON_PLAY,
                   loaded && playback.allows(_pause_shown ? Command::Pause : Command::Play), true, false);
-    apply_control(_next, ICON_SKIP_NEXT, loaded && playback.can_next, false, playback.sending == Command::Next);
+    apply_control(_next, ICON_SKIP_NEXT, loaded && playback.can_next, false,
+                  playback.sending && playback.sending->command == Command::Next);
 }
 
 void TransportControls::clicked(lv_event_t* event) {

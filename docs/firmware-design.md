@@ -667,11 +667,12 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   timeout below, and esp-tls gives a handshake up at its first step that ends 5 seconds or more
   after it began, so a request on the press path ends within about 30 seconds, but for a host
   lookup that misses lwIP's cache and a handshake whose every read comes just inside the timeout.
-  A change of the volume, of a group or of a favourite, or a request to play, shuffle or add, whose
-  answer has not come 30 seconds after it was sent (`ANSWER_TIME_LIMIT_MS`, `main/ui/Model.h`) is
-  settled, so an answer dropped on its way to the UI task, or a press stuck behind stalled ones,
-  leaves nothing on its way for good. Each carries an id, and an answer to one that is no longer
-  on its way changes nothing.
+  A transport command, a change of the volume, of a group or of a favourite, or a request to play,
+  shuffle or add, whose answer has not come 30 seconds after it was sent (`ANSWER_TIME_LIMIT_MS`,
+  `main/ui/Model.h`) is settled, so an answer dropped on its way to the UI task, or a press stuck
+  behind stalled ones, leaves nothing on its way for good. Each carries an id, and an answer to one
+  that is no longer on its way changes nothing: a command is on its way until a later one takes
+  its place.
 - **One change of the volume on its way at most.** A press sends `{"delta": n}` to the group's
   volume: a step, which the speaker takes from the volume it has, where a level sent from the
   screen could undo a change made in the Sonos app. The presses made while a change is on its way

@@ -1326,8 +1326,9 @@ static void now_playing_press(SimHost& host, Shell& shell) {
     // A playback answered while the command is on its way is from before it.
     Playback playback;
     expect(!read_playback(200, PLAYING, strlen(PLAYING), playback), "the playing fixture was not read");
-    playback.command_sent(Command::Pause);
-    expect(!playback.is_playing() && playback.sending == Command::Pause, "a pause that was sent does not show");
+    playback.command_sent(Command::Pause, 0);
+    expect(!playback.is_playing() && playback.sending && playback.sending->command == Command::Pause,
+           "a pause that was sent does not show");
     expect(!read_playback(200, PLAYING, strlen(PLAYING), playback) && playback.is_playing(),
            "an answer did not replace what a command showed");
     playback.command_taken(Command::Pause);
@@ -1364,7 +1365,104 @@ static const char* check_next(const SimHost& host, const Shell&) {
         return "the touch did not send one next";
     }
 
-    return host.get_model().playback.sending == Command::Next ? nullptr : "the next does not show as on its way";
+    const auto& sending = host.get_model().playback.sending;
+
+    return sending && sending->command == Command::Next ? nullptr : "the next does not show as on its way";
+}
+
+// A command that is not answered is settled once ANSWER_TIME_LIMIT_MS have passed since it was
+// sent, on LVGL's tick, which wraps, and counts as not taken. Its id tells it from a later
+// command, from one that took its place and from one for another speaker.
+static void expect_command_answer_time_limit_rules() {
+    static constexpr uint32_t LIMIT = ANSWER_TIME_LIMIT_MS;
+
+    Playback playback;
+    expect(!read_playback(200, PLAYING, strlen(PLAYING), playback), "the playing fixture was not read");
+
+    const auto first = playback.command_sent(Command::Next, 1000);
+    expect(!playback.timed_out(1000 + LIMIT - 1) && playback.is_sending(first),
+           "a command on its way was settled before its time limit");
+    expect(playback.timed_out(1000 + LIMIT) && !playback.sending && playback.commands_not_taken == 1,
+           "the time limit did not settle a command as not taken");
+    expect(!playback.timed_out(1000 + LIMIT) && playback.commands_not_taken == 1, "a command was settled twice");
+
+    const auto later = playback.command_sent(Command::Next, 1000 + LIMIT);
+    expect(!playback.is_sending(first) && playback.is_sending(later),
+           "the answer to a command settled by its time limit would be taken for a later command's");
+
+    const auto replacing = playback.command_sent(Command::Previous, 2000 + LIMIT);
+    expect(!playback.is_sending(later) && playback.is_sending(replacing),
+           "the answer to a command a later one took the place of would be taken for the later one's");
+    expect(!playback.timed_out(1000 + 2 * LIMIT) && playback.timed_out(2000 + 2 * LIMIT),
+           "the later command's time limit does not run from when it was sent");
+
+    playback.speaker_changed();
+    const auto other = playback.command_sent(Command::Next, UINT32_MAX - 99);
+    expect(!playback.is_sending(first) && !playback.is_sending(replacing) && playback.is_sending(other),
+           "the answer to a command for the speaker before would be taken for a later command's");
+    expect(!playback.timed_out(LIMIT - 101) && playback.timed_out(LIMIT - 100),
+           "the time limit of a command does not hold across the tick's wrap");
+}
+
+// A touch on Next that is never answered: once its time limit has passed it no longer shows as on
+// its way, the screen says it was not taken, and the playback is fetched again.
+static void now_playing_next_no_answer(SimHost& host, Shell& shell) {
+    expect_command_answer_time_limit_rules();
+
+    open_now_playing(host, shell, PLAYING);
+    host.answer_next_playback(200, PAUSED);
+
+    host.tap(NEXT.x, NEXT.y);
+    host.wait(ANSWER_TIME_LIMIT_MS);
+}
+
+static const char* check_next_no_answer(const SimHost& host, const Shell&) {
+    const auto& playback = host.get_model().playback;
+
+    if (host.get_commands() != std::vector<Command>{Command::Next}) {
+        return "the touch did not send one next";
+    }
+    if (playback.sending) {
+        return "the next still shows as on its way after its time limit";
+    }
+    if (playback.commands_not_taken != 1) {
+        return "a command settled by its time limit does not count as not taken";
+    }
+    if (!playback.track || playback.track->artwork_id != ARTWORK_PAUSED || !playback.can_next) {
+        return "the playback was not fetched again after the time limit";
+    }
+
+    return says(MSG_COMMAND_NOT_TAKEN) ? nullptr : "the now-playing screen does not say that the command was not taken";
+}
+
+// The answer to a touch on Next comes after its time limit, while a later Next is on its way: it
+// changes nothing, and the later Next still shows as on its way.
+static void now_playing_next_late_answer(SimHost& host, Shell& shell) {
+    open_now_playing(host, shell, PLAYING);
+    host.answer_next_playback(200, PAUSED);
+
+    host.tap(NEXT.x, NEXT.y);
+    host.wait(ANSWER_TIME_LIMIT_MS);
+    host.tap(NEXT.x, NEXT.y);
+    host.answer_after(ANSWER_TIME_LIMIT_MS + 600, [&host]() { host.answer_command(204, ""); });
+}
+
+static const char* check_next_late_answer(const SimHost& host, const Shell&) {
+    const auto& playback = host.get_model().playback;
+
+    if (host.get_commands() != std::vector<Command>{Command::Next, Command::Next}) {
+        return "the touch after the time limit did not send a second next";
+    }
+    if (host.count_unanswered_commands() != 1) {
+        return "the first next was not answered, or the second was";
+    }
+    if (playback.commands_not_taken != 1) {
+        return "the late answer counted, or the time limit did not";
+    }
+
+    return playback.sending && playback.sending->command == Command::Next
+               ? nullptr
+               : "the late answer settled the next on its way";
 }
 
 // A command the speaker refuses: the screen says it was not taken, and the playback fetched again
@@ -10490,6 +10588,9 @@ const std::vector<Scene>& get_scenes() {
         {"now-playing-nothing", now_playing_nothing},
         {"now-playing-press", now_playing_press, check_press},
         {"now-playing-next", now_playing_next, check_next},
+        {"now-playing-next-no-answer", now_playing_next_no_answer, check_next_no_answer, ANSWER_TIME_LIMIT_MS + 1000},
+        {"now-playing-next-late-answer", now_playing_next_late_answer, check_next_late_answer,
+         ANSWER_TIME_LIMIT_MS + 1000},
         {"now-playing-refused", now_playing_refused, check_refused_said},
         {"now-playing-refused-later", now_playing_refused, check_refused_later, AFTER_NOTICE_MS},
         {"now-playing-refused-back", now_playing_refused_back, check_now_playing_refused_back, after_touches_ms(3)},

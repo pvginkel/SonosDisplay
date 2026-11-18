@@ -229,7 +229,19 @@ struct Track {
     bool operator==(const Track&) const = default;
 };
 
-// What the chosen speaker plays, and what can be done with it.
+// A transport command on its way to the backend.
+struct SentCommand {
+    // What tells this command's answer from another command's.
+    uint32_t id{};
+
+    Command command{};
+
+    // LVGL's tick when the command was sent.
+    uint32_t sent_at{};
+};
+
+// What the chosen speaker plays, and what can be done with it. An answer to a command that is not
+// the one on its way changes nothing: the host reads one only while is_sending() says so.
 struct Playback {
     LoadState state{LoadState::Loading};
 
@@ -250,14 +262,18 @@ struct Playback {
     // The track that is loaded, if one is.
     std::optional<Track> track;
 
-    // The command last sent, until the backend has answered a command.
-    std::optional<Command> sending;
+    // The command last sent, until the backend answers it, ANSWER_TIME_LIMIT_MS settles it or a
+    // later command takes its place.
+    std::optional<SentCommand> sending;
 
     // How many commands were not taken: the backend answered an error, or did not answer. A view
     // says so once for each.
     uint32_t commands_not_taken{};
 
     bool is_playing() const { return play_state == PlayState::Playing || play_state == PlayState::Buffering; }
+
+    // Whether the command with this id is the one on its way.
+    bool is_sending(uint32_t id) const { return sending && sending->id == id; }
 
     bool allows(Command command) const {
         switch (command) {
@@ -274,11 +290,14 @@ struct Playback {
         return false;
     }
 
-    // A command is on its way to the backend. The answer to it carries no state and the speaker
-    // reports the change later, so a play or a pause shows from here on.
-    void command_sent(Command command) {
-        sending = command;
+    // A command is on its way to the backend from `now`, LVGL's tick, in the place of the one on
+    // its way before it, and the returned id tells its answer. The answer to it carries no state
+    // and the speaker reports the change later, so a play or a pause shows from here on.
+    uint32_t command_sent(Command command, uint32_t now) {
+        sending = SentCommand{.id = ++_last_id, .command = command, .sent_at = now};
         show(command);
+
+        return sending->id;
     }
 
     // The backend took the command. A playback answered while the command was on its way is from
@@ -295,16 +314,34 @@ struct Playback {
         commands_not_taken++;
     }
 
+    // Settles the command on its way when it was sent ANSWER_TIME_LIMIT_MS or longer before `now`,
+    // LVGL's tick, as not taken, and returns whether there was one. The host fetches the playback
+    // again, which puts right what command_sent() showed.
+    bool timed_out(uint32_t now) {
+        if (!sending || now - sending->sent_at < ANSWER_TIME_LIMIT_MS) {
+            return false;
+        }
+
+        command_not_taken();
+
+        return true;
+    }
+
     // Another speaker is chosen: nothing is known of what it plays. The count goes on, so a view
-    // does not take the change for a command that was not taken.
+    // does not take the change for a command that was not taken, and so do the ids, so the answer
+    // to a command for the speaker before is not taken for a later command's.
     void speaker_changed() {
         const auto not_taken = commands_not_taken;
+        const auto last_id = _last_id;
 
         *this = {};
         commands_not_taken = not_taken;
+        _last_id = last_id;
     }
 
 private:
+    uint32_t _last_id{};
+
     void show(Command command) {
         if (command == Command::Play) {
             play_state = PlayState::Playing;

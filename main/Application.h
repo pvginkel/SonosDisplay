@@ -86,7 +86,7 @@ private:
     void volume_answered(HttpResponse&& response);
     void send_volume_change();
     void volume_change_answered(uint32_t change, HttpResponse&& response);
-    void command_answered(Command command, HttpResponse&& response);
+    void command_answered(uint32_t id, Command command, HttpResponse&& response);
     void send_group_change(const std::string& speaker_id, bool adds);
     void group_change_answered(uint32_t change, bool adds, HttpResponse&& response);
     void queue_answered(uint32_t request, HttpResponse&& response);

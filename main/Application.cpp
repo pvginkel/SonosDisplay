@@ -515,23 +515,26 @@ void Application::volume_change_answered(uint32_t change, HttpResponse&& respons
 void Application::send_command(Command command) {
     ESP_LOGI(TAG, "Sending %s", command_name(command));
 
-    _model.playback.command_sent(command);
+    const auto id = _model.playback.command_sent(command, lv_tick_get());
     model_changed();
 
     const auto path = speaker_path(_model.speaker_id, "/playback/") + command_name(command);
 
-    // An answer about a speaker that is no longer the chosen one is dropped.
-    _press_client->send(HttpRequest{.method = HTTP_METHOD_POST, .path = path}, _scope,
-                        [this, command, speaker_id = _model.speaker_id](HttpResponse&& response) {
-                            if (speaker_id == _model.speaker_id) {
-                                command_answered(command, std::move(response));
-                            }
-                        });
+    _press_client->send(
+        HttpRequest{.method = HTTP_METHOD_POST, .path = path}, _scope,
+        [this, id, command](HttpResponse&& response) { command_answered(id, command, std::move(response)); });
 }
 
-void Application::command_answered(Command command, HttpResponse&& response) {
+void Application::command_answered(uint32_t id, Command command, HttpResponse&& response) {
     auto& playback = _model.playback;
     std::string error;
+
+    // A later command took its place, its time limit settled it, or another speaker was chosen:
+    // the playback fetched or reported since is the one shown.
+    if (!playback.is_sending(id)) {
+        ESP_LOGI(TAG, "Ignoring the answer to %s, which is settled", command_name(command));
+        return;
+    }
 
     // The speaker reports what a command changed later, as playback_changed. A command that was
     // not taken changed nothing, so the playback is fetched again: it puts the screen right, and
@@ -1064,6 +1067,15 @@ void Application::do_process() {
 
         model_changed();
         refresh_volume();
+    }
+
+    // A command whose answer has not come within its time limit: the playback fetched now puts
+    // right what the command showed, and says which commands the speaker allows now.
+    if (_model.playback.timed_out(now)) {
+        ESP_LOGW(TAG, "A command had no answer within %d s", int(ANSWER_TIME_LIMIT_MS / 1000));
+
+        model_changed();
+        refresh_playback();
     }
 
     if (_model.queueing.timed_out(now)) {

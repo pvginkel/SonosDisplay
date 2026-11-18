@@ -248,6 +248,7 @@ private:
     std::vector<bool> _motion_settings;
     std::vector<Command> _commands;
     std::optional<Answer> _command_answer;
+    std::vector<std::pair<uint32_t, Command>> _unanswered_commands;
     std::optional<Answer> _next_playback;
     std::vector<int> _volume_changes;
     std::vector<std::string> _volume_change_bodies;
@@ -368,6 +369,13 @@ public:
     // What the backend answers every command from here on, read as the device reads it. Without
     // it a command stays on its way.
     void answer_commands(int status, const char* body) { _command_answer = Answer{status, body}; }
+
+    // The backend's answer to the oldest command that answer_commands() did not answer, read as the
+    // device reads it: an answer to a command that is settled by now changes nothing.
+    void answer_command(int status, const char* body);
+
+    // How many commands are not answered yet, settled ones among them.
+    size_t count_unanswered_commands() const { return _unanswered_commands.size(); }
 
     // What the views have set the motion setting to, in order, a setting it had already among them.
     const std::vector<bool>& get_motion_settings() const { return _motion_settings; }
@@ -555,6 +563,7 @@ public:
     const std::vector<std::optional<Touch>>& get_taps() const { return _taps; }
 
 private:
+    void command_answered(uint32_t id, Command command, int status, const char* body);
     void send_volume_change();
     void volume_change_answered(uint32_t change, int status, const char* body);
     void send_group_change(const std::string& speaker_id, bool adds);

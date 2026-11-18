@@ -110,18 +110,37 @@ void SimHost::send_volume_change() {
 void SimHost::send_command(Command command) {
     _commands.push_back(command);
 
-    _model.playback.command_sent(command);
+    const auto id = _model.playback.command_sent(command, lv_tick_get());
     _model.revision++;
 
-    if (!_command_answer) {
+    if (_command_answer) {
+        command_answered(id, command, _command_answer->status, _command_answer->body.c_str());
+    } else {
+        _unanswered_commands.emplace_back(id, command);
+    }
+}
+
+void SimHost::answer_command(int status, const char* body) {
+    if (_unanswered_commands.empty()) {
+        fprintf(stderr, "render: a command was answered, and none was sent\n");
+        exit(1);
+    }
+
+    const auto [id, command] = _unanswered_commands.front();
+    _unanswered_commands.erase(_unanswered_commands.begin());
+
+    command_answered(id, command, status, body);
+}
+
+void SimHost::command_answered(uint32_t id, Command command, int status, const char* body) {
+    if (!_model.playback.is_sending(id)) {
         return;
     }
 
     std::string error;
-    const auto problem =
-        read_command(_command_answer->status, _command_answer->body.c_str(), _command_answer->body.length(), error);
+    const auto problem = read_command(status, body, strlen(body), error);
     if (problem) {
-        printf("W (SimHost) POST command answered %d, %s: %s\n", _command_answer->status, problem, error.c_str());
+        printf("W (SimHost) POST command answered %d, %s: %s\n", status, problem, error.c_str());
 
         _model.playback.command_not_taken();
         refresh_playback();
@@ -392,6 +411,11 @@ void SimHost::process() {
     if (_model.volume.timed_out(now)) {
         _model.revision++;
         refresh_volume();
+    }
+
+    if (_model.playback.timed_out(now)) {
+        _model.revision++;
+        refresh_playback();
     }
 
     if (_model.queueing.timed_out(now)) {
