@@ -11,6 +11,7 @@
 #include "board/RgbPanel.h"
 #include "board/RunMark.h"
 #include "esp_heap_caps.h"
+#include "esp_wifi.h"
 #include "nvs.h"
 #include "support.h"
 #include "ui/LoadingView.h"
@@ -38,6 +39,10 @@ static constexpr int64_t MEMORY_LOG_INTERVAL_MS = 60 * 1000;
 
 // A 400 px cover is 320,012 bytes, over the client's limit for an API answer.
 static constexpr size_t ARTWORK_MAX_RESPONSE = 512 * 1024;
+
+// What a client asks to keep its connection open while the screen is awake: the backend's
+// liveness check, which reaches neither Sonos nor Plex and answers 32 bytes.
+static constexpr char KEEP_OPEN_PATH[] = "/health/healthz";
 
 static constexpr int MIN_SCREEN_OFF_SECONDS = 10;
 static constexpr int MAX_SCREEN_OFF_SECONDS = 3600;
@@ -250,6 +255,20 @@ void Application::do_configuration_loaded(cJSON* data) {
     if (_loading_view) {
         _loading_view->set_message(MSG_CHECKING_FOR_UPDATE);
         lv_refr_now(nullptr);
+    }
+}
+
+// The display runs on mains power. In modem sleep the access point holds every frame for the
+// display until its next beacon, about 100 ms, so each of a handshake's round trips can wait that
+// long; without it the radio listens all the time (docs/firmware-design.md, section 4).
+void Application::do_network_available() {
+    ApplicationBase::do_network_available();
+
+    const auto err = esp_wifi_set_ps(WIFI_PS_NONE);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "WiFi power save is off");
+    } else {
+        ESP_LOGW(TAG, "Cannot switch WiFi power save off: %s", esp_err_to_name(err));
     }
 }
 
@@ -1058,6 +1077,8 @@ void Application::do_process() {
     // on its way is found.
     _artwork.set_screen_lit(_board->get_screen_power().is_lit());
 
+    keep_connections_open();
+
     const auto now = lv_tick_get();
 
     // A group change the backend took, which no list has shown within its time limit, or one
@@ -1114,6 +1135,24 @@ void Application::do_process() {
     }
 
     log_memory();
+}
+
+// From the moment the screen wakes, by motion or by touch, until it goes dark, the connections a
+// hand's next press and next list take are kept open, so neither waits on a handshake. The
+// press's goes first, before the light is on and while the hand is still on its way; the API's
+// follows once it is open, so the two handshakes do not share the CPU and the link. Artwork is
+// not kept open: a cover that comes later is no press that waits. In the dark every connection
+// closes after HttpClient::KEEP_ALIVE_IDLE_MS (docs/firmware-design.md, section 4).
+void Application::keep_connections_open() {
+    if (!_press_client || _board->get_screen_power().get_state() == ScreenPower::State::Off) {
+        return;
+    }
+
+    _press_client->keep_open(KEEP_OPEN_PATH);
+
+    if (_press_client->is_connected()) {
+        _api_client->keep_open(KEEP_OPEN_PATH);
+    }
 }
 
 // The first view is up and the backend's first connections are made: the event stream is

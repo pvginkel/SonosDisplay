@@ -73,12 +73,14 @@ public:
 protected:
     void do_begin() override;
     void do_configuration_loaded(cJSON* data) override;
+    void do_network_available() override;
     void do_ready() override;
     void do_process() override;
 
 private:
     void run();
     void begin_backend();
+    void keep_connections_open();
     void load_speaker_choice();
     void load_motion_setting();
     void speakers_answered(HttpResponse&& response);

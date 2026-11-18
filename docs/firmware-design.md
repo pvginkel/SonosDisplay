@@ -651,8 +651,59 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
 - **One task per client, one request at a time, in the order sent.** `send` puts the request on
   the client's queue (16 deep), and answers it as failed when the queue is full. The task keeps
   one `esp_http_client` handle with keep-alive and reuses it; after a transport error it destroys
-  the handle and makes a new one. A connection idle for more than 1.5 seconds is closed before the
-  next request: a server that closed it first would fail that request, and only a GET is retried.
+  the handle and makes a new one.
+- **A connection stays open for 50 seconds idle, and the client then closes it itself**
+  (`HttpClient::KEEP_ALIVE_IDLE_MS`). A new connection cost about 2.5 seconds of a typical
+  2.7-second press on the first display, and a press on a kept one 0.14 seconds (SDSP-7). Until
+  2026-11-18 the limit was 1.5 seconds, so nearly every press after a pause paid a handshake. The
+  backend's nginx closes a connection idle for 65 seconds: its default `keepalive_timeout`, which
+  nothing in the deploy sets, measured from a pod on 2026-11-18 (65.0 seconds twice, then its
+  FIN). The rule is that nothing is sent on a connection the server may have closed: the request
+  would fail, and a press is never sent twice, so it would be lost. The 15 seconds between are
+  the most the idle time the display counts can fall short of nginx's: the last answer's way to
+  the display and the next request's way to nginx, each bounded by the 5-second timeout, and the
+  task's wake-up. Past 50 seconds the next request opens a new connection, which costs a
+  handshake and nothing else. A connection nginx closed sooner, as it closes its idle ones when
+  it reloads, is found before a request goes on it: the socket is peeked, and a byte, its end or
+  an error closes it first. One the server closes while a request is on its way fails that
+  request, as any transport error does. An answer with `Connection: close` closes it too.
+- **The press's and the API's connections are kept open while the screen is awake.** From the
+  moment motion or a touch wakes it until it goes dark, every pass of the UI task asks the two
+  clients to keep their connections open (`HttpClient::keep_open`). A client with no connection,
+  or with one idle for 40 seconds, sends `GET /health/healthz`, the backend's liveness check,
+  which reaches neither Sonos nor Plex and answers 32 bytes, and drops the answer; it sends
+  nothing while a request waits or is under way, and no second check within 10 seconds of one, so
+  a backend that is down is not asked in a loop. The press client goes first, as the screen
+  wakes: the motion sensor lights it before a hand reaches it, and the handshake is made
+  meanwhile. The API client follows once the press's connection is open, so the two handshakes do
+  not share the CPU and the link; it carries the next list a hand opens. The artwork client is
+  not kept open: a cover that comes later is no press that waits, and the covers asked for in the
+  dark are fetched as the screen wakes, which opens its connection anyway. In the dark the checks
+  stop and every connection closes after 50 seconds idle, which frees its TLS state too. The
+  price is one short request per client every 40 seconds while the screen is lit.
+- **A new connection resumes the client's last TLS session** where nginx still holds it
+  (`save_client_session`, `CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS`). The resumed handshake checks
+  no certificate and makes no key exchange, both done in software on the S3 for the backend's
+  ECDSA P-256 chain, and takes one round trip fewer. From a pod, nginx resumed TLS 1.2 sessions by
+  ticket and by session id, also after 70 seconds idle; its `ssl_session_timeout` is 10 minutes.
+  So it pays for a connection that lapsed while the screen was lit or briefly dark, not for the
+  first after a long dark spell, and it costs a Kconfig line and a few hundred bytes a client. The
+  session is kept with the handle and goes with it after a transport error. The peer's
+  certificate is not kept after the handshake (`CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE` off):
+  nothing reads it then, and every open connection and kept session would hold a copy in internal
+  RAM (section 7).
+- **WiFi modem power save is off**, set with `esp_wifi_set_ps(WIFI_PS_NONE)` once the network is
+  up. In modem sleep, ESP-IDF's default, the access point holds each frame for the display until
+  its next beacon, about 100 ms at DTIM 1, so every round trip of a handshake and every answer can
+  wait that long; the first display logged `pm start, type: 1` and lost beacons at RSSI −73. With
+  it off the radio listens all the time. That costs current, and the display runs on mains power;
+  it adds no traffic. The operator's boards carry a capacitor against brown-out (section 3), and
+  the one brown-out reset the first display logged, on 2026-11-16, followed half an hour in which
+  it logged nothing: a power-on. The backlight's switching rule is unchanged.
+- **Every request is logged** with its method, path, status and time, and whether it went on a
+  new connection, with the time to open it, or on a kept one, with how long it had been idle; a
+  failure with its error. With the app's "Sending" lines they time a press on the display's log
+  alone.
 - **Three clients.** `backend_press` carries every press: transport commands, changes of the
   volume and of groups, the queue's play, shuffle, add and clear, and the favourites' marks and
   unmarks. `backend_api` carries every fetch of the backend's state and of its lists.
@@ -1445,6 +1496,15 @@ The halt before a restart (section 1) is the remedy, from `846062f`. What only a
 it is still to see there: the restart that installs the release after `846062f`, which should read
 raw reason 12 at the next boot, with "The run before's restart halted the scan-out" and how the
 data cache's preload ended.
+
+What only a display shows of the connections kept open (section 4, SDSP-7) is still to see
+there: a press's time from its "Sending" line to its answer on a kept connection; the checks that
+keep the press's and the API's connections open while the screen is lit, and the closes after 50
+seconds idle in the dark; how long a new connection takes to open, resumed and not, with WiFi
+power save off; whether the picture's shift in use changes with power save off; and free internal
+RAM with those connections and the largest list open, against the 60 KB target. The firmware
+before it already held every client's last connection until its next request, so the connections
+add little to what that firmware's minimum of 62,451 bytes on 2026-11-18 holds.
 
 What only a display shows of the library's headings and of the covers kept is still to see there:
 a press on a track's line, which should replace the queue with the whole album and start at that

@@ -55,3 +55,10 @@ CONFIG_MQTT_TOPIC_PREFIX="pieter"
 CONFIG_MQTT_DEVICE_MANUFACTURER="Pieter"
 CONFIG_MQTT_DEVICE_MODEL="Sonos Display"
 CONFIG_MQTT_DEVICE_MODEL_ID="Sonos Display v1"
+
+# TLS to the backend (docs/firmware-design.md, section 4). HttpClient keeps each connection's TLS
+# session and resumes it on the next connection, which the backend's nginx allows by ticket. The
+# peer's certificate is checked in the handshake and not kept after it: nothing reads it later,
+# and every open connection and kept session would hold a copy in internal RAM.
+CONFIG_ESP_TLS_CLIENT_SESSION_TICKETS=y
+# CONFIG_MBEDTLS_SSL_KEEP_PEER_CERTIFICATE is not set
