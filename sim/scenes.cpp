@@ -3881,6 +3881,7 @@ static void bar(SimHost& host, Shell& shell) {
         {ARTWORK_PLAYING, COVER_SIZE},
     };
     expect(host.get_artwork_fetches() == fetches, "the bar's cover was not fetched once, at the bar's size");
+    expect(host.get_card_reads() == fetches, "the bar's cover was read from the card: the cache did not have it");
 
     static constexpr uint8_t WITNESSED_HEADER[] = {0x19, 0x12, 0, 0, 0x50, 0, 0x50, 0, 0xA0, 0, 0, 0};
     const auto cover = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
