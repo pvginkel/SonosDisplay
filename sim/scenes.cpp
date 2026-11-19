@@ -3639,6 +3639,9 @@ static const char* check_cover_change(const SimHost& host, const Shell& shell) {
     if (host.get_card_reads() != fetches) {
         return "a cover the cache has was read from the card";
     }
+    if (host.get_card_writes() != fetches) {
+        return "a download was not handed to the card to keep";
+    }
 
     return check_cover(host, shell);
 }
