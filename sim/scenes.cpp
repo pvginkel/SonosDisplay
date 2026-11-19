@@ -2456,11 +2456,12 @@ static void expect_one_image_for_two_requests() {
     expect(images[0] && images[0] == images[1], "two requests for one image did not get the same one");
 
     request(images[2]);
-    expect(images[2] == images[0] && host.get_artwork_fetches().size() == 1, "a cached image was fetched again");
+    expect(images[2] == images[0] && host.get_artwork_fetches().size() == 1 && host.get_card_reads().size() == 1,
+           "a cached image was fetched again, or read from the card");
 }
 
 // With the cache full of covers that are on screen, one more is fetched and not kept: its asker is
-// told there is none.
+// told there is none. The card keeps it, and gives it once the cache has room.
 static void expect_no_cover_beside_a_full_screen() {
     SimHost host;
 
@@ -2489,6 +2490,8 @@ static void expect_no_cover_beside_a_full_screen() {
     images[0].reset();
     request("e");
     expect(images.back() != nullptr && !host.is_artwork_shown("a", COVER_SIZE), "a cover off screen was not freed");
+    expect(host.get_artwork_fetches().size() == 5 && host.get_card_reads().back() == ArtworkFetch{"e", COVER_SIZE},
+           "a cover the cache had no room for was downloaded again, with the card holding it");
 }
 
 // A view that closes takes its request with it: the cover that comes after it is never handed to
@@ -3014,12 +3017,13 @@ static bool is_picture(const Artwork& image, const std::string& artwork_id, int3
            !memcmp(image->data, body.data() + HEADER_LENGTH, image->data_size);
 }
 
+// ARTWORK_PLAYING in another case: another picture, which FAT's names would take for the same.
+static const char OTHER_CASE[] = "yXJ0d29yay9zdmVmbg";
+
 // Memory first, then the card, then the network. A display that starts over a card draws the
 // picture the card holds with no request to the backend, asks the card once, and downloads only
 // what the card lacks: the same id at another size or in another case is another picture.
 static void expect_card_before_the_network() {
-    static const char OTHER_CASE[] = "yXJ0d29yay9zdmVmbg";
-
     CardFolder folder;
     put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
 
@@ -3212,8 +3216,8 @@ static void expect_no_read_nobody_waits_for() {
 }
 
 // What the card gives back is checked as a download is before a view draws it. A picture that
-// fails is erased from the card, so that it is kept again, and downloaded; so is one whose file is
-// not what the store wrote.
+// fails is erased from the card and downloaded, and the download is kept in its place; so is one
+// whose file is not what the store wrote.
 static void expect_a_card_picture_is_checked() {
     const auto good = SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE);
 
@@ -3229,7 +3233,7 @@ static void expect_a_card_picture_is_checked() {
         {},
     };
 
-    const auto expect_downloaded = [](const std::string& folder, const std::string& path, const char* what) {
+    const auto expect_downloaded = [&good](const std::string& folder, const char* what) {
         SimHost host(folder);
         ArtworkAsker view{host};
 
@@ -3238,14 +3242,19 @@ static void expect_a_card_picture_is_checked() {
         const std::vector<ArtworkFetch> fetches = {{ARTWORK_PLAYING, COVER_SIZE}};
         expect(host.get_card_reads().size() == 1 && host.get_artwork_fetches() == fetches,
                "a picture the card could not give was not downloaded once, after the card was asked");
-        expect(!is_there(path), "a file that gave no picture to draw stayed on the card");
+
+        CardStore card(folder);
+        card.store.begin();
+        expect(host.get_card_writes() == fetches && holds(card.store, ARTWORK_PLAYING, COVER_SIZE, good) &&
+                   count_files(folder) == 1,
+               "a file that gave no picture to draw stayed on the card, or the download did not take its place");
     };
 
     for (const auto& body : damaged) {
         CardFolder folder;
-        const auto path = put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, body);
+        put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, body);
 
-        expect_downloaded(folder.get_path(), path, "a picture of the card's that fails a download's checks was drawn");
+        expect_downloaded(folder.get_path(), "a picture of the card's that fails a download's checks was drawn");
     }
 
     CardFolder folder;
@@ -3254,7 +3263,187 @@ static void expect_a_card_picture_is_checked() {
     file.back() ^= 1;
     write_file(path, file);
 
-    expect_downloaded(folder.get_path(), path, "a picture whose CRC does not match was drawn");
+    expect_downloaded(folder.get_path(), "a picture whose CRC does not match was drawn");
+}
+
+// A download is handed to its view at once and kept on the card as it came, once. A display that
+// starts over that card, as after a restart, draws each of those pictures with no request to the
+// backend, and writes none of them again: a size and a case of an id each have their own.
+static void expect_a_restart_keeps_the_card() {
+    const std::vector<ArtworkFetch> pictures = {
+        {ARTWORK_PLAYING, COVER_SIZE},
+        {ARTWORK_PLAYING, BAR_COVER_SIZE},
+        {OTHER_CASE, COVER_SIZE},
+    };
+
+    CardFolder folder;
+
+    {
+        SimHost host(folder.get_path());
+        host.hold_card_writes();
+        ArtworkAsker view{host};
+
+        for (const auto& picture : pictures) {
+            view.ask(picture.artwork_id, picture.size);
+            expect(is_picture(view.image, picture.artwork_id, picture.size),
+                   "a download waited for the card before it was handed over");
+        }
+        expect(host.get_artwork_fetches() == pictures && host.get_card_writes() == pictures,
+               "each download was not handed to the card once");
+        expect(count_files(folder.get_path()) == 0, "a picture was written before the card's turn");
+
+        for (size_t i = 0; i < pictures.size(); i++) {
+            host.write_card();
+        }
+        expect(host.get_card_bytes_waiting() == 0, "a picture written still counts as waiting to be written");
+
+        // From the cache, which hands nothing to the card.
+        view.ask(ARTWORK_PLAYING);
+        expect(view.told == 4 && host.get_card_writes().size() == 3, "a picture the cache has was handed to the card");
+
+        CardStore card(folder.get_path());
+        card.store.begin();
+        for (const auto& picture : pictures) {
+            expect(holds(card.store, picture.artwork_id, picture.size,
+                         SimHost::make_artwork(picture.artwork_id, picture.size)),
+                   "a download was not kept on the card as it came");
+        }
+        expect(count_files(folder.get_path()) == 3, "the card holds something else than the pictures downloaded");
+    }
+
+    SimHost restarted(folder.get_path());
+    ArtworkAsker view{restarted};
+
+    for (const auto& picture : pictures) {
+        view.ask(picture.artwork_id, picture.size);
+        expect(is_picture(view.image, picture.artwork_id, picture.size),
+               "a picture downloaded before a restart was not drawn from the card after it");
+    }
+    expect(restarted.get_artwork_fetches().empty(),
+           "the backend was asked for a picture that was downloaded before a restart");
+    expect(restarted.get_card_reads() == pictures && restarted.get_card_writes().empty() && view.told == 3,
+           "a picture read from the card was handed to it to write again");
+}
+
+// A picture the card holds is not written to it again. One whose read was lost is downloaded, as
+// one the card lacks, and the card keeps the file it has.
+static void expect_no_second_write_of_a_picture() {
+    // Other pixels than the backend answers for the id, so a second write would show.
+    const auto kept = SimHost::make_artwork(ARTWORK_PAUSED, COVER_SIZE);
+
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, kept);
+
+    SimHost host(folder.get_path());
+    host.hold_card();
+    ArtworkAsker view{host};
+
+    view.ask(ARTWORK_PLAYING);
+    host.drop_card_read();
+    host.process();
+    expect(is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE) && host.get_artwork_fetches().size() == 1,
+           "a picture whose read was lost was not downloaded");
+
+    CardStore card(folder.get_path());
+    card.store.begin();
+    expect(holds(card.store, ARTWORK_PLAYING, COVER_SIZE, kept) && count_files(folder.get_path()) == 1,
+           "a picture the card holds was written to it again");
+    expect(host.get_card_bytes_waiting() == 0, "a picture the card held already still counts as waiting to be written");
+}
+
+// What waits to be written to the card is bounded. A download that does not fit beside it is
+// handed to its view and left off the card, and is downloaded again after a restart; a picture
+// written, or let go of unwritten, makes room for the next.
+static void expect_unwritten_pictures_are_bounded() {
+    static constexpr size_t COVER_BYTES = 320012;
+    static constexpr size_t BAR_COVER_BYTES = 12812;
+
+    CardFolder folder;
+
+    {
+        SimHost host(folder.get_path());
+        host.hold_card_writes();
+        ArtworkAsker view{host};
+
+        // Two covers and a bar's cover fit; another bar's cover and a third cover do not.
+        view.ask("a");
+        view.ask("b");
+        view.ask("a", BAR_COVER_SIZE);
+        expect(host.get_card_bytes_waiting() == 2 * COVER_BYTES + BAR_COVER_BYTES && !host.count_artwork_unwritten(),
+               "what fits the limit does not wait to be written");
+
+        view.ask("b", BAR_COVER_SIZE);
+        expect(is_picture(view.image, "b", BAR_COVER_SIZE), "a picture left off the card was not handed to its view");
+        view.ask("c");
+        expect(is_picture(view.image, "c", COVER_SIZE), "a picture left off the card was not handed to its view");
+
+        const std::vector<ArtworkFetch> waiting = {{"a", COVER_SIZE}, {"b", COVER_SIZE}, {"a", BAR_COVER_SIZE}};
+        expect(host.get_card_writes() == waiting && host.count_artwork_unwritten() == 2,
+               "a picture that does not fit what may wait to be written was handed to the card");
+        expect(host.get_card_bytes_waiting() == 2 * COVER_BYTES + BAR_COVER_BYTES &&
+                   host.get_card_bytes_waiting() <= ArtworkLoader::MAX_UNWRITTEN_BYTES,
+               "more waits to be written than the limit");
+
+        // The first is written: the next cover has room.
+        host.write_card();
+        expect(host.get_card_bytes_waiting() == COVER_BYTES + BAR_COVER_BYTES,
+               "a picture written still counts as waiting to be written");
+        view.ask("d");
+        expect(host.get_card_writes().size() == 4 && host.get_card_writes().back() == ArtworkFetch{"d", COVER_SIZE},
+               "a picture was left off the card with room among what waits");
+
+        // What waits is let go of unwritten: its room is free again.
+        host.drop_card_writes();
+        expect(host.get_card_bytes_waiting() == 0, "a picture let go of still counts as waiting to be written");
+        view.ask("e", BAR_COVER_SIZE);
+        host.write_card();
+        expect(host.get_card_writes().size() == 5 && count_files(folder.get_path()) == 2 && view.told == 7 &&
+                   !view.refused && host.count_artwork_unwritten() == 2,
+               "the card did not keep the two pictures it was given the time to write");
+    }
+
+    SimHost restarted(folder.get_path());
+    ArtworkAsker view{restarted};
+
+    view.ask("a");
+    view.ask("e", BAR_COVER_SIZE);
+    expect(view.told == 2 && !view.refused && restarted.get_artwork_fetches().empty(),
+           "a picture written before a restart was downloaded after it");
+
+    view.ask("c");
+    view.ask("b", BAR_COVER_SIZE);
+    const std::vector<ArtworkFetch> left_off = {{"c", COVER_SIZE}, {"b", BAR_COVER_SIZE}};
+    expect(restarted.get_artwork_fetches() == left_off && restarted.get_card_writes() == left_off &&
+               count_files(folder.get_path()) == 4,
+           "a picture left off the card was not downloaded again and kept the next time");
+}
+
+// A full card takes no writes: the write that finds it full is the last one the card is handed,
+// each download is still handed to its view, and what the card holds is still read.
+static void expect_no_write_to_a_full_card() {
+    CardFolder folder;
+    put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
+
+    SimHost host(folder.get_path());
+    ArtworkAsker view{host};
+
+    // Linux has a file that every write finds full, as FAT's does.
+    std::filesystem::create_symlink("/dev/full", CardStore(folder.get_path()).store.get_temporary_path());
+
+    view.ask(ARTWORK_PAUSED);
+    expect(is_picture(view.image, ARTWORK_PAUSED, COVER_SIZE), "a download was not handed over with the card full");
+    expect(host.get_card_writes() == std::vector<ArtworkFetch>{{ARTWORK_PAUSED, COVER_SIZE}},
+           "the card was not handed a picture before it was known to be full");
+
+    view.ask(ARTWORK_PAUSED, BAR_COVER_SIZE);
+    expect(is_picture(view.image, ARTWORK_PAUSED, BAR_COVER_SIZE), "a download was not handed over with the card full");
+    expect(host.get_card_writes().size() == 1 && !host.count_artwork_unwritten() && !host.get_card_bytes_waiting(),
+           "a full card was handed a picture to write");
+
+    view.ask(ARTWORK_PLAYING);
+    expect(is_picture(view.image, ARTWORK_PLAYING, COVER_SIZE) && host.get_artwork_fetches().size() == 2,
+           "a full card was not read");
+    expect(count_files(folder.get_path()) == 1, "a full card holds more than it did, or the temporary file stayed");
 }
 
 // Without a card, with a card that failed before the display started, and once a card fails while
@@ -3289,6 +3478,7 @@ static void expect_downloads_without_a_card() {
                    host.get_artwork_fetches().size() == 1,
                "a picture was not downloaded with the card off");
         expect(host.get_card_reads().empty(), "a card that is off was asked for a picture");
+        expect(host.get_card_writes().empty(), "a card that is off was handed a picture to write");
     }
 
     CardFolder folder;
@@ -3317,6 +3507,7 @@ static void expect_downloads_without_a_card() {
            "a picture was not downloaded once the card had failed");
     expect(host.get_card_reads() == std::vector<ArtworkFetch>{{ARTWORK_PAUSED, COVER_SIZE}},
            "a card that failed was asked for another picture");
+    expect(host.get_card_writes().empty(), "a card that failed was handed a picture to write");
 }
 
 // Another track, with another cover: the placeholder shows while the cover is on its way, a cover
@@ -3343,6 +3534,10 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect_no_read_nobody_waits_for();
     expect_a_card_picture_is_checked();
     expect_downloads_without_a_card();
+    expect_a_restart_keeps_the_card();
+    expect_no_second_write_of_a_picture();
+    expect_unwritten_pictures_are_bounded();
+    expect_no_write_to_a_full_card();
 
     open_now_playing(host, shell, PLAYING);
     expect(host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE), "the playing track's cover is not shown");
@@ -3367,7 +3562,8 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
 
     // Back on the first track: its cover is in the cache.
     expect(!shown(PLAYING), "a cover the display has was not shown at once");
-    expect(host.get_artwork_fetches().size() == 3, "a cover the display has was fetched again");
+    expect(host.get_artwork_fetches().size() == 3 && host.get_card_reads().size() == 3,
+           "a cover the display has was fetched again, or read from the card");
 
     // A failure hides the cover with the track, and the next answer brings both back.
     host.answer_playback(502, ERROR_SPEAKER);
@@ -3388,6 +3584,9 @@ static const char* check_cover_change(const SimHost& host, const Shell& shell) {
     };
     if (host.get_artwork_fetches() != fetches) {
         return "the covers were not fetched as the tracks changed";
+    }
+    if (host.get_card_reads() != fetches) {
+        return "a cover the cache has was read from the card";
     }
 
     return check_cover(host, shell);
@@ -3460,6 +3659,7 @@ static void now_playing_cover_refused(SimHost& host, Shell& shell) {
     shell.update();
     expect(fetched() == 2 && !host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE),
            "an image that fails its checks is shown, or was asked for again with nothing changed");
+    expect(host.get_card_writes().empty(), "an image that fails its checks was handed to the card");
 
     // The backend out of reach: the next change of what plays asked again, to no avail.
     host.set_artwork_reachable(false);
@@ -3486,6 +3686,9 @@ static const char* check_cover_refused(const SimHost& host, const Shell& shell) 
     };
     if (host.get_artwork_fetches() != fetches) {
         return "the covers were not asked for as the tracks changed";
+    }
+    if (host.get_card_writes() != std::vector<ArtworkFetch>{{ARTWORK_PLAYING, COVER_SIZE}}) {
+        return "the card was not handed the one cover that passed its checks, and no other answer";
     }
     if (host.is_artwork_shown(ARTWORK_PLAYING, COVER_SIZE) || host.is_artwork_shown(ARTWORK_PAUSED, COVER_SIZE)) {
         return "a cover is shown for a track whose picture the backend did not give";
@@ -3597,6 +3800,9 @@ static const char* check_cover_kept(const SimHost& host, const Shell& shell) {
     };
     if (host.get_artwork_fetches() != fetches) {
         return "the cover kept was downloaded again";
+    }
+    if (host.get_card_reads() != fetches) {
+        return "the cover kept was read from the card: the cache did not have it";
     }
 
     return check_now_playing(host, shell);
@@ -3940,6 +4146,9 @@ static const char* check_bar_cover_change(const SimHost& host, const Shell& shel
     };
     if (host.get_artwork_fetches() != fetches) {
         return "the covers were not fetched as the track changed under the bar";
+    }
+    if (host.get_card_reads() != fetches) {
+        return "the bar's cover was read from the card when it showed again: the cache did not have it";
     }
 
     return check_bar(host, shell);

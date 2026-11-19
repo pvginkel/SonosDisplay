@@ -3,7 +3,8 @@
 // The artwork the views ask for. The backend prepares it in the form LVGL draws, so the display
 // decodes nothing: an answer is checked where it enters and drawn from its bytes as they arrived.
 // What was fetched is kept by id and size, within a limit, in memory, and behind that on the
-// host's card, where it has one. Nothing is read or fetched while the screen is dark.
+// host's card, where it has one, which is handed every picture downloaded. Nothing is read or
+// fetched while the screen is dark.
 //
 // It includes LVGL, the C++ standard library and ui/UiHost.h only, so sim/ builds it too and its
 // scenes get their artwork the way the device does.
@@ -90,6 +91,18 @@ struct ArtworkRead {
     std::shared_ptr<void> held;
 };
 
+// A picture at a size that the loader has the host write to its card: the bytes as the backend
+// answered them. The host holds the write, and with it the picture's bytes, until the card has the
+// picture or cannot keep it, and then lets go of it; the loader reads from `held` what still waits.
+struct ArtworkWrite {
+    std::string artwork_id;
+    int32_t size{};
+    ArtworkBody body;
+    size_t length{};
+    // Lives for as long as the host holds a copy of the write.
+    std::shared_ptr<void> held;
+};
+
 // The card the host keeps pictures on, which outlives a restart. The loader calls it on the UI
 // task.
 class ArtworkCard {
@@ -99,9 +112,16 @@ public:
     // Whether the card reads pictures: one that is not there, or that failed, does not.
     virtual bool is_on() const = 0;
 
+    // Whether the card takes pictures to keep: one that is off, or full, does not.
+    virtual bool is_writable() const = 0;
+
     // Reads a picture. The host hands what the card has of it to ArtworkLoader::card_answered(),
     // before this returns or later.
     virtual void read(ArtworkRead&& read) = 0;
+
+    // Keeps a picture, before this returns or later. A picture the card holds is not written
+    // again.
+    virtual void write(ArtworkWrite&& write) = 0;
 
     // Deletes the card's file of a picture, where it has one. The card keeps a picture it holds as
     // it is, so one that is not fit to draw goes before the picture is kept again.
@@ -115,6 +135,9 @@ struct ArtworkOutcome {
     // How many views it was handed to: none once every view that asked is gone or wants another
     // picture.
     size_t handed;
+    // Whether a download that passed its checks was left off a card that takes pictures: too much
+    // waits to be written there. The picture is downloaded again the next time.
+    bool write_dropped;
 };
 
 // Answers the views' requests for artwork from the cache, then from the host's card, then from the
@@ -123,10 +146,17 @@ struct ArtworkOutcome {
 // to start, waits with it: no picture at a size is read or downloaded twice at once. A read or a
 // download that has not started when no view wants it any longer is not made; one under way is
 // taken to its end and its image kept, whether or not a view still waits for it. Without a card,
-// or with one that is off, every picture is downloaded. Runs on the UI task.
+// or with one that is off, every picture is downloaded. A download that passes its checks is also
+// handed to a card that takes pictures, to be written there, for as long as what waits to be
+// written stays within a limit. Runs on the UI task.
 class ArtworkLoader {
 public:
     using Fetch = std::function<void(ArtworkDownload&&)>;
+
+    // What the pictures handed to the card and not written yet may take together: two of the
+    // now-playing screen's covers, with room left. Their bytes stay in memory until they are
+    // written, whether or not the cache still holds them.
+    static constexpr size_t MAX_UNWRITTEN_BYTES = 640 * 1024;
 
 private:
     // A picture at a size that is not here yet, and the views' requests that wait for it.
@@ -134,6 +164,13 @@ private:
         std::string artwork_id;
         int32_t size;
         std::vector<ArtworkRequest> waiting;
+    };
+
+    // A picture of `bytes` bytes handed to the card to write.
+    struct Unwritten {
+        size_t bytes;
+        // Expires once the host lets go of the write.
+        std::weak_ptr<void> held;
     };
 
     Fetch _fetch;
@@ -150,6 +187,8 @@ private:
     std::optional<Pending> _current;
     // Expires once the host lets go of _current's download.
     std::weak_ptr<void> _current_held;
+    // The pictures handed to the card to write, each until the host lets go of it.
+    std::vector<Unwritten> _unwritten;
 
 public:
     // `card` is nullptr where the host has no card.
@@ -178,7 +217,8 @@ public:
 
     // The backend's answer to the download under way, which the host hands over whether or not a
     // view still waits for it. An image that passes its checks and fits the cache is kept, and
-    // handed to the views that still wait for it; any other answer hands them nullptr.
+    // handed to the views that still wait for it; any other answer hands them nullptr. One that
+    // passes its checks is handed to the card too, whether or not it fits the cache.
     ArtworkOutcome answered(int status, ArtworkBody body, size_t length);
 
     // The backend did not answer the download under way: the views that wait for it are handed
@@ -190,9 +230,13 @@ public:
     // How many reads and downloads wait to start: for the screen, or for the one under way.
     size_t count_waiting() const { return _unread.size() + _queued.size(); }
 
+    // How many bytes of pictures the card was handed and the host has not let go of yet.
+    size_t get_unwritten_bytes() const;
+
 private:
     Pending* find(const std::string& artwork_id, int32_t size);
     void start_next();
     void forget_lost();
+    bool write_to_card(ArtworkBody body, size_t length);
     size_t finish(const Artwork& artwork);
 };

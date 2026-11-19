@@ -519,6 +519,8 @@ void SimHost::request_artwork(const std::string& artwork_id, int32_t size, std::
 
 bool SimHost::is_on() const { return _card.get_state() != ArtworkStore::State::Off; }
 
+bool SimHost::is_writable() const { return _card.get_state() == ArtworkStore::State::On; }
+
 void SimHost::read(ArtworkRead&& read) {
     _card_reads.push_back(ArtworkFetch{read.artwork_id, read.size});
 
@@ -529,7 +531,48 @@ void SimHost::read(ArtworkRead&& read) {
     }
 }
 
+void SimHost::write(ArtworkWrite&& write) {
+    _card_writes.push_back(ArtworkFetch{write.artwork_id, write.size});
+
+    if (_card_writes_held) {
+        _held_writes.push_back(std::move(write));
+    } else {
+        write_card(write);
+    }
+}
+
 void SimHost::erase(const std::string& artwork_id, int32_t size) { _card.erase(artwork_id, size); }
+
+void SimHost::write_card() {
+    if (_held_writes.empty()) {
+        return;
+    }
+
+    const auto write = std::move(_held_writes.front());
+    _held_writes.erase(_held_writes.begin());
+
+    write_card(write);
+}
+
+void SimHost::write_card(const ArtworkWrite& write) {
+    const auto before = _card.get_state();
+
+    _card.write(write.artwork_id, write.size, write.body.get(), write.length);
+
+    log_card_stopped(before);
+}
+
+// Says what the card stopped doing since it was in the state `before`: nothing where it is in that
+// state still.
+void SimHost::log_card_stopped(ArtworkStore::State before) const {
+    const auto state = _card.get_state();
+    if (state == before) {
+        return;
+    }
+
+    printf("W (SimHost) The card is %s: %s failed with errno %d\n", state == ArtworkStore::State::Full ? "full" : "off",
+           _card.get_fault().doing, _card.get_fault().error);
+}
 
 void SimHost::answer_card() {
     if (!_held_read) {
@@ -543,16 +586,13 @@ void SimHost::answer_card() {
 }
 
 void SimHost::answer_card(const ArtworkRead& read) {
-    const auto was_on = is_on();
+    const auto before = _card.get_state();
 
     auto picture = _card.read(read.artwork_id, read.size);
     if (picture.problem) {
         printf("W (SimHost) The card has no artwork at %d px to hand over: %s\n", int(read.size), picture.problem);
     }
-    if (was_on && !is_on()) {
-        printf("W (SimHost) The card is off: %s failed with errno %d\n", _card.get_fault().doing,
-               _card.get_fault().error);
-    }
+    log_card_stopped(before);
 
     const auto outcome = _artwork.card_answered(std::move(picture.body), picture.length);
     if (outcome.problem) {
@@ -596,6 +636,12 @@ void SimHost::answer_artwork(const ArtworkDownload& download) {
         printf("W (SimHost) GET artwork at %d px answered %d, %s\n", int(download.size), status, outcome.problem);
     } else if (!outcome.handed) {
         _artwork_unwaited++;
+    }
+    if (outcome.write_dropped) {
+        _artwork_unwritten++;
+
+        printf("W (SimHost) Artwork at %d px is not kept on the card: %zu bytes wait to be written there\n",
+               int(download.size), _artwork.get_unwritten_bytes());
     }
 }
 

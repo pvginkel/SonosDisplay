@@ -280,6 +280,10 @@ private:
     std::vector<ArtworkFetch> _card_reads;
     bool _card_held{};
     std::optional<ArtworkRead> _held_read;
+    std::vector<ArtworkFetch> _card_writes;
+    bool _card_writes_held{};
+    // The oldest first.
+    std::vector<ArtworkWrite> _held_writes;
     ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }, this};
     std::vector<ArtworkFetch> _artwork_fetches;
     std::optional<ArtworkAnswer> _artwork_answer;
@@ -288,6 +292,7 @@ private:
     bool _screen_lit{true};
     std::optional<ArtworkDownload> _held_artwork;
     size_t _artwork_unwaited{};
+    size_t _artwork_unwritten{};
     ListFixture<Artist> _artists{"artists", read_artists};
     ListFixture<Album> _albums{"albums", read_albums};
     ListFixture<AlbumTrack> _tracks{"tracks", read_tracks};
@@ -564,6 +569,24 @@ public:
     // The artwork the card was asked for, in order: what the cache had is not in it.
     const std::vector<ArtworkFetch>& get_card_reads() const { return _card_reads; }
 
+    // From here on a picture handed to the card waits to be written until write_card().
+    void hold_card_writes() { _card_writes_held = true; }
+
+    // Writes the oldest picture that waits to the card, if one waits, and lets go of it.
+    void write_card();
+
+    // Lets go of every picture that waits to be written, with none of them written.
+    void drop_card_writes() { _held_writes.clear(); }
+
+    // The artwork handed to the card to write, in order, whether or not the card kept it.
+    const std::vector<ArtworkFetch>& get_card_writes() const { return _card_writes; }
+
+    // How many bytes of pictures wait to be written to the card.
+    size_t get_card_bytes_waiting() const { return _artwork.get_unwritten_bytes(); }
+
+    // How many downloads were left off the card for what waited to be written there.
+    size_t count_artwork_unwritten() const { return _artwork_unwritten; }
+
     // How many answers to requests for artwork came with no view waiting for them any more, which
     // the device logs.
     size_t count_artwork_unwaited() const { return _artwork_unwaited; }
@@ -605,7 +628,9 @@ private:
 
     // The loader's card: the store over the host's folder.
     bool is_on() const override;
+    bool is_writable() const override;
     void read(ArtworkRead&& read) override;
+    void write(ArtworkWrite&& write) override;
     void erase(const std::string& artwork_id, int32_t size) override;
 
     void command_answered(uint32_t id, Command command, int status, const char* body);
@@ -618,4 +643,6 @@ private:
     void fetch_artwork(ArtworkDownload&& download);
     void answer_artwork(const ArtworkDownload& download);
     void answer_card(const ArtworkRead& read);
+    void write_card(const ArtworkWrite& write);
+    void log_card_stopped(ArtworkStore::State before) const;
 };

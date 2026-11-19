@@ -189,7 +189,7 @@ ArtworkOutcome ArtworkLoader::card_answered(ArtworkBody body, size_t length) {
 
         start_next();
 
-        return ArtworkOutcome{.problem = problem, .handed = 0};
+        return ArtworkOutcome{.problem = problem, .handed = 0, .write_dropped = false};
     }
 
     if (!_cache.add(read.artwork_id, read.size, artwork, length)) {
@@ -202,29 +202,45 @@ ArtworkOutcome ArtworkLoader::card_answered(ArtworkBody body, size_t length) {
 
     start_next();
 
-    return ArtworkOutcome{.problem = problem, .handed = handed};
+    return ArtworkOutcome{.problem = problem, .handed = handed, .write_dropped = false};
 }
 
 ArtworkOutcome ArtworkLoader::answered(int status, ArtworkBody body, size_t length) {
     Artwork artwork;
-    auto problem = read_artwork(status, std::move(body), length, _current->size, artwork);
+    auto problem = read_artwork(status, body, length, _current->size, artwork);
+    auto write_dropped = false;
 
-    if (!problem && !_cache.add(_current->artwork_id, _current->size, artwork, length)) {
-        problem = "the image does not fit the cache beside what is on screen";
-        artwork.reset();
+    if (!problem) {
+        write_dropped = !write_to_card(std::move(body), length);
+
+        if (!_cache.add(_current->artwork_id, _current->size, artwork, length)) {
+            problem = "the image does not fit the cache beside what is on screen";
+            artwork.reset();
+        }
     }
 
     const auto handed = finish(artwork);
 
     start_next();
 
-    return ArtworkOutcome{.problem = problem, .handed = handed};
+    return ArtworkOutcome{.problem = problem, .handed = handed, .write_dropped = write_dropped};
 }
 
 void ArtworkLoader::unanswered() {
     finish(nullptr);
 
     start_next();
+}
+
+size_t ArtworkLoader::get_unwritten_bytes() const {
+    size_t bytes = 0;
+    for (const auto& unwritten : _unwritten) {
+        if (!unwritten.held.expired()) {
+            bytes += unwritten.bytes;
+        }
+    }
+
+    return bytes;
 }
 
 ArtworkLoader::Pending* ArtworkLoader::find(const std::string& artwork_id, int32_t size) {
@@ -298,6 +314,34 @@ void ArtworkLoader::forget_lost() {
     if (_current && _current_held.expired()) {
         finish(nullptr);
     }
+}
+
+// Hands the picture of the download under way to the card. Returns false where a card that takes
+// pictures is not handed it: what waits to be written there leaves it no room.
+bool ArtworkLoader::write_to_card(ArtworkBody body, size_t length) {
+    if (!_card || !_card->is_writable()) {
+        return true;
+    }
+
+    std::erase_if(_unwritten, [](const Unwritten& unwritten) { return unwritten.held.expired(); });
+
+    if (get_unwritten_bytes() + length > MAX_UNWRITTEN_BYTES) {
+        return false;
+    }
+
+    auto held = std::make_shared<int>(0);
+    _unwritten.push_back(Unwritten{.bytes = length, .held = held});
+
+    // The host may let go of the write before this returns.
+    _card->write(ArtworkWrite{
+        .artwork_id = _current->artwork_id,
+        .size = _current->size,
+        .body = std::move(body),
+        .length = length,
+        .held = std::move(held),
+    });
+
+    return true;
 }
 
 // The download under way ends, and `artwork` goes to the views that still wait for it. A view's
