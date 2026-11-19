@@ -2869,9 +2869,9 @@ static void expect_store_clears_a_write_cut_short() {
            "the start removed more than the temporary file");
 }
 
-// A card with no room fails the write at whichever step meets it, a write of the file or the
-// making of it: the temporary file is deleted, nothing more is written, and reads carry on. The
-// store that starts next writes again.
+// A card with no room fails the write at whichever step meets it, a write of the file, the making
+// of it or the making of a picture's folder: the temporary file is deleted, nothing more is
+// written, and reads carry on. The store that starts next writes again.
 static void expect_store_stops_writing_to_a_full_card() {
     const auto first = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
     const auto second = SimHost::make_artwork(ARTWORK_PAUSED, BAR_COVER_SIZE);
@@ -2925,6 +2925,24 @@ static void expect_store_stops_writing_to_a_full_card() {
     std::filesystem::permissions(pictures, std::filesystem::perms::owner_all);
 
     expect(count_files(folder.get_path()) == 0, "a card too full to make a file on holds one");
+
+    // A picture's new folder, the step FAT is likeliest to refuse, since a folder takes a cluster
+    // of its own: with the temporary file there already, it opens, and the folder is not made. The
+    // temporary file stays, as the folder it is in takes no change; begin() removes it.
+    CardFolder crowded;
+    CardStore crowded_card(crowded.get_path());
+    crowded_card.store.begin();
+    write_file(crowded_card.store.get_temporary_path(), {});
+
+    const auto crowded_pictures = crowded.get_path() + "/art";
+    std::filesystem::permissions(crowded_pictures,
+                                 std::filesystem::perms::owner_read | std::filesystem::perms::owner_exec);
+    expect(!keeps(crowded_card.store, ARTWORK_PAUSED, BAR_COVER_SIZE, second), "a picture was kept on a full card");
+    const auto& fault = crowded_card.store.get_fault();
+    expect(crowded_card.store.get_state() == ArtworkStore::State::Full && fault.error == EACCES && fault.doing &&
+               !strcmp(fault.doing, "making a picture's folder"),
+           "a card too full to make a picture's folder on was not taken for a full one");
+    std::filesystem::permissions(crowded_pictures, std::filesystem::perms::owner_all);
 }
 
 // A card that fails turns the store off, where a miss does not: nothing is read or written after
