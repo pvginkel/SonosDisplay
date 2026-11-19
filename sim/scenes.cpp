@@ -3072,6 +3072,38 @@ static void expect_card_before_the_network() {
            "the card was not asked first for each picture the cache lacks");
 }
 
+// With the cache full of covers that are on screen, a picture the card holds is not handed over,
+// as a download would not be: its asker is told there is none, it is not downloaded, since the
+// download would not fit either, and the card keeps it.
+static void expect_no_card_picture_beside_a_full_screen() {
+    CardFolder folder;
+    const auto file = put_on_card(folder.get_path(), "e", COVER_SIZE, SimHost::make_artwork("e", COVER_SIZE));
+
+    SimHost host(folder.get_path());
+
+    const auto scope = std::make_shared<int>(0);
+    std::vector<Artwork> images;
+    bool answered = false;
+    const auto request = [&](const char* id) {
+        answered = false;
+        host.request_artwork(id, COVER_SIZE, scope, [&](Artwork artwork) {
+            answered = true;
+            images.push_back(std::move(artwork));
+        });
+    };
+
+    for (const auto id : {"a", "b", "c", "d"}) {
+        request(id);
+        expect(answered && images.back() != nullptr, "a cover that fits the cache was not handed over");
+    }
+
+    request("e");
+    expect(answered && !images.back(), "a picture of the card's was kept with the cache full of covers on screen");
+    expect(host.get_card_reads().back() == ArtworkFetch{"e", COVER_SIZE} && host.get_artwork_fetches().size() == 4,
+           "a picture the card holds was not read from it, or was downloaded");
+    expect(is_there(file), "a picture the cache had no room for was taken off the card");
+}
+
 // Nothing is read from the card while the screen is dark, and what is still wanted is read when it
 // wakes.
 static void expect_no_read_in_the_dark() {
@@ -3545,6 +3577,7 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect_store_stops_writing_to_a_full_card();
     expect_store_off_after_an_error();
     expect_card_before_the_network();
+    expect_no_card_picture_beside_a_full_screen();
     expect_no_read_in_the_dark();
     expect_one_read_for_two_requests();
     expect_no_wait_behind_a_download();
