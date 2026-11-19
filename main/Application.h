@@ -4,6 +4,7 @@
 #include <string>
 
 #include "ApplicationBase.h"
+#include "CardTask.h"
 #include "api/Artwork.h"
 #include "backend/EventStream.h"
 #include "backend/HttpClient.h"
@@ -30,7 +31,9 @@ class Application : public ApplicationBase, public UiHost {
     std::unique_ptr<HttpClient> _press_client;
     std::unique_ptr<HttpClient> _art_client;
     std::unique_ptr<EventStream> _event_stream;
-    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }, nullptr};
+    // The board's TF card, behind the artwork loader's memory cache.
+    CardTask _card;
+    ArtworkLoader _artwork{[this](ArtworkDownload&& download) { fetch_artwork(std::move(download)); }, &_card};
     // The scope of the app's own requests, which lives as long as the app.
     std::shared_ptr<void> _scope{std::make_shared<int>(0)};
     int64_t _last_memory_log_ms{};
@@ -97,6 +100,7 @@ private:
     void task_event_received(const cJSON* payload);
     void fetch_artwork(ArtworkDownload&& download);
     void artwork_answered(const ArtworkDownload& download, HttpResponse&& response);
+    void card_answered(const ArtworkRead& read, ArtworkBody body, size_t length);
     void event_received(const std::string& type, const cJSON* payload);
     bool has_settled() const;
     void model_changed() { _model.revision++; }

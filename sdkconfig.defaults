@@ -34,6 +34,12 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
+# TF card: SD over SPI. Internal RAM is the scarce one (docs/firmware-design.md, section 7), so
+# the SPI driver's interrupt handler runs from PSRAM with the rest of the code: in internal RAM,
+# ESP-IDF's default, the handler and what it calls take 8 KB.
+
+# CONFIG_SPI_MASTER_ISR_IN_IRAM is not set
+
 # LVGL: its defaults, with these changes only
 
 CONFIG_LV_COLOR_DEPTH_16=y

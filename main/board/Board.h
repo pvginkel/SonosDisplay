@@ -4,6 +4,7 @@
 #include "MotionSensor.h"
 #include "RgbPanel.h"
 #include "ScreenPower.h"
+#include "TfCard.h"
 #include "Touch.h"
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -17,6 +18,7 @@ class Board {
     ScreenPower _screen_power{&_expander, &_panel};
     Touch _touch{&_screen_power};
     MotionSensor _motion_sensor;
+    TfCard _tf_card;
     esp_err_t _touch_err{ESP_OK};
     esp_err_t _shutdown_handler_err{ESP_OK};
 
@@ -37,6 +39,10 @@ public:
 
     lv_display_t* get_display() const { return _panel.get_display(); }
     ScreenPower& get_screen_power() { return _screen_power; }
+
+    // The TF card, which begin() leaves alone: the task that uses it mounts it, so a card that is
+    // missing or fails never stops the boot.
+    TfCard& get_tf_card() { return _tf_card; }
 
 private:
     static void shut_down();

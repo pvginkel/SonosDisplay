@@ -132,8 +132,9 @@ public:
 struct ArtworkOutcome {
     // What was wrong with the answer, for the log, or nullptr.
     const char* problem;
-    // How many views it was handed to: none once every view that asked is gone or wants another
-    // picture.
+    // How many views it was handed to. None once every view that asked is gone or wants another
+    // picture, and none for a read the card had no picture to draw for: its views wait on, for
+    // the download.
     size_t handed;
     // Whether a download that passed its checks was left off a card that takes pictures: too much
     // waits to be written there. The picture is downloaded again the next time.

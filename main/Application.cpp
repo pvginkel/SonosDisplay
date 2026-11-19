@@ -40,6 +40,9 @@ static constexpr int64_t MEMORY_LOG_INTERVAL_MS = 60 * 1000;
 // A 400 px cover is 320,012 bytes, over the client's limit for an API answer.
 static constexpr size_t ARTWORK_MAX_RESPONSE = 512 * 1024;
 
+// The format artwork is asked for in, which is part of the key the card keeps a picture under.
+static constexpr char ARTWORK_FORMAT[] = "lvgl";
+
 // What a client asks to keep its connection open while the screen is awake: the backend's
 // liveness check, which reaches neither Sonos nor Plex and answers 32 bytes.
 static constexpr char KEEP_OPEN_PATH[] = "/health/healthz";
@@ -187,9 +190,20 @@ static esp_err_t write_motion_setting(bool wakes) {
     return nvs_commit(handle);
 }
 
-Application::Application(Board* board) : _board(board) {}
+Application::Application(Board* board)
+    : _board(board),
+      _card(&get_queue(), &board->get_tf_card(), ARTWORK_FORMAT,
+            [this](const ArtworkRead& read, ArtworkBody body, size_t length) {
+                card_answered(read, std::move(body), length);
+            }) {}
 
 void Application::do_begin() {
+    // The loader asks the card for nothing until it is mounted (CardTask::is_on()), so the mount
+    // starts here, ahead of the network and the first view.
+    ESP_LOGI(TAG, "Starting the card's task");
+
+    ESP_ERROR_CHECK(_card.begin());
+
     ESP_LOGI(TAG, "Starting the UI task");
 
     const auto created = xTaskCreatePinnedToCore([](void* arg) { ((Application*)arg)->run(); }, "ui",
@@ -278,6 +292,7 @@ void Application::do_ready() {
     ApplicationBase::do_ready();
 
     _board->log_state();
+    _card.log_state();
 
     if (_model.backend_url.empty()) {
         // No crash and no restart: the display says what is missing.
@@ -931,7 +946,7 @@ void Application::request_artwork(const std::string& artwork_id, int32_t size, s
 // starts a download only while a view wants it, and keeps its answer whether or not one still does.
 void Application::fetch_artwork(ArtworkDownload&& download) {
     auto path = "/api/artwork/" + encode_segment(download.artwork_id) + "?size=" + std::to_string(download.size) +
-                "&format=lvgl";
+                "&format=" + ARTWORK_FORMAT;
 
     _art_client->send(HttpRequest{.path = std::move(path), .max_response = ARTWORK_MAX_RESPONSE}, _scope,
                       [this, download = std::move(download)](HttpResponse&& response) {
@@ -954,6 +969,32 @@ void Application::artwork_answered(const ArtworkDownload& download, HttpResponse
                  int(download.size), response.length, _artwork.get_cache().get_bytes());
     } else {
         ESP_LOGI(TAG, "Artwork at %d px is in: %zu bytes, %zu in the cache", int(download.size), response.length,
+                 _artwork.get_cache().get_bytes());
+    }
+
+    if (outcome.write_dropped) {
+        ESP_LOGW(TAG, "Artwork at %d px is not kept on the card: %zu bytes wait to be written there",
+                 int(download.size), _artwork.get_unwritten_bytes());
+    }
+}
+
+// The card's answer to a read, which CardTask hands over on this task. A read the card had no
+// picture for hands it to no view and has no problem either, as a picture kept with no view
+// waiting does: its views wait on for the download, which HttpClient logs.
+void Application::card_answered(const ArtworkRead& read, ArtworkBody body, size_t length) {
+    const auto has_picture = body != nullptr;
+
+    const auto outcome = _artwork.card_answered(std::move(body), length);
+    if (outcome.problem) {
+        ESP_LOGW(TAG, "The card's artwork at %d px: %s", int(read.size), outcome.problem);
+    } else if (!has_picture) {
+        return;
+    } else if (!outcome.handed) {
+        ESP_LOGI(TAG,
+                 "The card's artwork at %d px is in with no view waiting for it, kept: %zu bytes, %zu in the cache",
+                 int(read.size), length, _artwork.get_cache().get_bytes());
+    } else {
+        ESP_LOGI(TAG, "The card's artwork at %d px is in: %zu bytes, %zu in the cache", int(read.size), length,
                  _artwork.get_cache().get_bytes());
     }
 }
@@ -1156,11 +1197,11 @@ void Application::keep_connections_open() {
 }
 
 // The first view is up and the backend's first connections are made: the event stream is
-// connected, and no client holds a request it has not answered. do_ready opens the first view as
-// it starts the backend.
+// connected, no client holds a request it has not answered, and the card no read. do_ready opens
+// the first view as it starts the backend.
 bool Application::has_settled() const {
     return _event_stream && _model.stream_state == StreamState::Connected && _api_client->is_idle() &&
-           _press_client->is_idle() && _art_client->is_idle();
+           _press_client->is_idle() && _art_client->is_idle() && _card.is_idle();
 }
 
 void Application::log_memory() {

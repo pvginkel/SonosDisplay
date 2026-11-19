@@ -8,6 +8,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_types.h"
+#include "hal/spi_types.h"
 
 // RGB panel (ST7262, 800x480 RGB565).
 
@@ -80,6 +81,18 @@ constexpr uint8_t EXPANDER_SYSTEM_ENABLE_OUTPUTS = 0x01;
 constexpr uint8_t EXPANDER_TOUCH_RESET = 1 << 1;
 constexpr uint8_t EXPANDER_BACKLIGHT = 1 << 2;
 constexpr uint8_t EXPANDER_LCD_RESET = 1 << 3;
+constexpr uint8_t EXPANDER_TF_CARD_SELECT = 1 << 4;
+
+// TF card slot: SD over SPI. Its chip select is the expander's EXIO4, active low. No expander
+// write sets that bit, so the card is selected from the first write on and the SPI slot has no
+// chip-select line: the card needs no I2C, which only the UI task touches.
+
+constexpr spi_host_device_t TF_CARD_SPI_HOST = SPI2_HOST;
+constexpr gpio_num_t TF_CARD_GPIO_MOSI = GPIO_NUM_11;
+constexpr gpio_num_t TF_CARD_GPIO_SCK = GPIO_NUM_12;
+constexpr gpio_num_t TF_CARD_GPIO_MISO = GPIO_NUM_13;
+
+static_assert(((EXPANDER_TOUCH_RESET | EXPANDER_BACKLIGHT | EXPANDER_LCD_RESET) & EXPANDER_TF_CARD_SELECT) == 0);
 
 // GT911 touch controller. It answers on one of two addresses, depending on its interrupt line at
 // power-on. Its interrupt (GPIO 4) is not used: touch is polled.

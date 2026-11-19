@@ -14,6 +14,11 @@ per display, so nothing is done there.
   boards have a capacitor added for it, and the firmware switches the backlight at most once a
   second. Nothing in the repositories records the capacitor's value or place: fit it as on the
   earlier boards.
+- **A TF card** in the board's slot, kept for this display alone. The display keeps the covers it
+  downloads on it, and draws them from it again without the network, also after a restart. A card
+  the display cannot mount is formatted, which wipes it: put in no card that holds something to
+  keep. Without a card the display works as before, and downloads each cover again after a
+  restart.
 
 ## 2. The device in IoT Support
 
