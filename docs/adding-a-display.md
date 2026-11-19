@@ -16,9 +16,9 @@ per display, so nothing is done there.
   earlier boards.
 - **A TF card** in the board's slot, kept for this display alone. The display keeps the covers it
   downloads on it, and draws them from it again without the network, also after a restart. A card
-  the display cannot mount is formatted, which wipes it: put in no card that holds something to
-  keep. Without a card the display works as before, and downloads each cover again after a
-  restart.
+  on which the display finds no file system it reads, such as an exFAT card, is formatted, which
+  wipes it: put in no card that holds something to keep. Without a card the display works all
+  the same, and downloads each cover again after a restart.
 
 ## 2. The device in IoT Support
 

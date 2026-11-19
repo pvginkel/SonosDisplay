@@ -22,7 +22,7 @@ the first display", with what the first display, flashed the same day, showed.
 | Backend address | IoT Support's device configuration, key `backendUrl`, required by the model's schema. Not a build setting. |
 | Screens without a device | `sim/`: a native build of `main/ui/` against LVGL 9.2.2 that renders every scene to an 800×480 PNG. It is the repository's `kc project test`. The Windows simulator is not carried over. |
 | Model and provisioning | Model code `sonos_display`, which is also the CMake project name. The operator creates the model and the device in IoT Support, then runs Flash device and Provision device. `scripts/upload.sh` is the two-line fetcher of the script IoT Support serves. |
-| Memory | Everything large is in PSRAM: framebuffers 1.5 MB, LVGL's heap, an artwork cache capped at 1.5 MiB, response bodies. At most 200 list rows are built at a time. Roboto as pre-rendered bitmap fonts for Basic Latin, Latin-1, Latin Extended-A and the punctuation and signs the library's titles hold. |
+| Memory | Everything large is in PSRAM: framebuffers 1.5 MB, LVGL's heap, an artwork cache capped at 1.5 MiB, response bodies. Behind the artwork cache, the board's TF card keeps the covers downloaded, across restarts. At most 200 list rows are built at a time. Roboto as pre-rendered bitmap fonts for Basic Latin, Latin-1, Latin Extended-A and the punctuation and signs the library's titles hold. |
 
 One thing in this note was the operator's to rule: registering the firmware as an architecture
 producer changes three other repositories. They ruled on 2026-11-15 that task 5 makes those
@@ -79,6 +79,7 @@ main/
   CMakeLists.txt  idf_component.yml  .clang-format  lvgl_assert.h
   main.cpp                  app_main: Board, Application, idle loop
   Application.{h,cpp}       : ApplicationBase; owns the UI task and the Shell; implements UiHost
+  CardTask.{h,cpp}          the TF card's task, the artwork loader's card (section 7)
   board/                    ESP-IDF and LVGL's driver interface; nothing above it
     BoardConfig.h           every pin, address and timing of this note, as constants
     Board.{h,cpp}           begin(), process(); owns the parts below
@@ -88,6 +89,7 @@ main/
     ScreenPower.{h,cpp}     backlight, wake and sleep (section 3)
     MotionSensor.{h,cpp}
     RunMark.{h,cpp}         how far a run got, kept across a reset (section 1)
+    TfCard.{h,cpp}          the TF card's SPI bus and its FAT at /sd (section 7)
     lv_mem_psram.c          LVGL's allocator on PSRAM (section 7)
   backend/                  ESP-IDF only; no LVGL, no app types
     HttpClient.{h,cpp}  EventStream.{h,cpp}
@@ -95,6 +97,7 @@ main/
     Answers.{h,cpp}         the backend's answers, checked and read into the model
     Requests.{h,cpp}        the bodies of the requests the firmware sends
     Artwork.{h,cpp}         the artwork's checks, its cache and its loader (section 7)
+    ArtworkStore.{h,cpp}    the pictures kept in a folder, the TF card's on the device (section 7)
   ui/                       LVGL and standard C++ only
     UiHost.h  Model.h       the only two doors between ui/ and the rest
     Shell.{h,cpp}  View.{h,cpp}  Theme.{h,cpp}  Messages.h  lv_support.{h,cpp}  log.h
@@ -121,9 +124,12 @@ There is no `Kconfig.projbuild`: the board is one fixed product, so its constant
 | `backend_press` | 6144 | 1 | 0 | presses: commands and changes the operator makes, one at a time, in order |
 | `backend_art` | 6144 | 1 | 0 | artwork downloads, one at a time |
 | `backend_events` | 6144 | 1 | 0 | the event stream |
+| `card` | 8192, in PSRAM | 1 | 0 | the TF card: its mount, then the artwork's reads, writes and erases, in the order they were asked for (section 7) |
 
 esp-mdm's own tasks (log shipping, MQTT) are as it creates them. The UI task's stack is 16 KB
 because esp-mdm's HTTPS login and its update download run on whichever task calls `process()`.
+The card's stack is in PSRAM, where internal RAM has no room for it, and a task with its stack
+there may not write flash, which ESP-IDF asserts: the card's task uses no NVS.
 
 The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
 `CONFIG_FREERTOS_HZ=1000` makes that delay real.
@@ -131,8 +137,9 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
 1. `app_main` constructs `Board` and calls `board.begin()`: panel, I2C bus, expander, touch,
    `lv_init()`, the LVGL display and input device. Then `Application(&board).begin()`, then it
    idles.
-2. `do_begin()` creates the UI task. It reads the speaker choice and the motion setting from NVS
-   (section 4), then builds the Shell with `LoadingView` ("Starting").
+2. `do_begin()` starts the card's task, which mounts the TF card while the boot goes on
+   (section 7), then creates the UI task. It reads the speaker choice and the motion setting
+   from NVS (section 4), then builds the Shell with `LoadingView` ("Starting").
 3. `do_configuration_loaded(cJSON*)` runs on the UI task once WiFi is up. It copies `backendUrl`
    and `screenOffSeconds` out of the JSON, which esp-mdm frees when the hook returns. It then sets
    the loading text to "Checking for an update" and calls `lv_refr_now(nullptr)`, because the
@@ -146,8 +153,9 @@ The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
    (`Application::has_settled()`), it logs "Startup has settled" and marks the run's `settled`
    stage (`RunMark`, below), once per boot: the first view is up, the event stream is connected,
    and no `HttpClient` holds a request whose answer has not run on the UI task
-   (`HttpClient::is_idle()`), a cover the first view asked for among them. A client added to
-   `Application` joins `has_settled()`.
+   (`HttpClient::is_idle()`), a cover the first view asked for among them, and the card holds no
+   read whose answer has not run there (`CardTask::is_idle()`). A client added to `Application`
+   joins `has_settled()`.
 
 esp-mdm restarts the device when WiFi cannot be joined, when WiFi or MQTT drops, and when IoT
 Support announces a new configuration or firmware. SonosDisplay accepts that: a restart takes
@@ -264,9 +272,13 @@ RGB565 panel (ST7262), GT911 touch, a CH422G expander.
 | Touch interrupt | GPIO 4, not used: touch is polled |
 | Motion sensor | GPIO 6, the board's "Sensor" header |
 | Serial for flashing and the console | the USB-C port marked UART (CH343 on UART0, GPIO 43/44), with an automatic download circuit |
+| TF card | SD over SPI on SPI2: MOSI GPIO 11, SCK GPIO 12, MISO GPIO 13, pulled up. Chip select is the expander's bit 4; no card-detect line |
 
 Expander outputs, one byte: bit 1 touch reset, bit 2 backlight, bit 3 LCD reset, bit 4 SD chip
-select, bit 5 USB/CAN select. The firmware only ever writes bits 1 to 3.
+select, bit 5 USB/CAN select. The firmware only ever writes bits 1 to 3. The card's select is
+active low, so the card is selected from the first write on, and its SPI slot has no chip-select
+line: the card needs no I2C, which only the UI task touches (section 7). A `static_assert` in
+`BoardConfig.h` keeps bit 4 out of every bit the firmware writes.
 
 ### Panel
 
@@ -436,6 +448,8 @@ CONFIG_FREERTOS_HZ=1000
 CONFIG_LCD_RGB_ISR_IRAM_SAFE=y
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 
+# CONFIG_SPI_MASTER_ISR_IN_IRAM is not set
+
 CONFIG_LV_COLOR_DEPTH_16=y
 CONFIG_LV_USE_CUSTOM_MALLOC=y
 CONFIG_LV_USE_CLIB_STRING=y
@@ -461,6 +475,9 @@ plus the four MQTT lines of section 1.
   heaviest thing this firmware does. It raises the board's current draw a little, which matters
   for the brown-out quirk; section 3 names the fallback.
 - **The two panel options** are for the bounce buffers (section 3).
+- **The SPI driver's interrupt handler runs from PSRAM**, with the rest of the code, for the TF
+  card's bus. In internal RAM, ESP-IDF's default, the handler and what it calls take 8 KB
+  (section 7).
 - **The PSRAM clock stays at 80 MHz.** The vendor's benchmark figure is for 120 MHz, which
   ESP-IDF 5.5.3 offers for octal PSRAM only as an experimental feature.
 
@@ -925,7 +942,8 @@ These are the firmware's constraints. The endpoints' shapes are task 6's.
   colour format `0x12` RGB565, flags 0, width, height, stride) followed by the pixels,
   little-endian, uncompressed, no alpha, already dithered, at exactly the requested square size,
   with `Content-Length` set. IoT Support's `LVGLImage.py` writes this form. The sizes are 400, 160
-  and 80 pixels (section 7).
+  and 80 pixels (section 7). An artwork id names one picture: the display keeps a picture on its
+  TF card by its id, size and format, and does not ask for it again (section 7).
 - **Text** in Unicode NFC. The fonts hold composed characters, so a decomposed accent would be
   drawn beside its letter.
 - **Lists** are paged; the template's paging allows at most 100 items per page, and the firmware
@@ -973,11 +991,12 @@ defined, `printf` otherwise. The rule is enforced by the build: an ESP-IDF inclu
 `kc project test`.
 
 **`main/api/`** is built by `sim/` too: the backend's answers read into the model's types
-(`Answers`), the bodies of the requests the firmware sends (`Requests`), and the artwork's checks,
-cache and loader (`Artwork`). It includes cJSON, LVGL, the C++ standard library and `ui/`'s two
-doors only, and nothing of ESP-IDF is on `sim/`'s include path, so an ESP-IDF include there fails
-`kc project test` as well. The scenes' fixtures are bodies as the backend sends them, read by the
-code the device runs, and a scene can check the body the device would send.
+(`Answers`), the bodies of the requests the firmware sends (`Requests`), the artwork's checks, cache
+and loader (`Artwork`), and the pictures kept on the TF card (`ArtworkStore`). It includes cJSON,
+LVGL, the C++ standard library and `ui/`'s two doors only, and nothing of ESP-IDF is on `sim/`'s
+include path, so an ESP-IDF include there fails `kc project test` as well. The scenes' fixtures are
+bodies as the backend sends them, read by the code the device runs, and a scene can check the body
+the device would send.
 
 ### The UI's structure
 
@@ -1099,6 +1118,7 @@ sim/
   lv_conf.h         LVGL's template with the same changes as sdkconfig.defaults, plus LV_USE_LODEPNG 1
   main.cpp          display, tick, touch, scene loop, PNG writer
   SimHost.{h,cpp}   UiHost on fixtures
+  CardFolder.h      a new, empty folder of the host's in the TF card's place, removed after use
   scenes.{h,cpp}    the scenes
 ```
 
@@ -1128,7 +1148,11 @@ sim/
   no driver here.
 - **Artwork in scenes** is generated by `SimHost`: a deterministic two-colour pattern at the
   requested size, in the backend's form, read through `main/api/Artwork` as the device reads it.
-  No image files are committed.
+  No image files are committed. Every `SimHost` has a card that is on: `ArtworkStore` over a
+  `CardFolder` of its own, so every scene starts with an empty card and renders the same each
+  time. `SimHost(card_folder)` over a folder a first host wrote to is the display after a restart.
+  The card answers a read and writes a picture at once; a scene can hold either
+  (`hold_card()`, `hold_card_writes()`) and then answer, write or drop it itself.
 - **Use:** `render --all --out <dir>`, `render <scene>... --out <dir>`, or `render --list`. It
   exits non-zero when a scene is unknown, an LVGL assertion fires, LVGL logs a warning or an
   error, or a scene's fixture or touch does not do what the scene says.
@@ -1311,7 +1335,7 @@ to PSRAM, by these four mechanisms:
   `src/stdlib/clib/lv_mem_core_clib.c`. PaperClock lets LVGL use plain `malloc`, which puts every
   small widget allocation in internal RAM; a list of 200 rows would take most of what is free.
 - **Response bodies and artwork**, through `heap_caps_malloc(..., MALLOC_CAP_SPIRAM)` in
-  `HttpClient`.
+  `HttpClient`, and in `CardTask` for a picture read from the TF card.
 - **JSON trees**, through `cJSON_InitHooks` with the same allocator, set once in `app_main`.
 
 Plain `malloc` and `new` follow ESP-IDF's rule: under 4 KB internal first, larger from PSRAM.
@@ -1326,22 +1350,30 @@ Plain `malloc` and `new` follow ESP-IDF's rule: under 4 KB internal first, large
 | LVGL's heap | 0.75 MiB | 200 rows at about 1 KB each, plus the rest of the UI |
 | Responses and JSON in flight | 0.5 MiB | a 256 KB body and its tree |
 | WiFi, lwIP, TLS, MQTT, logs | 0.25 MiB | |
-| **Total** | **about 7 MiB** | 1 MiB is left |
+| Artwork waiting to be written to the TF card | 0.625 MiB | `ArtworkLoader::MAX_UNWRITTEN_BYTES`; a picture the cache also holds counts in both |
+| **Total** | **about 7.6 MiB** | 0.4 MiB is left |
 
 The build must fail when the app image grows beyond 2.5 MiB, well before the 3 MiB slot is full:
 a post-build step in `CMakeLists.txt` that checks the size of `sonos_display.bin`.
 
 ### Internal RAM
 
-Task stacks take about 80 KB: the five tasks of section 1, esp-mdm's, WiFi's and the system's.
+Task stacks take about 80 KB: the tasks of section 1 but the card's, whose stack is in PSRAM,
+esp-mdm's, WiFi's and the system's.
 An open TLS connection to the backend holds about 4 KB of internal RAM, its buffers being in PSRAM:
 on 2026-11-18 the first display had 102,707 bytes free with no client's connection open and 98,539
 with one (section 4).
 The panel's two bounce buffers take 32,000 bytes (section 3). The model of the open list takes up
-to 40 KB. The target is at least 60 KB of internal RAM free with the largest list open. The
-firmware logs `heap_caps_get_free_size` and `heap_caps_get_minimum_free_size` for both kinds of
-memory once a minute; the lines reach IoT Support's device log, where every milestone can read
-them.
+to 40 KB. The TF card keeps what it can in PSRAM: its task's stack, its queue and the work that
+waits in it, and FAT's buffers (`CONFIG_FATFS_ALLOC_PREFER_EXTRAM`, which `TfCard.cpp` requires).
+What it keeps in internal RAM is its 512-byte transfer buffer, its task's control block, the SPI
+driver's code that runs from RAM, and, for each write that waits, its id's text and two
+`shared_ptr` control blocks. With it the build keeps 3,544 bytes more in internal RAM than without
+it, by `idf.py size`. A mounted card adds the driver's own allocations, among them a DMA buffer of
+a block in internal RAM (ESP-IDF's `sdspi_host.c`), which only a display measures. The target is
+at least 60 KB of internal RAM free with the largest list open. The firmware logs
+`heap_caps_get_free_size` and `heap_caps_get_minimum_free_size` for both kinds of memory once a
+minute; the lines reach IoT Support's device log, where every milestone can read them.
 
 ### Artwork
 
@@ -1366,17 +1398,34 @@ least recently used unpinned images are freed; when the pinned ones leave no roo
 is not kept, the view is handed `nullptr`, and its widget keeps the placeholder, a flat tile with
 an icon. A picture the backend did not give, or that was not kept, is asked for again at the next
 change of the model, never on a timer. A view asks only for what is visible, and its request waits
-only while the view lives and wants that picture (its `scope`, as in section 4). Nothing is fetched
-while the screen is dark: what is asked for meanwhile, and still wanted, is fetched when it wakes.
+only while the view lives and wants that picture (its `scope`, as in section 4). Nothing is read
+from the card or fetched while the screen is dark: what is asked for meanwhile, and still wanted,
+is read or fetched when it wakes.
 
-`ArtworkLoader` downloads one picture at a time, in the app's own scope. A view that asks for a
-picture whose download is under way or waits to start waits on that download, so a picture is
-downloaded once at a size however many views ask. A download that has not started when no view
-wants it any longer is never made. One under way is read to its end and its image kept, whether or
-not a view still waits for it, so a cover left before it arrived shows from the cache when it is
-asked for again; the log then says "Artwork at … px is in with no view waiting for it, kept". A
-download whose answer never reached the UI task is found at the UI task's next pass, and the
-views that wait on it are handed `nullptr`, as for one the backend did not answer.
+`ArtworkLoader` answers from the cache first, then from the board's TF card (below), then from the
+backend: one read of the card and one download at a time, in the app's own scope, and neither
+waits for the other. A request the cache cannot answer waits for its read, and what the card has
+no picture for goes on to the downloads. A view that asks for a picture whose read or download is
+under way or waits to start waits with it, so a picture is read or downloaded once at a size
+however many views ask. A read or a download that has not started when no view wants it any
+longer is never made. One under way is taken to its end and its image kept, whether or not a view
+still waits for it, so a cover left before it arrived shows from the cache when it is asked for
+again; the log then says "Artwork at … px is in with no view waiting for it, kept", or "The
+card's artwork at … px is in with no view waiting for it, kept". A download whose answer never
+reached the UI task is found at the UI task's next pass, and the views that wait on it are handed
+`nullptr`, as for one the backend did not answer; a read lost that way is a picture the card does
+not have, and is downloaded.
+
+A picture from the card passes the checks of a download before it is kept. One that fails them is
+erased from the card and downloaded; one that does not fit the cache beside what is on screen
+hands its views `nullptr` and stays on the card. Every download that passes its checks is also
+handed to the card to write, whether or not it fits the cache; a picture from the cache or the
+card never is. What is handed over waits in PSRAM until the card's task has written it, and
+together it may take at most 640 KiB (`ArtworkLoader::MAX_UNWRITTEN_BYTES`), two now-playing
+covers and a few small pictures. A download past that is not handed over, the log says "Artwork at
+… px is not kept on the card", and the picture is downloaded again after a restart, or once the
+cache has let go of it. Without a card, or with one that is off, every picture is downloaded; a
+full card is still read, and is handed nothing.
 
 Home's list is 288 px tall and a line of tiles about 228 with its gap, so at most three lines,
 twelve tiles, are in view at once, and Home holds at most twelve pictures at 160: about 600 KB
@@ -1385,6 +1434,62 @@ it, all under the cap. The downloads waiting to start wait in the loader, which 
 client one at a time. A quick scroll while the first pictures are on their way asks for more; a
 download that no view wants any longer by its turn, such as a tile's scrolled out of view, is never
 made.
+
+### The TF card
+
+The board's TF card keeps the covers the display downloads, so a cover it has shown once is
+drawn again without the network, also after a restart. The key is the artwork id, the size and
+the format the backend is asked for (`ARTWORK_FORMAT` in `Application.cpp`, `lvgl`), so a picture
+the card holds costs no request at all. The card is used for this alone: a display takes a card
+kept for it (`docs/adding-a-display.md`).
+
+- **The mount.** `TfCard` (`main/board/TfCard`) sets up SPI2 on the pins of section 2, with no
+  chip-select line, and mounts FAT at `/sd`, one file open at a time. It runs on the card's own
+  task, which `do_begin()` starts before the UI task, so a card that is missing, slow or failing
+  never stops or holds up the boot. A card FAT cannot mount is mounted a second time with a format
+  allowed, and ESP-IDF formats it where FAT finds no file system on it, such as an exFAT card's,
+  since ESP-IDF's FAT leaves exFAT out. The format wipes the card and takes allocation units of
+  64 KB, so its FAT is small: 4 MB on a card of 32 GB. An empty slot answers nothing, MISO being
+  pulled up, and the mount times out. A card that is not mounted gives its SPI bus back.
+- **The files.** `ArtworkStore` (`main/api/ArtworkStore`) keeps a picture in
+  `/sd/art/<2 hex>/<8 hex>.bin`, named from FNV-1a, 64 bits, of the key
+  `<format>/<size>/<artwork id>`: its top byte is the folder and its low 32 bits the name. The
+  ids differ in case and FAT's names do not, and FAT's long names are off, so a name is a hash in
+  8.3. A file is a 16-byte header (`SDAW`, version 1, the key's length, the picture's length, the
+  CRC-32 of the picture, little-endian), then the key, then the picture's bytes as the backend
+  answered them. Two keys that share the 40 bits take each other's place at every read; among
+  10,000 pictures the chance that such a pair exists is about 1 in 22,000.
+- **A write** goes to the one file `/sd/art/write.tmp`, which is closed and then renamed into
+  place, so a power cut leaves no picture half written; the start removes the temporary file one
+  left. A picture the card holds is not written again, and the card holds nothing else, no index
+  and no log, so nothing writes the same spot over and over.
+- **A read** checks the file's marker, version, key, length and CRC. A file that is not there is
+  a miss; one that does not match is a miss too, and is deleted. Every byte to and from the card
+  passes through the 512-byte buffer in internal RAM, a sector at a time: the SD driver is slow
+  into and out of PSRAM, where the pictures are.
+- **No cleanup.** Nothing is ever evicted. A card with no room, ENOSPC or EACCES at any step of a
+  write, stops the writes until the next restart: the temporary file is deleted, one line is
+  logged, and reads go on. Any other error of the card turns it off until the next restart, and
+  every picture is downloaded. A file a power cut damaged fails its checks and is a miss; a card
+  a power cut left with no file system FAT finds is formatted at the next start.
+- **The card's task**, `card`, makes every access to the card: the mount, a format, the clearing
+  at start, and then the reads, writes and erases the UI task asks for, in the order it asked, from
+  a queue of 64. So a read of a picture comes after its write, and the erase of a failed picture
+  before its new write. The UI task never waits on it: what the queue has no room for is let go of
+  at once, a read then being downloaded and a write not kept. A read's answer reaches the UI task
+  through `get_queue().enqueue()`, which waits for room, so none is dropped. The task touches no
+  LVGL, model, I2C or NVS. Its state reaches the UI task as an atomic: `is_on()` is false until the
+  mount is done, without a card and after an error, and `is_writable()` holds only while nothing
+  has stopped the writes. Until the UI task hears that the card is full, downloads are still handed over, and the
+  store refuses each.
+- **The log.** What the mount found is logged at the mount and again from `do_ready()`, since the
+  mount may come before esp-mdm ships the log: "The TF card is mounted: … MB"; "The TF card could
+  not be mounted, and is mounted after a format", when the first mount failed and the second,
+  which may format, succeeded; "No TF card answers (ESP_ERR_TIMEOUT)"; or "The TF card cannot be
+  mounted (…)". A cover from the card is "Read artwork at … px: … bytes in … ms", then "The
+  card's artwork at … px is in"; a write is "Artwork at … px is on the card: … bytes in … ms". A
+  full card is "The TF card is full, and nothing more is written to it", an error "The TF card is
+  off until the next restart", each with the step that failed and its errno.
 
 ### Lists
 
@@ -1522,3 +1627,13 @@ a press on a track's line, which should replace the queue with the whole album a
 track on the speaker; the headings' presses and the tracks' lines under a finger; and, over the
 display's own link, now playing left before its cover arrived and opened again, which should show
 the cover without a second download while the log says the cover was kept.
+
+Nothing of the TF card (section 7) has run on a display yet. What only a display shows of it is
+still to see there, with a card that holds nothing to keep: the mount's line after a power-on and
+after a restart, which shows the card answering in SPI mode while it is selected from the
+expander's first write on, and the SD driver's commands sent from a stack in PSRAM; an empty slot,
+which should log a timeout; the format of a card FAT cannot mount; covers drawn from the card
+after a restart with no download in the log, and how long a read and a write take a sector at a
+time; the errno FAT gives a full card; a power cut during a write; and free internal RAM with a
+card mounted and the largest list open, against the 60 KB target, with the driver's own
+allocations on top of the build's 3,544 bytes.
