@@ -32,8 +32,7 @@ static constexpr size_t FORMAT_ALLOCATION_UNIT = 64 * 1024;
 // with no dummy cycle. A card takes more than 25 MHz once it is switched to high speed, which
 // ESP-IDF does where the host asks for more than SDMMC_FREQ_DEFAULT; the next clock below 40 MHz
 // that the bus makes is 26.7 MHz, which is past the card's default speed of 25 MHz.
-static constexpr uint32_t HIGH_CLOCK_KHZ = SDMMC_FREQ_HIGHSPEED;
-static constexpr uint32_t DEFAULT_CLOCK_KHZ = SDMMC_FREQ_DEFAULT;
+static_assert(TfCard::HIGH_CLOCK_KHZ == SDMMC_FREQ_HIGHSPEED && TfCard::DEFAULT_CLOCK_KHZ == SDMMC_FREQ_DEFAULT);
 
 // ESP-IDF's time limits for the commands (sdmmc_common.h, which is not public).
 static constexpr uint32_t COMMAND_TIMEOUT_MS = 1000;
@@ -101,9 +100,9 @@ static esp_err_t transfer(sdmmc_card_t* card, void* buffer, uint32_t sector, uin
 
 // Runs the card at the default clock from here on.
 static esp_err_t slow_down(sdmmc_card_t* card) {
-    const auto err = card->host.set_card_clk(card->host.slot, DEFAULT_CLOCK_KHZ);
+    const auto err = card->host.set_card_clk(card->host.slot, TfCard::DEFAULT_CLOCK_KHZ);
     if (err == ESP_OK) {
-        card->max_freq_khz = DEFAULT_CLOCK_KHZ;
+        card->max_freq_khz = TfCard::DEFAULT_CLOCK_KHZ;
         card->host.get_real_freq(card->host.slot, &card->real_freq_khz);
     }
 
@@ -121,9 +120,9 @@ static DRESULT card_read(BYTE, BYTE* buffer, DWORD sector, UINT count) {
     // A card that fails a read at the high clock runs at the default one from here on, and the
     // read is made again, once the card is told to stop sending what is left of the one that
     // failed. A read changes nothing on the card, so it is safe to make again.
-    if (err != ESP_OK && s_card->real_freq_khz > int(DEFAULT_CLOCK_KHZ)) {
+    if (err != ESP_OK && s_card->real_freq_khz > int(TfCard::DEFAULT_CLOCK_KHZ)) {
         ESP_LOGW(TAG, "A read of the TF card failed at %d kHz (%s): it runs at %" PRIu32 " kHz from here on",
-                 s_card->real_freq_khz, esp_err_to_name(err), DEFAULT_CLOCK_KHZ);
+                 s_card->real_freq_khz, esp_err_to_name(err), TfCard::DEFAULT_CLOCK_KHZ);
 
         sdmmc_command_t stop{};
         stop.opcode = MMC_STOP_TRANSMISSION;
@@ -240,7 +239,7 @@ TfCard::Mount TfCard::mount() {
 
     sdmmc_card_t* card = nullptr;
     auto found = Found::Mounted;
-    auto slowed = false;
+    auto high_clock_err = ESP_OK;
 
     // A card that does not answer does so at the probing clock already, whatever the clock asked
     // for. One that answers and cannot be mounted at the high clock is mounted at the default one:
@@ -248,19 +247,19 @@ TfCard::Mount TfCard::mount() {
     // answer for a card FAT cannot mount; a card that does not answer, or answers wrongly, has the
     // driver's own error. Of the cards FAT cannot mount at the default clock, the last mount
     // formats the one on which it finds no file system, and no other.
-    err = mount_at(HIGH_CLOCK_KHZ, false, &card);
+    err = mount_at(TfCard::HIGH_CLOCK_KHZ, false, &card);
     if (err != ESP_OK && err != ESP_ERR_TIMEOUT) {
         ESP_LOGW(TAG, "The TF card cannot be mounted at %" PRIu32 " kHz (%s); mounting it at %" PRIu32 " kHz",
-                 HIGH_CLOCK_KHZ, esp_err_to_name(err), DEFAULT_CLOCK_KHZ);
+                 TfCard::HIGH_CLOCK_KHZ, esp_err_to_name(err), TfCard::DEFAULT_CLOCK_KHZ);
 
-        slowed = true;
-        err = mount_at(DEFAULT_CLOCK_KHZ, false, &card);
+        high_clock_err = err;
+        err = mount_at(TfCard::DEFAULT_CLOCK_KHZ, false, &card);
 
         if (err == ESP_FAIL) {
             ESP_LOGW(TAG, "FAT cannot mount the TF card; mounting it again, formatting it where it has no file system");
 
             found = Found::Formatted;
-            err = mount_at(DEFAULT_CLOCK_KHZ, true, &card);
+            err = mount_at(TfCard::DEFAULT_CLOCK_KHZ, true, &card);
         }
     }
 
@@ -282,6 +281,6 @@ TfCard::Mount TfCard::mount() {
         .megabytes = uint32_t(megabytes),
         .clock_khz = uint32_t(card->real_freq_khz),
         .cluster_bytes = read_cluster_bytes(pdrv, card),
-        .slowed = slowed,
+        .high_clock_err = high_clock_err,
     };
 }

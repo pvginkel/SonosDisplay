@@ -30,9 +30,14 @@ public:
         // FAT's allocation unit where the card is mounted, in bytes, or 0 where it cannot say. A
         // read of a file takes a command to the card for each unit it spans.
         uint32_t cluster_bytes;
-        // The card was mounted at the default clock, after it failed at the high one.
-        bool slowed;
+        // Where the card was mounted at the default clock after the mount at the high one failed,
+        // what that mount answered; ESP_OK otherwise.
+        esp_err_t high_clock_err;
     };
+
+    // The clock asked for first, in kHz, and the one a card that fails there runs at.
+    static constexpr uint32_t HIGH_CLOCK_KHZ = 40000;
+    static constexpr uint32_t DEFAULT_CLOCK_KHZ = 20000;
 
     TfCard() = default;
     TfCard(const TfCard&) = delete;

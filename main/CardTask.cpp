@@ -228,10 +228,8 @@ void CardTask::log_mount() const {
             ESP_LOGW(TAG, "No TF card answers (%s): artwork is not kept across restarts", esp_err_to_name(_mount.err));
             break;
         case TfCard::Found::Mounted:
-            ESP_LOGI(TAG,
-                     "The TF card is mounted: %" PRIu32 " MB, %" PRIu32 " KB allocation units, at %" PRIu32 " kHz%s",
-                     _mount.megabytes, _mount.cluster_bytes / 1024, _mount.clock_khz,
-                     _mount.slowed ? ", having failed at the high clock" : "");
+            ESP_LOGI(TAG, "The TF card is mounted: %" PRIu32 " MB, %" PRIu32 " KB allocation units, at %" PRIu32 " kHz",
+                     _mount.megabytes, _mount.cluster_bytes / 1024, _mount.clock_khz);
             break;
         case TfCard::Found::Formatted:
             ESP_LOGW(TAG,
@@ -243,6 +241,11 @@ void CardTask::log_mount() const {
             ESP_LOGE(TAG, "The TF card cannot be mounted (%s): artwork is not kept across restarts",
                      esp_err_to_name(_mount.err));
             break;
+    }
+    // Its own line, which the log keeps whatever the mount found.
+    if (_mount.high_clock_err != ESP_OK) {
+        ESP_LOGW(TAG, "The TF card failed at %" PRIu32 " kHz (%s), and was mounted at %" PRIu32 " kHz",
+                 TfCard::HIGH_CLOCK_KHZ, esp_err_to_name(_mount.high_clock_err), TfCard::DEFAULT_CLOCK_KHZ);
     }
 }
 

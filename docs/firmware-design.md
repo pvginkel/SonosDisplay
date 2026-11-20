@@ -1519,8 +1519,8 @@ kept for it (`docs/adding-a-display.md`).
   store refuses each.
 - **The log.** What the mount found is logged at the mount and again from `do_ready()`, since the
   mount may come before esp-mdm ships the log: "The TF card is mounted: … MB, … KB allocation
-  units, at … kHz", with ", having failed at the high clock" where it was mounted at 20 MHz after
-  it failed at 40; "The TF card could not be mounted, and is mounted after a format", when the
+  units, at … kHz", then "The TF card failed at 40000 kHz (…), and was mounted at 20000
+  kHz" where it was; "The TF card could not be mounted, and is mounted after a format", when the
   mounts without a format failed and the one that may format succeeded; "No TF card answers
   (ESP_ERR_TIMEOUT)"; or "The TF card cannot be mounted (…)". A cover from the card is "Read
   artwork at … px: … bytes in … ms, after … ms in the queue", then "The card's artwork at … px is
