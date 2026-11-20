@@ -275,7 +275,6 @@ private:
     std::optional<Answer> _favourite_answer;
     // The folder of a host that was given none.
     std::unique_ptr<CardFolder> _own_card_folder;
-    uint8_t _card_buffer[512];
     ArtworkStore _card;
     std::vector<ArtworkFetch> _card_reads;
     bool _card_held{};
@@ -603,6 +602,11 @@ public:
 
     // The artwork fetched from the backend, in order: what the cache or the card had is not in it.
     const std::vector<ArtworkFetch>& get_artwork_fetches() const { return _artwork_fetches; }
+
+    // Whether the cache holds this image.
+    bool is_artwork_cached(const std::string& artwork_id, int32_t size) const {
+        return _artwork.get_cache().has(artwork_id, size);
+    }
 
     // Whether a view holds this image, which it does for as long as it draws it.
     bool is_artwork_shown(const std::string& artwork_id, int32_t size) const {

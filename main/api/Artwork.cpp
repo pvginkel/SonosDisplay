@@ -116,6 +116,11 @@ bool ArtworkCache::is_pinned(const std::string& artwork_id, int32_t size) const 
     });
 }
 
+bool ArtworkCache::has(const std::string& artwork_id, int32_t size) const {
+    return std::any_of(_entries.begin(), _entries.end(),
+                       [&](const Entry& entry) { return entry.size == size && entry.artwork_id == artwork_id; });
+}
+
 ArtworkLoader::ArtworkLoader(Fetch fetch, ArtworkCard* card) : _fetch(std::move(fetch)), _card(card) {}
 
 // A picture is wanted while a view that waits for it lives and has not asked for another picture.
@@ -140,6 +145,10 @@ static size_t hand_over(const std::vector<ArtworkRequest>& waiting, const Artwor
 void ArtworkLoader::request(ArtworkRequest request) {
     if (auto artwork = _cache.find(request.artwork_id, request.size)) {
         request.done(std::move(artwork));
+        return;
+    }
+
+    if (answer_unwritten(request)) {
         return;
     }
 
@@ -243,6 +252,37 @@ size_t ArtworkLoader::get_unwritten_bytes() const {
     return bytes;
 }
 
+// Hands the view a picture that waits to be written to the card, from the bytes that wait, and
+// keeps it in the cache again where it fits; one that does not hands the view nullptr, as a read
+// of the card does. Returns false where no write of the picture waits.
+bool ArtworkLoader::answer_unwritten(const ArtworkRequest& request) {
+    const auto unwritten = std::find_if(_unwritten.begin(), _unwritten.end(), [&](const Unwritten& candidate) {
+        return !candidate.held.expired() && candidate.size == request.size &&
+               candidate.artwork_id == request.artwork_id;
+    });
+    if (unwritten == _unwritten.end()) {
+        return false;
+    }
+
+    auto body = unwritten->body.lock();
+    const auto length = unwritten->bytes;
+
+    // It passed these checks when it was downloaded.
+    Artwork artwork;
+    if (!body || read_artwork(STATUS_OK, std::move(body), length, request.size, artwork)) {
+        return false;
+    }
+
+    if (!_cache.add(request.artwork_id, request.size, artwork, length)) {
+        artwork.reset();
+    }
+
+    // A view's `done` may ask for another picture, and change what waits to be written.
+    request.done(std::move(artwork));
+
+    return true;
+}
+
 ArtworkLoader::Pending* ArtworkLoader::find(const std::string& artwork_id, int32_t size) {
     const auto is_of = [&](const Pending& pending) { return pending.size == size && pending.artwork_id == artwork_id; };
 
@@ -330,7 +370,13 @@ bool ArtworkLoader::write_to_card(ArtworkBody body, size_t length) {
     }
 
     auto held = std::make_shared<int>(0);
-    _unwritten.push_back(Unwritten{.bytes = length, .held = held});
+    _unwritten.push_back(Unwritten{
+        .artwork_id = _current->artwork_id,
+        .size = _current->size,
+        .body = body,
+        .bytes = length,
+        .held = held,
+    });
 
     // The host may let go of the write before this returns.
     _card->write(ArtworkWrite{

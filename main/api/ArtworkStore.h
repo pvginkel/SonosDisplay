@@ -20,8 +20,8 @@
 // picture the folder holds is not written again, and the store writes nothing else: no index and
 // no log.
 //
-// It includes the C++ standard library and Artwork.h only, so sim/ builds it too. One task makes
-// every call.
+// It includes the C++ standard library, Artwork.h and POSIX's file calls only, which ESP-IDF's VFS
+// and the host both have, so sim/ builds it too. One task makes every call.
 
 #include <cstddef>
 #include <cstdint>
@@ -62,18 +62,15 @@ public:
 private:
     std::string _folder;
     std::string _format;
-    uint8_t* _buffer;
-    size_t _buffer_length;
     Allocate _allocate;
     State _state{State::On};
     Fault _fault{};
 
 public:
-    // Keeps the pictures asked for in `format` in `folder`. Every byte read from the folder or
-    // written to it passes through `buffer`, `buffer_length` bytes at a time, and a picture read is
-    // put where `allocate` says: on the device the SD driver is slow into and out of PSRAM, where
-    // the pictures are. `buffer` outlives the store.
-    ArtworkStore(std::string folder, std::string format, uint8_t* buffer, size_t buffer_length, Allocate allocate);
+    // Keeps the pictures asked for in `format` in `folder`. A picture read is put where `allocate`
+    // says, and is read there in one piece, as a picture written is written from where it is: on
+    // the device FAT then asks the card for the sectors of an allocation unit in one command.
+    ArtworkStore(std::string folder, std::string format, Allocate allocate);
     ArtworkStore(const ArtworkStore&) = delete;
     ArtworkStore& operator=(const ArtworkStore&) = delete;
 

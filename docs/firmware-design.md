@@ -124,12 +124,14 @@ There is no `Kconfig.projbuild`: the board is one fixed product, so its constant
 | `backend_press` | 6144 | 1 | 0 | presses: commands and changes the operator makes, one at a time, in order |
 | `backend_art` | 6144 | 1 | 0 | artwork downloads, one at a time |
 | `backend_events` | 6144 | 1 | 0 | the event stream |
-| `card` | 8192, in PSRAM | 1 | 0 | the TF card: its mount, then the artwork's reads, writes and erases, in the order they were asked for (section 7) |
+| `card` | 8192, in PSRAM | 2 | 0 | the TF card: its mount, then the artwork's reads, each ahead of what waits, and its writes and erases in the order they were asked for (section 7) |
 
 esp-mdm's own tasks (log shipping, MQTT) are as it creates them. The UI task's stack is 16 KB
 because esp-mdm's HTTPS login and its update download run on whichever task calls `process()`.
 The card's stack is in PSRAM, where internal RAM has no room for it, and a task with its stack
-there may not write flash, which ESP-IDF asserts: the card's task uses no NVS.
+there may not write flash, which ESP-IDF asserts: the card's task uses no NVS. The card's task runs
+above the backend's clients on their core: it waits on the bus a sector at a time, and at their
+priority it would wait for the slice of a client busy with TLS each time the bus is done, a tick.
 
 The UI loop sleeps for what `lv_timer_handler()` returns, clamped to 1 to 10 ms.
 `CONFIG_FREERTOS_HZ=1000` makes that delay real.
@@ -993,8 +995,8 @@ defined, `printf` otherwise. The rule is enforced by the build: an ESP-IDF inclu
 **`main/api/`** is built by `sim/` too: the backend's answers read into the model's types
 (`Answers`), the bodies of the requests the firmware sends (`Requests`), the artwork's checks, cache
 and loader (`Artwork`), and the pictures kept on the TF card (`ArtworkStore`). It includes cJSON,
-LVGL, the C++ standard library and `ui/`'s two doors only, and nothing of ESP-IDF is on `sim/`'s
-include path, so an ESP-IDF include there fails `kc project test` as well. The scenes' fixtures are
+LVGL, the C++ standard library, POSIX's file calls (`ArtworkStore`, which ESP-IDF's VFS and the
+host both have) and `ui/`'s two doors only, and nothing of ESP-IDF is on `sim/`'s include path, so an ESP-IDF include there fails `kc project test` as well. The scenes' fixtures are
 bodies as the backend sends them, read by the code the device runs, and a scene can check the body
 the device would send.
 
@@ -1365,12 +1367,14 @@ on 2026-11-18 the first display had 102,707 bytes free with no client's connecti
 with one (section 4).
 The panel's two bounce buffers take 32,000 bytes (section 3). The model of the open list takes up
 to 40 KB. The TF card keeps what it can in PSRAM: its task's stack, its queue and the work that
-waits in it, and FAT's buffers (`CONFIG_FATFS_ALLOC_PREFER_EXTRAM`, which `TfCard.cpp` requires).
-What it keeps in internal RAM is its 512-byte transfer buffer, its task's control block, the SPI
-driver's code that runs from RAM, and, for each write that waits, its id's text and two
-`shared_ptr` control blocks. With it the build keeps 3,544 bytes more in internal RAM than without
-it, by `idf.py size`. A mounted card adds the driver's own allocations, among them a DMA buffer of
-a block in internal RAM (ESP-IDF's `sdspi_host.c`), which only a display measures. The target is
+waits in it, FAT's buffers (`CONFIG_FATFS_ALLOC_PREFER_EXTRAM`, which `TfCard.cpp` requires), and
+the pictures, which are read into and written from where they are. What it keeps in internal RAM
+is its task's control block, the SPI driver's code that runs from RAM, and, for each write that
+waits, its id's text twice, the write's and the loader's, and two `shared_ptr` control blocks.
+With it the build keeps 3,064 bytes more in internal RAM than without it, by `idf.py size`. A
+mounted card adds the driver's own allocations, among them the SPI host's buffer of a sector and
+its CRC, 516 bytes, through which every byte to and from the card passes (ESP-IDF's
+`sdspi_host.c`). The target is
 at least 60 KB of internal RAM free with the largest list open. The firmware logs
 `heap_caps_get_free_size` and `heap_caps_get_minimum_free_size` for both kinds of memory once a
 minute; the lines reach IoT Support's device log, where every milestone can read them.
@@ -1402,8 +1406,8 @@ only while the view lives and wants that picture (its `scope`, as in section 4).
 from the card or fetched while the screen is dark: what is asked for meanwhile, and still wanted,
 is read or fetched when it wakes.
 
-`ArtworkLoader` answers from the cache first, then from the board's TF card (below), then from the
-backend: one read of the card and one download at a time, in the app's own scope, and neither
+`ArtworkLoader` answers from the cache first, then from what waits to be written to the board's TF
+card, then from the card (below), then from the backend: one read of the card and one download at a time, in the app's own scope, and neither
 waits for the other. A request the cache cannot answer waits for its read, and what the card has
 no picture for goes on to the downloads. A view that asks for a picture whose read or download is
 under way or waits to start waits with it, so a picture is read or downloaded once at a size
@@ -1446,9 +1450,11 @@ kept for it (`docs/adding-a-display.md`).
 - **The mount.** `TfCard` (`main/board/TfCard`) sets up SPI2 on the pins of section 2, with no
   chip-select line, and mounts FAT at `/sd`, one file open at a time. It runs on the card's own
   task, which `do_begin()` starts before the UI task, so a card that is missing, slow or failing
-  never stops or holds up the boot. A card FAT cannot mount is mounted a second time with a format
-  allowed, and ESP-IDF formats it where FAT finds no file system on it, such as an exFAT card's,
-  since ESP-IDF's FAT leaves exFAT out. The format wipes the card and takes allocation units of
+  never stops or holds up the boot. It asks for 40 MHz, and ESP-IDF switches a card that takes
+  high speed to it (CMD6) and runs one that does not at 20 MHz. A card that answers and cannot be
+  mounted at 40 MHz is mounted at 20 MHz. One FAT cannot mount there either is mounted a third time
+  with a format allowed, and ESP-IDF formats it where FAT finds no file system on it, such as an
+  exFAT card's, since ESP-IDF's FAT leaves exFAT out. The format wipes the card and takes allocation units of
   64 KB, so its FAT is small: 4 MB on a card of 32 GB. An empty slot answers nothing, MISO being
   pulled up, and the mount times out. A card that is not mounted gives its SPI bus back.
 - **The files.** `ArtworkStore` (`main/api/ArtworkStore`) keeps a picture in
@@ -1463,19 +1469,48 @@ kept for it (`docs/adding-a-display.md`).
   place, so a power cut leaves no picture half written; the start removes the temporary file one
   left. A picture the card holds is not written again, and the card holds nothing else, no index
   and no log, so nothing writes the same spot over and over.
-- **A read** checks the file's marker, version, key, length and CRC. A file that is not there is
-  a miss; one that does not match is a miss too, and is deleted. Every byte to and from the card
-  passes through the 512-byte buffer in internal RAM, a sector at a time: the SD driver is slow
-  into and out of PSRAM, where the pictures are.
+- **A read** opens the file, the one lookup of its path, takes its length from it, and reads the
+  header and key and then the picture in one call, straight into the picture's buffer in PSRAM. It
+  checks the file's marker, version, key, length and CRC. A file that is not there is a miss; one
+  that does not match is a miss too, and is deleted. A write writes the header and key in one call
+  and the picture from where it is in another. The calls are POSIX's: newlib's stdio reads an
+  unbuffered stream a byte at a time and a buffered one a buffer's length at a time.
+- **FAT's disk functions** are `TfCard`'s own, which take the place of ESP-IDF's once the card is
+  mounted. ESP-IDF's (`diskio_sdmmc.c`, through `sdmmc_read_sectors()` and
+  `sdmmc_write_sectors()`) split a transfer into or out of PSRAM into a command a sector, each
+  followed by a status command (CMD13), for the SD host's DMA, which cannot reach PSRAM: that made
+  a cover's read 1.7 ms a sector on the first display (section "To check on the first display").
+  The SPI host copies every sector through a buffer of its own in internal RAM (`sdspi_host.c`), so
+  it takes PSRAM as it is, and `TfCard`'s functions send one command for whatever FAT asks for:
+  CMD18 or CMD25 for more than a sector, CMD17 or CMD24 for one, and after a write the status
+  command the SD specification asks for. FAT asks for the whole sectors of a file that lie in one
+  allocation unit in one call, straight into or out of the caller's buffer, and for the rest, a
+  part of a sector, a folder and its FAT, a sector at a time through its own buffers in PSRAM. So
+  a cover's read is a command for each allocation unit it spans, five at 64 KB, plus one for its
+  first and last sectors and one for each sector of a folder its path's lookup reads.
+- **The clock, and what the board allows.** The slot has one data line each way, so SPI is its
+  only mode, a bit a clock. SCK, MOSI and MISO are SPI2's own pins, which reach it through the IO
+  MUX and not the GPIO matrix, so the bus reads at 40 MHz, the APB's 80 MHz halved, with no dummy
+  cycle; the next clock it makes below that is 26.7 MHz, past the card's default speed of 25 MHz.
+  ESP-IDF's example for the SPI host stops at its default, 20 MHz; 40 MHz takes the card's high
+  speed, which SDHC cards have. The ceiling is then 5 MB/s on the wire, a 400 px cover in 64 ms,
+  and the SPI host's work between sectors comes on top: the CRC, the copy and the wait for the next
+  sector's token, about 0.1 ms a sector by ESP-IDF's own figure. A read that fails at 40 MHz is
+  made again at 20 MHz, once the card is told to stop sending, and the card stays at 20 MHz until
+  the next restart. A write that fails is not made again: after a failure the SPI host sends no
+  stop token, so the card may take what comes next for the rest of the write.
 - **No cleanup.** Nothing is ever evicted. A card with no room, ENOSPC or EACCES at any step of a
   write, stops the writes until the next restart: the temporary file is deleted, one line is
   logged, and reads go on. Any other error of the card turns it off until the next restart, and
   every picture is downloaded. A file a power cut damaged fails its checks and is a miss; a card
   a power cut left with no file system FAT finds is formatted at the next start.
 - **The card's task**, `card`, makes every access to the card: the mount, a format, the clearing
-  at start, and then the reads, writes and erases the UI task asks for, in the order it asked, from
-  a queue of 64. So a read of a picture comes after its write, and the erase of a failed picture
-  before its new write. The UI task never waits on it: what the queue has no room for is let go of
+  at start, and then the reads, writes and erases the UI task asks for, from a queue of 64. A read
+  goes to the front, since a view waits for it, and the loader asks for one at a time; the writes
+  and erases follow in the order they were asked for, so the erase of a failed picture comes before
+  its new write. A read then waits for the write under way at most. It may come before the write
+  of its own picture, so the loader answers a picture that waits to be written from the bytes that
+  wait, and never asks the card for it. The UI task never waits on it: what the queue has no room for is let go of
   at once, a read then being downloaded and a write not kept. A read's answer reaches the UI task
   through `get_queue().enqueue()`, which waits for room, so none is dropped. The task touches no
   LVGL, model, I2C or NVS. Its state reaches the UI task as an atomic: `is_on()` is false until the
@@ -1483,11 +1518,14 @@ kept for it (`docs/adding-a-display.md`).
   has stopped the writes. Until the UI task hears that the card is full, downloads are still handed over, and the
   store refuses each.
 - **The log.** What the mount found is logged at the mount and again from `do_ready()`, since the
-  mount may come before esp-mdm ships the log: "The TF card is mounted: … MB"; "The TF card could
-  not be mounted, and is mounted after a format", when the first mount failed and the second,
-  which may format, succeeded; "No TF card answers (ESP_ERR_TIMEOUT)"; or "The TF card cannot be
-  mounted (…)". A cover from the card is "Read artwork at … px: … bytes in … ms", then "The
-  card's artwork at … px is in"; a write is "Artwork at … px is on the card: … bytes in … ms". A
+  mount may come before esp-mdm ships the log: "The TF card is mounted: … MB, … KB allocation
+  units, at … kHz", with ", having failed at the high clock" where it was mounted at 20 MHz after
+  it failed at 40; "The TF card could not be mounted, and is mounted after a format", when the
+  mounts without a format failed and the one that may format succeeded; "No TF card answers
+  (ESP_ERR_TIMEOUT)"; or "The TF card cannot be mounted (…)". A cover from the card is "Read
+  artwork at … px: … bytes in … ms, after … ms in the queue", then "The card's artwork at … px is
+  in"; a write is "Artwork at … px is on the card: … bytes in … ms". A read that failed at 40 MHz
+  is "A read of the TF card failed at … kHz (…): it runs at 20000 kHz from here on". A
   full card is "The TF card is full, and nothing more is written to it", an error "The TF card is
   off until the next restart", each with the step that failed and its errno.
 

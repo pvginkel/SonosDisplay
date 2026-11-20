@@ -1,6 +1,9 @@
 #include "ArtworkStore.h"
 
-#include <algorithm>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <array>
 #include <cerrno>
 #include <cstdio>
@@ -67,12 +70,60 @@ static void write_u32(uint8_t* bytes, uint32_t value) {
     write_u16(bytes + 2, value >> 16);
 }
 
+// The files are read and written with POSIX's calls, which ESP-IDF's VFS hands to FAT as they are:
+// newlib's stdio reads an unbuffered stream a byte at a time, and a buffered one a buffer's length
+// at a time. A read or a write of a whole picture is then one call to FAT, which moves every whole
+// sector of it straight between the card and the picture's bytes.
+
+// Reads `length` bytes, or as many as the file has left. Returns how many it read, or -1 where the
+// file did not answer, with errno set.
+static ssize_t read_all(int file, void* bytes, size_t length) {
+    size_t done = 0;
+
+    while (done < length) {
+        const auto count = read(file, (uint8_t*)bytes + done, length - done);
+        if (count < 0) {
+            return -1;
+        }
+        if (count == 0) {
+            break;
+        }
+        done += size_t(count);
+    }
+
+    return ssize_t(done);
+}
+
+// Writes `length` bytes. Returns false where the file did not take them all, with errno set.
+static bool write_all(int file, const void* bytes, size_t length) {
+    size_t done = 0;
+
+    while (done < length) {
+        const auto count = write(file, (const uint8_t*)bytes + done, length - done);
+        if (count <= 0) {
+            if (count == 0) {
+                errno = ENOSPC;
+            }
+            return false;
+        }
+        done += size_t(count);
+    }
+
+    return true;
+}
+
 // Reads a file's header and key, up to where the picture starts. Returns what makes the file not
-// the one the store writes for `key`, or nullptr.
-static const char* read_header(FILE* file, uintmax_t file_length, const std::string& key, size_t& length,
-                               uint32_t& crc) {
+// the one the store writes for `key`, or nullptr. A file that does not answer returns nullptr too,
+// with `failed` set and errno saying why.
+static const char* read_header(int file, uintmax_t file_length, const std::string& key, size_t& length, uint32_t& crc,
+                               bool& failed) {
     uint8_t header[HEADER_LENGTH];
-    if (fread(header, 1, sizeof(header), file) != sizeof(header)) {
+    const auto count = read_all(file, header, sizeof(header));
+    if (count < 0) {
+        failed = true;
+        return nullptr;
+    }
+    if (size_t(count) != sizeof(header)) {
         return "the file is shorter than a header";
     }
     if (memcmp(header, MARKER, sizeof(MARKER)) != 0) {
@@ -93,60 +144,20 @@ static const char* read_header(FILE* file, uintmax_t file_length, const std::str
     }
 
     std::string stored(key.size(), '\0');
-    if (fread(stored.data(), 1, stored.size(), file) != stored.size() || stored != key) {
+    const auto key_count = read_all(file, stored.data(), stored.size());
+    if (key_count < 0) {
+        failed = true;
+        return nullptr;
+    }
+    if (size_t(key_count) != stored.size() || stored != key) {
         return "the key is another picture's";
     }
 
     return nullptr;
 }
 
-namespace {
-
-// Writes to a file through a buffer, a buffer's length at a time.
-class Writer {
-    FILE* _file;
-    uint8_t* _buffer;
-    size_t _buffer_length;
-    size_t _used{};
-
-public:
-    Writer(FILE* file, uint8_t* buffer, size_t buffer_length)
-        : _file(file), _buffer(buffer), _buffer_length(buffer_length) {}
-
-    bool put(const void* bytes, size_t length) {
-        auto from = (const uint8_t*)bytes;
-
-        while (length > 0) {
-            const auto count = std::min(length, _buffer_length - _used);
-            memcpy(_buffer + _used, from, count);
-            _used += count;
-            from += count;
-            length -= count;
-
-            if (_used == _buffer_length && !flush()) {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    bool flush() {
-        const auto count = std::exchange(_used, 0);
-
-        return fwrite(_buffer, 1, count, _file) == count;
-    }
-};
-
-}  // namespace
-
-ArtworkStore::ArtworkStore(std::string folder, std::string format, uint8_t* buffer, size_t buffer_length,
-                           Allocate allocate)
-    : _folder(std::move(folder)),
-      _format(std::move(format)),
-      _buffer(buffer),
-      _buffer_length(buffer_length),
-      _allocate(std::move(allocate)) {}
+ArtworkStore::ArtworkStore(std::string folder, std::string format, Allocate allocate)
+    : _folder(std::move(folder)), _format(std::move(format)), _allocate(std::move(allocate)) {}
 
 void ArtworkStore::begin() {
     std::error_code error;
@@ -169,39 +180,39 @@ ArtworkStore::Picture ArtworkStore::read(const std::string& artwork_id, int32_t 
     const auto key = make_key(artwork_id, size);
     const auto path = make_path(key);
 
-    std::error_code error;
-    const auto file_length = std::filesystem::file_size(path, error);
-    if (error == std::errc::no_such_file_or_directory) {
-        return {};
-    }
-    if (error) {
-        stop(State::Off, "looking for a picture", error.value());
-        return {};
-    }
-
-    const auto file = fopen(path.c_str(), "rb");
-    if (!file) {
-        stop(State::Off, "opening a picture", errno);
+    // The open finds the file, and the length comes from it: FAT looks the path up once.
+    const auto file = open(path.c_str(), O_RDONLY);
+    if (file < 0) {
+        if (errno != ENOENT) {
+            stop(State::Off, "opening a picture", errno);
+        }
         return {};
     }
 
-    // newlib's fread() fills the stream's buffer, a buffer's length at a time, and copies out of
-    // it. With no buffer, it reads a byte at a time.
-    setvbuf(file, (char*)_buffer, _IOFBF, _buffer_length);
+    struct stat status{};
+    if (fstat(file, &status) != 0) {
+        const auto stat_error = errno;
+        close(file);
+        stop(State::Off, "looking for a picture", stat_error);
+        return {};
+    }
 
     Picture picture;
     uint32_t crc = 0;
-    errno = 0;
+    auto failed = false;
 
-    picture.problem = read_header(file, file_length, key, picture.length, crc);
-    if (!picture.problem) {
+    picture.problem = read_header(file, uintmax_t(status.st_size), key, picture.length, crc, failed);
+    if (!picture.problem && !failed) {
         auto body = _allocate(picture.length);
         if (!body) {
-            fclose(file);
+            close(file);
             return Picture{.problem = "there is no memory for the picture"};
         }
 
-        if (fread(body.get(), 1, picture.length, file) != picture.length) {
+        const auto count = read_all(file, body.get(), picture.length);
+        if (count < 0) {
+            failed = true;
+        } else if (size_t(count) != picture.length) {
             picture.problem = "the file is shorter than its header says";
         } else if (compute_crc(body.get(), picture.length) != crc) {
             picture.problem = "the CRC is not the picture's";
@@ -210,9 +221,8 @@ ArtworkStore::Picture ArtworkStore::read(const std::string& artwork_id, int32_t 
         }
     }
 
-    const auto failed = ferror(file) != 0;
     const auto read_error = errno;
-    fclose(file);
+    close(file);
 
     if (failed) {
         stop(State::Off, "reading a picture", read_error);
@@ -249,14 +259,11 @@ bool ArtworkStore::write(const std::string& artwork_id, int32_t size, const uint
 
     const auto temporary = get_temporary_path();
 
-    const auto file = fopen(temporary.c_str(), "wb");
-    if (!file) {
+    const auto file = open(temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (file < 0) {
         stop_writing("making the temporary file", errno);
         return false;
     }
-
-    // newlib writes what an unbuffered stream is given from where it is, in one piece.
-    setvbuf(file, nullptr, _IONBF, 0);
 
     // Does not check the removal: a temporary file that stays is begin()'s to remove.
     const auto give_up = [this, &temporary](const char* doing, int doing_error) {
@@ -266,21 +273,22 @@ bool ArtworkStore::write(const std::string& artwork_id, int32_t size, const uint
         return false;
     };
 
-    uint8_t header[HEADER_LENGTH];
+    // The header and the key in one write, which FAT keeps in the file's sector buffer, and then
+    // the picture from where it is.
+    std::string head(HEADER_LENGTH, '\0');
+    const auto header = (uint8_t*)head.data();
     memcpy(header, MARKER, sizeof(MARKER));
     write_u16(header + 4, VERSION);
     write_u16(header + 6, uint32_t(key.size()));
     write_u32(header + 8, uint32_t(length));
     write_u32(header + 12, compute_crc(body, length));
+    head += key;
 
-    Writer writer(file, _buffer, _buffer_length);
     errno = 0;
-
-    const auto written = writer.put(header, sizeof(header)) && writer.put(key.data(), key.size()) &&
-                         writer.put(body, length) && writer.flush();
+    const auto written = write_all(file, head.data(), head.size()) && write_all(file, body, length);
     const auto write_error = errno;
 
-    if (fclose(file) != 0 && written) {
+    if (close(file) != 0 && written) {
         return give_up("closing the temporary file", errno);
     }
     if (!written) {

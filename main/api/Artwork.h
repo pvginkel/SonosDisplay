@@ -60,6 +60,9 @@ public:
     // Whether the image is here and a view holds it.
     bool is_pinned(const std::string& artwork_id, int32_t size) const;
 
+    // Whether the image is here, which leaves it as recently used as it was.
+    bool has(const std::string& artwork_id, int32_t size) const;
+
     size_t get_bytes() const { return _bytes; }
 };
 
@@ -169,6 +172,10 @@ private:
 
     // A picture of `bytes` bytes handed to the card to write.
     struct Unwritten {
+        std::string artwork_id;
+        int32_t size;
+        // The picture's bytes, which the write holds for as long as `held` lives.
+        std::weak_ptr<const uint8_t> body;
         size_t bytes;
         // Expires once the host lets go of the write.
         std::weak_ptr<void> held;
@@ -197,9 +204,11 @@ public:
     ArtworkLoader(const ArtworkLoader&) = delete;
     ArtworkLoader& operator=(const ArtworkLoader&) = delete;
 
-    // An image the cache has is handed over before this returns. Any other waits on the card's
-    // read, which starts once the screen is lit and the read before it is done, and where the card
-    // has no picture to draw, on its download, which starts once the download before it is done.
+    // An image the cache has is handed over before this returns, and so is one that waits to be
+    // written to the card, from the bytes that wait: the card may read before it writes. Any other
+    // waits on the card's read, which starts once the screen is lit and the read before it is
+    // done, and where the card has no picture to draw, on its download, which starts once the
+    // download before it is done.
     void request(ArtworkRequest request);
 
     // Says whether the screen is lit, which the host does on every pass of the UI task's loop.
@@ -236,6 +245,7 @@ public:
 
 private:
     Pending* find(const std::string& artwork_id, int32_t size);
+    bool answer_unwritten(const ArtworkRequest& request);
     void start_next();
     void forget_lost();
     bool write_to_card(ArtworkBody body, size_t length);

@@ -2586,16 +2586,14 @@ static std::shared_ptr<uint8_t> allocate_picture(size_t length) {
     return std::shared_ptr<uint8_t>(new uint8_t[length], std::default_delete<uint8_t[]>());
 }
 
-// The card's store over a folder of the host's, with a buffer many times smaller than a picture.
+// The card's store over a folder of the host's.
 class CardStore {
-    uint8_t _buffer[512];
-
 public:
     ArtworkStore store;
 
     explicit CardStore(const std::string& folder, const char* format = SimHost::CARD_FORMAT,
                        ArtworkStore::Allocate allocate = allocate_picture)
-        : store(folder, format, _buffer, sizeof(_buffer), std::move(allocate)) {}
+        : store(folder, format, std::move(allocate)) {}
 };
 
 static std::vector<uint8_t> read_file(const std::string& path) {
@@ -2699,8 +2697,8 @@ static void expect_store_keeps_a_picture() {
 }
 
 // The key is the artwork id, the size and the format: the same id at another size is another
-// picture, and so are an id that differs in case only and the same id in another format. A cover
-// goes through the buffer in hundreds of pieces and comes back as the device draws it.
+// picture, and so are an id that differs in case only and the same id in another format. A cover,
+// read and written in one piece, comes back as the device draws it.
 static void expect_store_keys() {
     CardFolder folder;
     CardStore card(folder.get_path());
@@ -3468,6 +3466,48 @@ static void expect_unwritten_pictures_are_bounded() {
            "a picture left off the card was not downloaded again and kept the next time");
 }
 
+// A picture that waits to be written to the card is drawn from the bytes that wait, once the cache
+// has let go of it: the card reads ahead of the writes that wait, so it may not hold the picture
+// yet, and the picture is neither read from it nor downloaded again. Once written, it is the
+// card's to read.
+static void expect_a_waiting_write_answers_its_picture() {
+    CardFolder folder;
+    SimHost host(folder.get_path());
+    host.hold_card_writes();
+    ArtworkAsker view{host};
+
+    // Five covers: the first two wait to be written, the cache holds four, and the first is the
+    // one it lets go of.
+    for (const auto id : {"a", "b", "c", "d", "e"}) {
+        view.ask(id);
+    }
+    expect(host.get_artwork_fetches().size() == 5 && host.get_card_reads().size() == 5 &&
+               !host.is_artwork_cached("a", COVER_SIZE),
+           "the cache did not let go of the first of five covers");
+    const std::vector<ArtworkFetch> waiting = {{"a", COVER_SIZE}, {"b", COVER_SIZE}};
+    expect(host.get_card_writes() == waiting && count_files(folder.get_path()) == 0,
+           "the covers that wait to be written are not the first two");
+
+    view.ask("a");
+    expect(view.told == 6 && !view.refused && is_picture(view.image, "a", COVER_SIZE),
+           "a cover that waits to be written was not handed to its view");
+    expect(host.get_artwork_fetches().size() == 5 && host.get_card_reads().size() == 5,
+           "a cover that waits to be written was read from the card, or downloaded again");
+    expect(host.is_artwork_cached("a", COVER_SIZE), "a cover that waits to be written was not cached again");
+
+    // Written, the cover is the card's to read.
+    host.write_card();
+    host.write_card();
+    for (const auto id : {"c", "d", "e", "b"}) {
+        view.ask(id);
+    }
+    view.ask("a");
+    expect(view.told == 11 && !view.refused && is_picture(view.image, "a", COVER_SIZE) &&
+               host.get_card_reads().size() == 7 && host.get_card_reads().back() == ArtworkFetch{"a", COVER_SIZE} &&
+               host.get_artwork_fetches().size() == 5,
+           "a cover written to the card was not read from it");
+}
+
 // A full card takes no writes: the write that finds it full is the last one the card is handed,
 // each download is still handed to its view, and what the card holds is still read.
 static void expect_no_write_to_a_full_card() {
@@ -3588,6 +3628,7 @@ static void now_playing_cover_change(SimHost& host, Shell& shell) {
     expect_a_restart_keeps_the_card();
     expect_no_second_write_of_a_picture();
     expect_unwritten_pictures_are_bounded();
+    expect_a_waiting_write_answers_its_picture();
     expect_no_write_to_a_full_card();
 
     open_now_playing(host, shell, PLAYING);

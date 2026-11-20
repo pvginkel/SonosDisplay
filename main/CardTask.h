@@ -17,9 +17,12 @@
 
 // The card the artwork loader keeps its pictures on (api/Artwork.h): the board's TF card, through
 // ArtworkStore. Every access to the card runs on the card's own task: the mount, a format, the
-// clearing at start, and then the reads, the writes and the erases the UI task asks for, in the
-// order it asked. The task touches no LVGL, model, I2C or NVS, and hands a read's answer to the UI
-// task through its queue.
+// clearing at start, and then the reads, the writes and the erases the UI task asks for. A read
+// goes ahead of whatever waits, since a view waits for it and for nothing else; the writes and the
+// erases follow in the order they were asked for. The loader asks for one read at a time, and
+// answers a picture that waits to be written from its bytes, so a read never needs a write that
+// waits behind it. The task touches no LVGL, model, I2C or NVS, and hands a read's answer to the
+// UI task through its queue.
 //
 // The card never stops the boot. Until it is mounted, and when it is missing or fails, the card is
 // off, and the loader downloads every picture.
@@ -45,15 +48,9 @@ private:
 
     struct Job;
 
-    // One sector. Every byte to and from the card passes through it: the driver transfers into
-    // and out of internal RAM as it is, a sector a command, and takes a sector of internal RAM of
-    // its own for each transfer that touches PSRAM.
-    static constexpr size_t BUFFER_LENGTH = 512;
-
     Queue* _ui_queue;
     TfCard* _tf_card;
     Answered _answered;
-    alignas(4) uint8_t _buffer[BUFFER_LENGTH];
     ArtworkStore _store;
     // The task's control block, which FreeRTOS keeps in internal RAM; its stack is in PSRAM.
     StaticTask_t _task;
@@ -62,6 +59,8 @@ private:
     std::atomic<State> _state{State::Mounting};
     // What the mount found. The card's task only.
     TfCard::Mount _mount{};
+    // When the work under way was asked for, in esp_get_millis()'s time. The card's task only.
+    int64_t _asked{};
     // The reads asked for whose answer has not run on the UI task, or been dropped. The UI task
     // only.
     uint32_t _unanswered{};
@@ -91,7 +90,7 @@ public:
     void erase(const std::string& artwork_id, int32_t size) override;
 
 private:
-    bool post(Work work);
+    bool post(Work work, bool first = false);
     void run();
     void mount();
     void perform(ArtworkRead& read);

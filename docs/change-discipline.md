@@ -43,7 +43,7 @@ placeholder box.
   is when a second firmware needs it.
 - **`main/api/` is where the backend's answers are read**, into `ui/`'s types, and where the
   bodies of the requests are written (`Requests`). It includes cJSON, LVGL, the C++ standard
-  library and `ui/`'s two doors only, so `sim/` builds it, the scenes read their fixtures as the
+  library, POSIX's file calls (`ArtworkStore`) and `ui/`'s two doors only, so `sim/` builds it, the scenes read their fixtures as the
   device reads the backend, and they check the bodies the device sends; `kc project test` fails
   on an ESP-IDF include there.
 - **`main/board/` is the only code that talks to the hardware.** `ScreenPower` is the only code

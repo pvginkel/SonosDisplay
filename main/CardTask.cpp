@@ -14,8 +14,13 @@ LOG_TAG(CardTask);
 // The stack is in PSRAM, where internal RAM has no room for it. A task with its stack there
 // cannot write flash, which ESP-IDF asserts (spi_flash's cache_utils.c): the task uses no NVS.
 static constexpr uint32_t TASK_STACK_SIZE = 8192;
-static constexpr UBaseType_t TASK_PRIORITY = 1;
 static constexpr BaseType_t TASK_CORE = 0;
+
+// Above the backend's clients, which run on the same core: a read of a cover waits on the bus a
+// sector at a time, and at their priority it would wait for the slice of a client busy with TLS
+// each time the bus is done, a tick of 1 ms. The task waits on the bus for most of its work, and
+// the UI task is on the other core.
+static constexpr UBaseType_t TASK_PRIORITY = 2;
 
 // What may wait at once: a read, the erases of pictures that failed their checks, and the writes
 // the loader's limit allows, which are the most of the smallest picture the views ask for, 80 px.
@@ -25,6 +30,8 @@ static_assert(ArtworkLoader::MAX_UNWRITTEN_BYTES / SMALLEST_PICTURE_BYTES < QUEU
 
 struct CardTask::Job {
     Work work;
+    // When it was asked for, in esp_get_millis()'s time.
+    int64_t asked;
 
     // In PSRAM, as what is numerous is: as many as QUEUE_DEPTH wait.
     static void* operator new(size_t size) noexcept { return heap_caps_malloc(size, MALLOC_CAP_SPIRAM); }
@@ -46,7 +53,7 @@ CardTask::CardTask(Queue* ui_queue, TfCard* tf_card, const char* format, Answere
     : _ui_queue(ui_queue),
       _tf_card(tf_card),
       _answered(std::move(answered)),
-      _store(TfCard::MOUNT_POINT, format, _buffer, sizeof(_buffer), allocate_picture) {}
+      _store(TfCard::MOUNT_POINT, format, allocate_picture) {}
 
 esp_err_t CardTask::begin() {
     _jobs = xQueueCreateWithCaps(QUEUE_DEPTH, sizeof(Job*), MALLOC_CAP_SPIRAM);
@@ -75,11 +82,12 @@ bool CardTask::is_on() const {
 
 bool CardTask::is_writable() const { return _state.load() == State::On; }
 
-// A read the task has no room for is let go of, and the loader then downloads the picture.
+// A read goes ahead of the writes and the erases that wait. One the task has no room for is let go
+// of, and the loader then downloads the picture.
 void CardTask::read(ArtworkRead&& read) {
     const auto size = read.size;
 
-    if (post(std::move(read))) {
+    if (post(std::move(read), true)) {
         _unanswered++;
     } else {
         ESP_LOGW(TAG, "The card's task has no room for a read: artwork at %d px is downloaded", int(size));
@@ -102,11 +110,11 @@ void CardTask::erase(const std::string& artwork_id, int32_t size) {
     }
 }
 
-// Hands the task its next work, on the UI task, which never waits for room. What there is no room
-// for is destroyed before this returns.
-bool CardTask::post(Work work) {
-    const auto job = new Job{std::move(work)};
-    if (job && xQueueSend(_jobs, &job, 0) == pdTRUE) {
+// Hands the task its next work, on the UI task, which never waits for room: at the back of what
+// waits, or with `first` ahead of it. What there is no room for is destroyed before this returns.
+bool CardTask::post(Work work, bool first) {
+    const auto job = new Job{std::move(work), esp_get_millis()};
+    if (job && (first ? xQueueSendToFront(_jobs, &job, 0) : xQueueSendToBack(_jobs, &job, 0)) == pdTRUE) {
         return true;
     }
 
@@ -122,6 +130,7 @@ void CardTask::run() {
         Job* job;
         xQueueReceive(_jobs, &job, portMAX_DELAY);
 
+        _asked = job->asked;
         std::visit([this](auto& work) { perform(work); }, job->work);
 
         // Lets go of a write and its bytes: the loader counts them as waiting until here.
@@ -158,8 +167,8 @@ void CardTask::perform(ArtworkRead& read) {
     auto picture = _store.read(read.artwork_id, read.size);
 
     if (picture.body) {
-        ESP_LOGI(TAG, "Read artwork at %d px: %zu bytes in %" PRId64 " ms", int(read.size), picture.length,
-                 esp_get_millis() - started);
+        ESP_LOGI(TAG, "Read artwork at %d px: %zu bytes in %" PRId64 " ms, after %" PRId64 " ms in the queue",
+                 int(read.size), picture.length, esp_get_millis() - started, started - _asked);
     } else if (picture.problem) {
         ESP_LOGW(TAG, "The card has no artwork at %d px to hand over: %s", int(read.size), picture.problem);
     }
@@ -219,11 +228,16 @@ void CardTask::log_mount() const {
             ESP_LOGW(TAG, "No TF card answers (%s): artwork is not kept across restarts", esp_err_to_name(_mount.err));
             break;
         case TfCard::Found::Mounted:
-            ESP_LOGI(TAG, "The TF card is mounted: %" PRIu32 " MB", _mount.megabytes);
+            ESP_LOGI(TAG,
+                     "The TF card is mounted: %" PRIu32 " MB, %" PRIu32 " KB allocation units, at %" PRIu32 " kHz%s",
+                     _mount.megabytes, _mount.cluster_bytes / 1024, _mount.clock_khz,
+                     _mount.slowed ? ", having failed at the high clock" : "");
             break;
         case TfCard::Found::Formatted:
-            ESP_LOGW(TAG, "The TF card could not be mounted, and is mounted after a format: %" PRIu32 " MB",
-                     _mount.megabytes);
+            ESP_LOGW(TAG,
+                     "The TF card could not be mounted, and is mounted after a format: %" PRIu32 " MB, %" PRIu32
+                     " KB allocation units, at %" PRIu32 " kHz",
+                     _mount.megabytes, _mount.cluster_bytes / 1024, _mount.clock_khz);
             break;
         case TfCard::Found::Failed:
             ESP_LOGE(TAG, "The TF card cannot be mounted (%s): artwork is not kept across restarts",

@@ -19,7 +19,7 @@ SimHost::SimHost(std::unique_ptr<CardFolder> card_folder) : SimHost(card_folder-
 }
 
 SimHost::SimHost(const std::string& card_folder)
-    : _card(card_folder, CARD_FORMAT, _card_buffer, sizeof(_card_buffer), [](size_t length) {
+    : _card(card_folder, CARD_FORMAT, [](size_t length) {
           return std::shared_ptr<uint8_t>(new uint8_t[length], std::default_delete<uint8_t[]>());
       }) {
     _model.backend_url = "http://sonos-controller.example:5000";
