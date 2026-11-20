@@ -1498,7 +1498,14 @@ kept for it (`docs/adding-a-display.md`).
   sector's token, about 0.1 ms a sector by ESP-IDF's own figure. A read that fails at 40 MHz is
   made again at 20 MHz, once the card is told to stop sending, and the card stays at 20 MHz until
   the next restart. A write that fails is not made again: after a failure the SPI host sends no
-  stop token, so the card may take what comes next for the rest of the write.
+  stop token, so the card may take what comes next for the rest of the write. The garage display's
+  card fails at 40 MHz at every start (ESP_ERR_INVALID_RESPONSE: ESP-IDF reads the card's SCR
+  again once the clock is raised, and what came back was corrupt), so on this board 20 MHz is what
+  the bus gives in practice, 2.5 MB/s on the wire, a 400 px cover in 130 ms. The SPI host's work
+  between sectors takes as long again and more there: the code runs from PSRAM, and the card's
+  stack in PSRAM costs the SPI host a bounce buffer for each poll of the bus. Taking it out of
+  PSRAM, the SPI driver's code in IRAM (`CONFIG_SPI_MASTER_IN_IRAM`, about 8 KB) or the card's
+  stack in internal RAM, costs internal RAM the budget does not have.
 - **No cleanup.** Nothing is ever evicted. A card with no room, ENOSPC or EACCES at any step of a
   write, stops the writes until the next restart: the temporary file is deleted, one line is
   logged, and reads go on. Any other error of the card turns it off until the next restart, and
@@ -1666,12 +1673,16 @@ track on the speaker; the headings' presses and the tracks' lines under a finger
 display's own link, now playing left before its cover arrived and opened again, which should show
 the cover without a second download while the log says the cover was kept.
 
-Nothing of the TF card (section 7) has run on a display yet. What only a display shows of it is
-still to see there, with a card that holds nothing to keep: the mount's line after a power-on and
-after a restart, which shows the card answering in SPI mode while it is selected from the
-expander's first write on, and the SD driver's commands sent from a stack in PSRAM; an empty slot,
-which should log a timeout; the format of a card FAT cannot mount; covers drawn from the card
-after a restart with no download in the log, and how long a read and a write take a sector at a
-time; the errno FAT gives a full card; a power cut during a write; and free internal RAM with a
-card mounted and the largest list open, against the 60 KB target, with the driver's own
-allocations on top of the build's 3,544 bytes.
+The TF card (section 7) ran on the garage display from 2026-11-20, with an 8 GB card that mounted
+as it was, FAT with allocation units of 32 KB. Covers came from the card after a restart with no
+download in the log, and with a 299-track queue open internal RAM's low point was 64,427 bytes
+free. With ESP-IDF's disk functions, a sector a command, a read took 76 to 190 ms at 80 px, 244 to
+477 ms at 160 px and 1,074 to 1,134 ms at 400 px, about 0.3 MB/s, and a write about 0.5 s at 80
+px and 3.2 to 3.5 s at 400 px; a read waited behind every write asked for before it. With
+`TfCard`'s own, a command an allocation unit, at 20 MHz after the card failed at 40, and a read
+ahead of the writes (a7c950d), the reads took 22 ms at 80 px, 77 ms at 160 px and 311 to 320 ms at
+400 px, each after 0 ms in the queue, and internal RAM's low point was 73,895 bytes free with
+Home, an artist's albums, two albums' tracks and now playing opened. What only a display shows of
+it is still to see there: how long a write takes now, and how long a read waits behind one;
+internal RAM's low point with the queue open; an empty slot, which should log a timeout; the format of a card FAT cannot mount; the
+errno FAT gives a full card; and a power cut during a write.
