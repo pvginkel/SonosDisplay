@@ -50,7 +50,7 @@ void ArtistsView::apply_favourite(const FavouriteChange& change) {
 }
 
 void ArtistsView::open_row(size_t index) {
-    _shell->push(std::make_unique<AlbumsView>(_host, _shell, _artists.items[index]));
+    _shell->push(std::make_unique<AlbumsView>(_host, _shell, _artists.items[index], get_favourites_read()));
 }
 
 void ArtistsView::do_render_beside(lv_obj_t* body, lv_obj_t* area) {

@@ -36,6 +36,7 @@ ListView::ListView(UiHost* host, Shell* shell, std::string title)
       _title(std::move(title)),
       _changes_applied(host->get_model().favouring.changes_taken),
       _favourites_changes(host->get_model().favourites_changes),
+      _favourites_read(_favourites_changes),
       _shell(shell) {}
 
 void ListView::do_render(lv_obj_t* parent) {
@@ -140,6 +141,8 @@ void ListView::ask(uint32_t page) {
     const auto& pages = get_pages();
     const auto shown = !pages.is_held() || pages.has_failed(page);
 
+    // Before the request: its answer may come within it.
+    _pages_on_their_way++;
     request_page(page);
 
     if (shown) {
@@ -449,8 +452,12 @@ void ListView::create_track_presses(lv_obj_t* row, const std::string& album_id, 
 }
 
 void ListView::create_heading_presses(lv_obj_t* heading, ItemKind kind, const std::string& item_id,
-                                      std::optional<int64_t> favourite_id) {
+                                      std::optional<int64_t> favourite_id, uint32_t favourites_read) {
     _heading_presses = std::make_unique<ItemPresses>(_host, heading, kind, item_id, favourite_id);
+
+    if (favourites_read != _host->get_model().favourites_changes) {
+        request_heading_item();
+    }
 }
 
 void ListView::show_heading_favourite(std::optional<int64_t> favourite_id) {
@@ -489,11 +496,37 @@ void ListView::apply_favourites() {
         return;
     }
     if (has_favourites()) {
+        _rereading_at = model.favourites_changes;
+        _reread_failed = false;
         refresh();
     }
     if (_heading_presses) {
         request_heading_item();
     }
+}
+
+void ListView::list_changed() {
+    _changed = true;
+    _pages_on_their_way--;
+
+    if (_rereading_at && get_pages().state != LoadState::Loaded) {
+        _reread_failed = true;
+    }
+    finish_rereading();
+}
+
+// Once every page apply_favourites() asked for again came, and no other is on its way, the marks of
+// the items held were read at the count they were asked for again at, unless one did not come: they
+// then keep the count they had.
+void ListView::finish_rereading() {
+    if (!_rereading_at || _pages_on_their_way || !_asked_again.empty()) {
+        return;
+    }
+
+    if (!_reread_failed) {
+        _favourites_read = *_rereading_at;
+    }
+    _rereading_at.reset();
 }
 
 // Whether the ids of `sending`, of the requests or the changes on their way, are those of `shown`.
@@ -593,6 +626,8 @@ void ListView::ask_near_ends() {
             return;
         }
     }
+    // What was left to ask for again is no longer held, or nothing was.
+    finish_rereading();
 
     const auto reach = lv_obj_get_height(_list);
     const auto after = pages.page_after();

@@ -8,8 +8,8 @@
 #include "Theme.h"
 #include "TracksView.h"
 
-AlbumsView::AlbumsView(UiHost* host, Shell* shell, const Artist& artist)
-    : ListView(host, shell, artist.title), _artist(artist) {}
+AlbumsView::AlbumsView(UiHost* host, Shell* shell, const Artist& artist, uint32_t favourites_read)
+    : ListView(host, shell, artist.title), _artist(artist), _favourites_read(favourites_read) {}
 
 void AlbumsView::request_page(uint32_t page) {
     _albums.ask(page);
@@ -47,11 +47,11 @@ void AlbumsView::apply_favourite(const FavouriteChange& change) {
 }
 
 void AlbumsView::open_row(size_t index) {
-    _shell->push(std::make_unique<TracksView>(_host, _shell, _albums.items[index]));
+    _shell->push(std::make_unique<TracksView>(_host, _shell, _albums.items[index], get_favourites_read()));
 }
 
 void AlbumsView::do_render_heading(lv_obj_t* heading) {
-    create_heading_presses(heading, ItemKind::Artist, _artist.id, _artist.favourite_id);
+    create_heading_presses(heading, ItemKind::Artist, _artist.id, _artist.favourite_id, _favourites_read);
 }
 
 // An artist that did not come leaves the toggle as it is.

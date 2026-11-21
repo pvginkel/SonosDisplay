@@ -810,9 +810,12 @@ void HttpClient::send(HttpRequest request, std::weak_ptr<void> scope,
   artist's albums and an album's tracks, whose heading holds the item's toggle (section 5), fetch
   that item again on its own, `GET /api/library/artists/{id}` or `GET /api/library/albums/{id}`,
   when they missed more than 8 and whenever the favourites may have changed unseen; one that does
-  not come leaves the toggle as it is. Home lists
-  the favourites with `GET /api/favourites`, by title (`sort_by=title`), so a new mark lands in its
-  place. A favourite that is not available, which Plex does not have or does not answer for, keeps
+  not come leaves the toggle as it is. They open with the mark their opener holds, the list's item
+  or Home's sheet, and the `Model::favourites_changes` it was read at, and fetch the item at once
+  when the model is past it: a list asked for again keeps the count it had until every page it asks
+  for again came, and keeps it still when one did not, and the sheet keeps the count of its tile.
+  Home lists the favourites with `GET /api/favourites`, by title (`sort_by=title`), so a new mark
+  lands in its place. A favourite that is not available, which Plex does not have or does not answer for, keeps
   its title; the firmware keeps its `item_id` and `artwork_id` only while it is available, and
   refuses an available one without an `item_id`.
 - **The bodies are written in `main/api/Requests`** (`write_volume_change`,
@@ -1094,8 +1097,9 @@ the device would send.
   nothing. The heading's presses stay while the list is built again. The artists, albums and
   playlists apply at once what the backend took of this display's presses on the toggles, and ask
   again for the pages they hold whenever `Model::favourites_changes` moves (section 4); an
-  artist's albums and an album's tracks ask for the item of their heading as well. The queue
-  lists each entry's title and, beside it, its artist. It opens on the page holding the loaded
+  artist's albums and an album's tracks ask for the item of their heading as well, and as they
+  open where it moved since their opener read the item's mark. The queue lists each entry's title
+  and, beside it, its artist. It opens on the page holding the loaded
   track, that row at the top and marked in the accent; while no track of the queue is loaded, a
   line under the heading says it plays from another source, or the screen says the queue is empty.
   While it shows it asks again for the pages it holds when `Model::queue_changes` moves, and once

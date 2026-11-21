@@ -6,7 +6,8 @@
 // name, ends in the artist's presses (ItemPresses): Play and Add to queue, which queue its albums
 // newest first, Shuffle, and the favourite toggle, which shows the favourite that marks the artist
 // as the screen was opened with it, then as the backend takes a mark or an unmark, and as the
-// backend holds it, asked for again whenever the favourites may have changed unseen.
+// backend holds it, asked for as the screen opens where the favourites may have changed unseen
+// since its opener read the mark, and again whenever they may have changed unseen.
 
 #include <cstddef>
 #include <cstdint>
@@ -16,11 +17,13 @@
 
 class AlbumsView : public ListView {
     Artist _artist;
+    uint32_t _favourites_read;
     PagedList<Album> _albums;
 
 public:
-    // The albums of `artist`, whose favourite_id is the favourite that marks it now.
-    AlbumsView(UiHost* host, Shell* shell, const Artist& artist);
+    // The albums of `artist`, whose favourite_id is the favourite that marked it while the model's
+    // favourites_changes was `favourites_read`.
+    AlbumsView(UiHost* host, Shell* shell, const Artist& artist, uint32_t favourites_read);
 
 protected:
     PageWindow& get_pages() override { return _albums; }

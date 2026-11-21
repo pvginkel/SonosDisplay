@@ -6211,7 +6211,8 @@ static void open_albums_screen(SimHost& host, Shell& shell) {
     open_home(host, shell, PLAYING);
 
     shell.push(std::make_unique<AlbumsView>(
-        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'},
+        host.get_model().favourites_changes));
 }
 
 // Sigur Rós's albums over Home, and a touch on the row of the album titled `title`, scrolled into
@@ -6332,7 +6333,8 @@ static const char* check_albums_empty(const SimHost&, const Shell& shell) {
 static void albums_end(SimHost& host, Shell& shell) {
     host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
     open_home(host, shell, PLAYING);
-    shell.push(std::make_unique<AlbumsView>(&host, &shell, Artist{.id = "artist-29", .title = "Sigur Rós"}));
+    shell.push(std::make_unique<AlbumsView>(&host, &shell, Artist{.id = "artist-29", .title = "Sigur Rós"},
+                                            host.get_model().favourites_changes));
 
     scroll_list(shell, true);
 }
@@ -6522,7 +6524,8 @@ static const char* check_tracks(const SimHost& host, const Shell& shell) {
 static void open_tracks(SimHost& host, Shell& shell) {
     open_home(host, shell, PLAYING);
 
-    shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-12", .title = "Complete Recordings"}));
+    shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-12", .title = "Complete Recordings"},
+                                            host.get_model().favourites_changes));
 }
 
 // An album of 148 tracks: the first page, and scrolled to its end, the second, after the first.
@@ -7267,7 +7270,8 @@ static void open_kveikur(SimHost& host, Shell& shell) {
     host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
     open_home(host, shell, PLAYING);
 
-    shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-2", .title = "Kveikur"}));
+    shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-2", .title = "Kveikur"},
+                                            host.get_model().favourites_changes));
 }
 
 // What the presses on Play, Shuffle and Add to queue of Kveikur send, in that order, and their
@@ -7327,7 +7331,8 @@ static void albums_long_title(SimHost& host, Shell& shell) {
     open_home(host, shell, PLAYING);
     host.albums().serve(200, make_pages(make_albums_with_edition(), make_albums_body));
     shell.push(std::make_unique<AlbumsView>(
-        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'},
+        host.get_model().favourites_changes));
 
     show_row(shell, make_albums_with_edition()[5].title.c_str());
 }
@@ -8607,7 +8612,8 @@ static void open_copies(SimHost& host, Shell& shell, const std::vector<std::stri
     host.albums().serve(200, pages);
     host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
     shell.push(std::make_unique<AlbumsView>(
-        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'}));
+        &host, &shell, Artist{.id = "artist-29", .title = LIBRARY[SIGUR_ROS].first, .index_letter = 'S'},
+        host.get_model().favourites_changes));
 }
 
 // An unmark of one of two copies from the heading of its tracks, answered 204, and back: the
@@ -8891,7 +8897,8 @@ static void open_atta_twice(SimHost& host, Shell& shell) {
     open_albums_screen(host, shell);
 
     for (auto i = 0; i < 2; i++) {
-        shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-1", .title = "Átta"}));
+        shell.push(std::make_unique<TracksView>(&host, &shell, Album{.id = "album-1", .title = "Átta"},
+                                                host.get_model().favourites_changes));
     }
 }
 
@@ -9246,6 +9253,130 @@ static const char* check_albums_favourites_changed_under(const SimHost& host, co
     }
 
     return check_heading_presses({}, false, false);
+}
+
+// The artists, with Sigur Rós unmarked, and no change of the favourites since they came: a press on
+// her opens her albums, which do not ask for her, the toggle in their heading showing her unmarked,
+// as her row held her.
+static void artists_opened_unchanged(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_library(host, shell, LIBRARY);
+
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_row(host, shell, LIBRARY[SIGUR_ROS].first.c_str());
+}
+
+static const char* check_artists_opened_unchanged(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (host.artists().get_requests() != std::vector<uint32_t>{1} || !host.artist().get_requests().empty()) {
+        return "the artists were asked for again, or her albums asked for her";
+    }
+    if (const auto problem = check_albums_asked(host, "artist-29")) {
+        return problem;
+    }
+
+    return check_heading_presses({}, false, false);
+}
+
+// Another display marks Sigur Rós while the artists show, and the event stream says so: the
+// artists, asked for again, come with her marked before a press on her, so her albums, which open
+// with the mark her row holds, do not ask for her.
+static void artists_opened_after_change(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_library(host, shell, LIBRARY);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.artists().serve(200, with_mark(make_artist_pages(LIBRARY), SIGUR_ROS, MARKED_ELSEWHERE));
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_row(host, shell, LIBRARY[SIGUR_ROS].first.c_str());
+}
+
+static const char* check_artists_opened_after_change(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the artists were not asked for again, once";
+    }
+    if (!host.artist().get_requests().empty()) {
+        return "her albums asked for her, though the artists came again after the change";
+    }
+    if (const auto problem = check_albums_asked(host, "artist-29")) {
+        return problem;
+    }
+
+    return check_heading_presses({}, false, true);
+}
+
+// Another display marks Sigur Rós while the artists show, and the event stream says so: the
+// artists, asked for again, have not come when a press on her opens her albums, so the mark her row
+// holds was read before the change, and her albums ask for her at once; the toggle in their heading
+// shows the favourite the backend holds.
+static void artists_opened_across_change(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_library(host, shell, LIBRARY);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.artists().serve(200, {});
+        host.artist().serve("artist-29", 200, make_sigur_ros_marked_elsewhere());
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_row(host, shell, LIBRARY[SIGUR_ROS].first.c_str());
+}
+
+static const char* check_artists_opened_across_change(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 3)) {
+        return problem;
+    }
+    if (host.artists().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the artists were not asked for again, once";
+    }
+    if (host.artist().get_requests() != std::vector<std::string>{"artist-29"}) {
+        return "her albums did not ask for her as they opened, once";
+    }
+    if (const auto problem = check_albums_asked(host, "artist-29")) {
+        return problem;
+    }
+
+    return check_heading_presses({}, false, true);
+}
+
+// Another display marks Átta while Sigur Rós's albums show, and the event stream says so: the
+// albums, asked for again, have not come when a press on Átta opens its tracks, which ask for the
+// album at once; the toggle in their heading shows the favourite the backend holds.
+static void albums_opened_across_change(SimHost& host, Shell& shell) {
+    host.tracks().serve(200, make_pages(KVEIKUR, make_tracks_body));
+    open_albums_screen(host, shell);
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.albums().serve(200, {});
+        host.album().serve("album-1", 200, make_atta_marked_elsewhere());
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_row(host, shell, "Átta");
+}
+
+static const char* check_albums_opened_across_change(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<TracksView>(shell, 3)) {
+        return problem;
+    }
+    if (host.albums().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "the albums were not asked for again, once";
+    }
+    if (host.album().get_requests() != std::vector<std::string>{"album-1"}) {
+        return "its tracks did not ask for the album as they opened, once";
+    }
+    if (const auto problem = check_tracks_asked(host, "album-1")) {
+        return problem;
+    }
+
+    return check_heading_presses({}, false, true);
 }
 
 static const char FAVOURITE_AGAETIS_BYRJUN[] =
@@ -11595,6 +11726,53 @@ static const char* check_home_tile_unmark_albums(const SimHost& host, const Shel
     return check_heading_presses({}, true, false);
 }
 
+// Björk as the backend answers a request for her once another display unmarked her.
+static const char BJORK_UNMARKED[] =
+    R"({"artwork_id":null,"favourite_id":null,"id":"artist-3","index_letter":"B","title":"Björk"})";
+
+// The favourites as the backend holds them once another display unmarked Björk.
+static std::vector<FavouriteFixture> make_favourites_without_bjork() {
+    auto favourites = FAVOURITES;
+    std::erase_if(favourites, [](const FavouriteFixture& favourite) { return favourite.title == "Björk"; });
+
+    return favourites;
+}
+
+// Another display unmarks Björk while her sheet is open, and the event stream says so: Home asks
+// for the favourites again, which come without her, and the sheet still shows her marked, as her
+// tile was read before the change; the way to her albums opens them, and they ask for her at once,
+// the toggle in their heading showing her unmarked, as the backend holds her.
+static void home_sheet_opened_across_change(SimHost& host, Shell& shell) {
+    host.albums().serve(200, make_pages(ALBUMS, make_albums_body));
+    open_home_tiles(host, shell);
+    open_tile(shell, "Björk");
+
+    host.answer_after(ELSEWHERE_MS, [&host]() {
+        host.favourites().serve(200, make_favourite_pages(make_favourites_without_bjork()));
+        host.artist().serve("artist-3", 200, BJORK_UNMARKED);
+        host.send_favourites_changed();
+    });
+    host.wait(SimHost::TAP_INTERVAL_MS);
+    tap_label(host, shell, MSG_ALBUMS);
+}
+
+static const char* check_home_sheet_opened_across_change(const SimHost& host, const Shell& shell) {
+    if (const auto problem = check_screen<AlbumsView>(shell, 2)) {
+        return problem;
+    }
+    if (host.favourites().get_requests() != std::vector<uint32_t>{1, 1}) {
+        return "Home did not ask for the favourites again, once";
+    }
+    if (host.artist().get_requests() != std::vector<std::string>{"artist-3"}) {
+        return "her albums did not ask for her as they opened, once";
+    }
+    if (const auto problem = check_albums_asked(host, "artist-3")) {
+        return problem;
+    }
+
+    return check_heading_presses({}, false, false);
+}
+
 // Unmarked from its sheet, before the backend says the favourites changed, Ágætis byrjun's tracks
 // open from it with the album unmarked in their heading, as the sheet's toggle shows it, not as its
 // tile was fetched; a press on their toggle marks it.
@@ -11804,6 +11982,8 @@ const std::vector<Scene>& get_scenes() {
         {"home-tile-unmark-reopened", home_tile_unmark_reopened, check_home_tile_unmark_reopened, after_touches_ms(3)},
         {"home-tile-unmark-albums", home_tile_unmark_albums, check_home_tile_unmark_albums, after_touches_ms(3)},
         {"home-tile-unmark-tracks", home_tile_unmark_tracks, check_home_tile_unmark_tracks, after_touches_ms(3)},
+        {"home-sheet-opened-across-change", home_sheet_opened_across_change, check_home_sheet_opened_across_change,
+         after_touches_ms(2)},
         {"home-tile-mark-again-reopened", home_tile_mark_again_reopened, check_home_tile_mark_again_reopened,
          after_touches_ms(6)},
         {"now-playing", now_playing, check_now_playing},
@@ -12006,6 +12186,13 @@ const std::vector<Scene>& get_scenes() {
          check_albums_favourites_changed_refused, after_touches_ms(2)},
         {"albums-favourites-changed-under", albums_favourites_changed_under, check_albums_favourites_changed_under,
          after_touches_ms(4)},
+        {"artists-opened-unchanged", artists_opened_unchanged, check_artists_opened_unchanged, after_touches_ms(2)},
+        {"artists-opened-after-change", artists_opened_after_change, check_artists_opened_after_change,
+         after_touches_ms(2)},
+        {"artists-opened-across-change", artists_opened_across_change, check_artists_opened_across_change,
+         after_touches_ms(2)},
+        {"albums-opened-across-change", albums_opened_across_change, check_albums_opened_across_change,
+         after_touches_ms(2)},
         {"albums-favourite-copies-changed", albums_favourite_copies_changed, check_albums_favourite_copies_changed,
          after_touches_ms(5)},
         {"playlists-favourites-changed", playlists_favourites_changed, check_playlists_favourites_changed,

@@ -263,6 +263,7 @@ void HomeView::open_sheet(const Favourite& favourite, std::optional<int64_t> fav
     lv_obj_clean(_sheet_actions);
 
     _sheet_favourite = favourite;
+    _sheet_favourites_read = get_favourites_read();
     lv_label_set_text(_sheet_title, favourite.title.c_str());
 
     const auto opens = favourite.kind != ItemKind::Playlist;
@@ -318,12 +319,13 @@ void HomeView::item_clicked(lv_event_t* event) {
             std::make_unique<AlbumsView>(self->_host, self->_shell,
                                          Artist{.id = favourite.item_id,
                                                 .title = favourite.title,
-                                                .favourite_id = self->_sheet_presses->get_favourite_id()}));
+                                                .favourite_id = self->_sheet_presses->get_favourite_id()},
+                                         self->_sheet_favourites_read));
     } else {
-        self->_shell->push(
-            std::make_unique<TracksView>(self->_host, self->_shell,
-                                         Album{.id = favourite.item_id,
-                                               .title = favourite.title,
-                                               .favourite_id = self->_sheet_presses->get_favourite_id()}));
+        self->_shell->push(std::make_unique<TracksView>(self->_host, self->_shell,
+                                                        Album{.id = favourite.item_id,
+                                                              .title = favourite.title,
+                                                              .favourite_id = self->_sheet_presses->get_favourite_id()},
+                                                        self->_sheet_favourites_read));
     }
 }

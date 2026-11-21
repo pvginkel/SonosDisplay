@@ -15,7 +15,8 @@
 // its albums or its tracks, which closes the sheet. A press beside the sheet closes it too. Its
 // toggle shows the favourite that marks the item: the tile's, until the backend takes a mark or an
 // unmark of the item from this display; the tile of a favourite unmarked stays until the favourites
-// come again. An artist's albums and an album's tracks open with the favourite the toggle shows.
+// come again. An artist's albums and an album's tracks open with the favourite the toggle shows, and
+// ask for their item at once where the favourites may have changed unseen since the tile was read.
 
 #include <cstddef>
 #include <cstdint>
@@ -57,9 +58,10 @@ class HomeView : public ListView {
     lv_obj_t* _sheet{};
     lv_obj_t* _sheet_title{};
     lv_obj_t* _sheet_actions{};
-    // The favourite the sheet last opened on, and the presses of its item, none before it first
-    // opens.
+    // The favourite the sheet last opened on, the model's favourites_changes its tile was read at,
+    // and the presses of its item, none before it first opens.
     Favourite _sheet_favourite;
+    uint32_t _sheet_favourites_read{};
     std::unique_ptr<ItemPresses> _sheet_presses;
 
 public:

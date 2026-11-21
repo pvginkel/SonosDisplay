@@ -5,7 +5,8 @@
 // ends in the album's presses (ItemPresses): Play, which plays it from its first track, Shuffle, Add
 // to queue, and the favourite toggle, which shows the favourite that marks the album as the screen
 // was opened with it, then as the backend takes a mark or an unmark, and as the backend holds it,
-// asked for again whenever the favourites may have changed unseen.
+// asked for as the screen opens where the favourites may have changed unseen since its opener read
+// the mark, and again whenever they may have changed unseen.
 
 #include <cstddef>
 #include <cstdint>
@@ -15,11 +16,13 @@
 
 class TracksView : public ListView {
     Album _album;
+    uint32_t _favourites_read;
     PagedList<AlbumTrack> _tracks;
 
 public:
-    // The tracks of `album`, whose favourite_id is the favourite that marks it now.
-    TracksView(UiHost* host, Shell* shell, const Album& album);
+    // The tracks of `album`, whose favourite_id is the favourite that marked it while the model's
+    // favourites_changes was `favourites_read`.
+    TracksView(UiHost* host, Shell* shell, const Album& album, uint32_t favourites_read);
 
 protected:
     PageWindow& get_pages() override { return _tracks; }

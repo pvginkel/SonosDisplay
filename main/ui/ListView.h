@@ -7,7 +7,8 @@
 // opens an item whose row it made openable; it may end the heading with its own, the presses of
 // the item the screen opens on among them, and say a line under it. A list whose items carry a
 // favourite, or are the favourites, asks for them again whenever the favourites may have changed
-// unseen, and a screen whose heading ends in an item's presses asks for the item again. While the
+// unseen, and a screen whose heading ends in an item's presses asks for the item again, and as it
+// opens where they may have changed unseen since its opener read the item's mark. While the
 // Shell's "Reconnecting" marker shows at the top right, the heading ends before it.
 //
 // At most two pages are held, so at most 200 rows are built: scrolled to within a screen of an
@@ -60,6 +61,15 @@ class ListView : public View {
     // the model's favourites_changes then.
     uint32_t _changes_applied;
     uint32_t _favourites_changes;
+    // The model's favourites_changes the marks of the items held were read at
+    // (get_favourites_read()). While the pages held are asked for again because the favourites
+    // may have changed, the count they are asked for again at, and whether a page did not come
+    // meanwhile.
+    uint32_t _favourites_read;
+    std::optional<uint32_t> _rereading_at;
+    bool _reread_failed{};
+    // How many pages asked for are on their way.
+    size_t _pages_on_their_way{};
 
 protected:
     Shell* _shell;
@@ -142,11 +152,13 @@ protected:
 
     // Ends `heading`, which do_render_heading() was handed, with the presses of the item the screen
     // opens on, of this kind and with this id (ItemPresses), the toggle showing the favourite with
-    // `favourite_id`, or none. They show their press on its way, and the toggle what the backend
-    // took, as a row's do, and stay while the list is built again. Whenever the favourites may have
-    // changed unseen, the view asks for the item again (request_heading_item()).
+    // `favourite_id`, or none, which the opener read while the model's favourites_changes was
+    // `favourites_read`. They show their press on its way, and the toggle what the backend took, as
+    // a row's do, and stay while the list is built again. Where the favourites may have changed
+    // unseen since the opener read it, and whenever they may later, the view asks for the item
+    // again (request_heading_item()).
     void create_heading_presses(lv_obj_t* heading, ItemKind kind, const std::string& item_id,
-                                std::optional<int64_t> favourite_id);
+                                std::optional<int64_t> favourite_id, uint32_t favourites_read);
 
     // Asks the host for the item whose presses end the heading (create_heading_presses()), whose
     // answer goes to show_heading_favourite(). Called whenever the favourites may have changed
@@ -168,8 +180,15 @@ protected:
     // Called each time the list was built again, rows or not.
     virtual void do_list_built() {}
 
-    // The pages changed: the next do_update() builds the list again.
-    void list_changed() { _changed = true; }
+    // A page asked for came, or did not, and the pages hold the answer: the next do_update() builds
+    // the list again. Called once for each request_page().
+    void list_changed();
+
+    // The model's favourites_changes the marks of the items held were read at, which a screen
+    // opened on one of them is handed with it (create_heading_presses()). While the pages held are
+    // asked for again because the favourites may have changed, it stays what it was until every
+    // one of them came, and stays so when one did not.
+    uint32_t get_favourites_read() const { return _favourites_read; }
 
     // Asks again for the pages held: first for the page of the row at the top of the list, or,
     // while no row is built, for the first page held, or the list's first; once it came, for each
@@ -197,6 +216,7 @@ private:
     void build_page_state(uint32_t page);
     void ask_near_ends();
     void apply_favourites();
+    void finish_rereading();
     void show_presses();
     size_t find_item(const lv_obj_t* row);
     static void back_clicked(lv_event_t* event);

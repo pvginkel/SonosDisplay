@@ -4,8 +4,8 @@
 
 #include "Messages.h"
 
-TracksView::TracksView(UiHost* host, Shell* shell, const Album& album)
-    : ListView(host, shell, album.title), _album(album) {}
+TracksView::TracksView(UiHost* host, Shell* shell, const Album& album, uint32_t favourites_read)
+    : ListView(host, shell, album.title), _album(album), _favourites_read(favourites_read) {}
 
 void TracksView::request_page(uint32_t page) {
     _tracks.ask(page);
@@ -28,7 +28,7 @@ void TracksView::build_row(lv_obj_t* row, size_t index) {
 }
 
 void TracksView::do_render_heading(lv_obj_t* heading) {
-    create_heading_presses(heading, ItemKind::Album, _album.id, _album.favourite_id);
+    create_heading_presses(heading, ItemKind::Album, _album.id, _album.favourite_id, _favourites_read);
 }
 
 // An album that did not come leaves the toggle as it is.
