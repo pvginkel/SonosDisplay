@@ -55,7 +55,8 @@ public:
         ArtworkBody body;
         size_t length{};
         // Why a file that is there brought no picture, for the log, or nullptr: it was not the
-        // picture's and is deleted, or there is no memory for the picture and it stays.
+        // picture's or did not read, and is deleted, or there is no memory for the picture and it
+        // stays.
         const char* problem{};
     };
 
@@ -79,10 +80,11 @@ public:
     void begin();
 
     // The picture, checked against its header. A file that is not there is a miss. So is one that
-    // is not what the store writes for this key, by its marker, version, key, length or CRC; it is
-    // deleted, and `problem` says what was wrong. Without memory for the picture there is none
-    // either: `problem` says so, and the file stays. Only a folder that does not answer turns the
-    // store off.
+    // is not what the store writes for this key, by its marker, version, key, length or CRC, and
+    // one that does not read, as a file a power cut damaged may not; it is deleted, and `problem`
+    // says what was wrong. Without memory for the picture there is none either: `problem` says so,
+    // and the file stays. Only a folder that does not answer turns the store off: at the open, or
+    // at the delete.
     Picture read(const std::string& artwork_id, int32_t size);
 
     // Keeps the picture, and returns whether the folder holds it from here on. A folder with no

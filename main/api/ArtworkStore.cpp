@@ -221,12 +221,13 @@ ArtworkStore::Picture ArtworkStore::read(const std::string& artwork_id, int32_t 
         }
     }
 
-    const auto read_error = errno;
     close(file);
 
+    // A file that does not read is deleted as one that fails its checks is. A power cut can leave
+    // a picture whose clusters run into a free one: FAT fails its read, and its delete stops at that
+    // cluster. A folder that does not answer fails the delete too.
     if (failed) {
-        stop(State::Off, "reading a picture", read_error);
-        return {};
+        picture.problem = "the file does not read";
     }
 
     if (picture.problem) {

@@ -24,9 +24,9 @@ What comes from outside the firmware is the exception, and it is checked where i
 response, a JSON body, an event frame, an artwork header, IoT Support's device configuration, a
 picture read from the TF card. Bad data from there never crashes or restarts the display. It is
 logged and shown: the view says what is wrong, and the device stays usable. A picture from the card
-that fails its checks is logged, deleted from the card and downloaded. A backend that is down never
-restarts the device. An answer the API's document does not allow is refused whole; one it allows is
-never refused for a field the display does not show. A text the backend sends, but not an id, is
+that fails its checks, or does not read, is logged, deleted from the card and downloaded. A backend
+that is down never restarts the device. An answer the API's document does not allow is refused
+whole; one it allows is never refused for a field the display does not show. A text the backend sends, but not an id, is
 read through `read_text()`, which leaves out what the fonts do not draw, so no title shows LVGL's
 placeholder box.
 

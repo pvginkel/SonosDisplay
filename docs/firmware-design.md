@@ -1513,8 +1513,11 @@ kept for it (`docs/adding-a-display.md`).
 - **No cleanup.** Nothing is ever evicted. A card with no room, ENOSPC or EACCES at any step of a
   write, stops the writes until the next restart: the temporary file is deleted, one line is
   logged, and reads go on. Any other error of the card turns it off until the next restart, and
-  every picture is downloaded. A file a power cut damaged fails its checks and is a miss; a card
-  a power cut left with no file system FAT finds is formatted at the next start.
+  every picture is downloaded. A file a power cut damaged fails its checks or does not read, and
+  is deleted and a miss; only a delete that fails turns the card off. A picture whose clusters a
+  power cut left running into a free one is such a file: FAT fails its read (FR_INT_ERR, EIO), and
+  its delete stops at that cluster. A card a power cut left with no file system FAT finds is
+  formatted at the next start.
 - **The card's task**, `card`, makes every access to the card: the mount, a format, the clearing
   at start, and then the reads, writes and erases the UI task asks for, from a queue of 64. A read
   goes to the front, since a view waits for it, and the loader asks for one at a time; the writes

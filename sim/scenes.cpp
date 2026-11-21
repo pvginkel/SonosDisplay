@@ -2736,8 +2736,8 @@ static void expect_store_keys() {
            "a cover read from the card is not one the device draws");
 }
 
-// A file that is not what the store writes for the key is a miss and no error: the file is
-// deleted, and the picture is kept again when it is written again.
+// A file that is not what the store writes for the key, or that does not read, is a miss and no
+// error: the file is deleted, and the picture is kept again when it is written again.
 static void expect_store_deletes_what_is_not_the_picture() {
     CardFolder folder;
     CardStore card(folder.get_path());
@@ -2808,6 +2808,17 @@ static void expect_store_deletes_what_is_not_the_picture() {
            "a picture was not written");
     expect_refused(read_file(card.store.get_path(ARTWORK_PAUSED, BAR_COVER_SIZE)),
                    "another picture's file was not a miss, or it stayed");
+
+    // A file that does not read, as one a power cut left running into a free cluster: the host has
+    // no file to read in an empty folder, and deletes the folder.
+    std::filesystem::remove(path);
+    std::filesystem::create_directory(path);
+    expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, true) && !is_there(path),
+           "a file that does not read was not a miss, or it stayed");
+    expect(is_on(card.store), "a file that does not read stopped the store");
+    expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) &&
+               holds(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body) && read_file(path) == good,
+           "a picture was not kept again once a file that did not read was deleted");
 
     // Without memory for the picture there is none to hand over, and its file is not at fault.
     CardStore short_of_memory(folder.get_path(), SimHost::CARD_FORMAT,
@@ -2944,7 +2955,7 @@ static void expect_store_stops_writing_to_a_full_card() {
 }
 
 // A card that fails turns the store off, where a miss does not: nothing is read or written after
-// it, on a read, on a write, or with no folder at all.
+// it, on a read whose file is not deleted, on a write, or with no folder at all.
 static void expect_store_off_after_an_error() {
     const auto body = SimHost::make_artwork(ARTWORK_PLAYING, BAR_COVER_SIZE);
     const auto is_off = [](const ArtworkStore& store) { return store.get_state() == ArtworkStore::State::Off; };
@@ -2955,14 +2966,18 @@ static void expect_store_off_after_an_error() {
         card.store.begin();
         expect(keeps(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE, body), "a picture was not written");
 
-        // A folder where the picture's file belongs: the host has no file to read there.
-        std::filesystem::create_directories(card.store.get_path(ARTWORK_PAUSED, BAR_COVER_SIZE));
-        expect(misses(card.store, ARTWORK_PAUSED, BAR_COVER_SIZE) && is_off(card.store),
-               "a read that failed did not turn the store off");
+        // A folder that holds a file where the picture's file belongs: the host has no file to read
+        // there, and deletes no folder that is not empty.
+        const auto path = card.store.get_path(ARTWORK_PAUSED, BAR_COVER_SIZE);
+        std::filesystem::create_directories(path);
+        write_file(path + "/held", {});
+        const auto picture = card.store.read(ARTWORK_PAUSED, BAR_COVER_SIZE);
+        expect(!picture.body && is_off(card.store) && is_there(path),
+               "a read that failed, and whose file was not deleted, did not turn the store off");
         expect(card.store.get_fault().doing && card.store.get_fault().error, "a store that is off does not say why");
 
         expect(misses(card.store, ARTWORK_PLAYING, BAR_COVER_SIZE), "a picture was read with the store off");
-        expect(!keeps(card.store, ARTWORK_PAUSED, COVER_SIZE, body) && count_files(folder.get_path()) == 1,
+        expect(!keeps(card.store, ARTWORK_PAUSED, COVER_SIZE, body) && count_files(folder.get_path()) == 2,
                "a picture was written with the store off");
     }
 
@@ -3574,8 +3589,11 @@ static void expect_downloads_without_a_card() {
     CardFolder folder;
     put_on_card(folder.get_path(), ARTWORK_PLAYING, COVER_SIZE, SimHost::make_artwork(ARTWORK_PLAYING, COVER_SIZE));
 
-    // A folder where a picture's file belongs: the host has no file to read there.
-    std::filesystem::create_directories(CardStore(folder.get_path()).store.get_path(ARTWORK_PAUSED, COVER_SIZE));
+    // A folder that holds a file where a picture's file belongs: the host has no file to read there,
+    // and deletes no folder that is not empty.
+    const auto failing = CardStore(folder.get_path()).store.get_path(ARTWORK_PAUSED, COVER_SIZE);
+    std::filesystem::create_directories(failing);
+    write_file(failing + "/held", {});
 
     SimHost host(folder.get_path());
     host.hold_card();
