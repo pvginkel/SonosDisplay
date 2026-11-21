@@ -52,12 +52,23 @@ windowed; an LVGL option changed in one configuration is changed in the other.
 
 ## 4. The backend, read-only
 
-Where the slice's code calls a backend endpoint, call it once from the pod with `curl` against the
-deployed SonosController and compare the response with what the firmware parses: field names,
-types, paging, the error envelope. The backend's address is SonosController's own; find it from
-that project, and never write it into this repo. GET requests only. A command that changes what
-the speaker does is run only against the Garage speaker, at low volume, and leaves its queue,
-position and volume as they were found; Zitkuil is a living space and is not touched.
+The contract is the deployed backend's OpenAPI document, which SonosController serves at
+`/api/docs/openapi.json`. Its host is the `host` in `pvginkel/SonosControllerDeploy`
+`config/prd/values.yaml`; it is never written into this repo, and neither is any other address of
+the operator's network.
+
+**Against the document.** Fetch it once from the pod with `curl`. For every schema the slice adds
+or changes, compare the document with what the firmware parses or writes: a response, a request
+body, an event frame. Compare field names, types, the required fields, enum values, paging and the
+error envelope. A schema the slice relies on that the document lacks, or one that differs from
+what the firmware does, is a blocking finding. This check holds whatever the backend has stored.
+
+**Against a live response.** Then call each endpoint the slice's code calls once, and compare the
+response with what the firmware parses. This is a second check, and it only proves something where
+the response holds data: an empty list compares nothing, and is recorded as such, never as a pass.
+GET requests only. A command that changes what the speaker does is run only against the Garage
+speaker, at low volume, and leaves its queue, position and volume as they were found; Zitkuil is a
+living space and is not touched.
 
 ## 5. Push, then follow the build
 
